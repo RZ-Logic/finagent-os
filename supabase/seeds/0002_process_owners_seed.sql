@@ -1,0 +1,65 @@
+﻿-- ============================================================================
+-- FinAgent OS — Seed 0002: process_owners
+-- ============================================================================
+-- Seeds the three baseline process owner identities used throughout the
+-- platform demos and the reconciliation agent's HITL routing.
+--
+-- Prerequisites:
+--   1. Migration 20260420_0002_process_owners.sql has run successfully.
+--   2. Three Supabase Auth users have been created via Dashboard
+--      (Authentication → Users → Add User, with Auto Confirm User = ON):
+--        - sarah.chen@finagent-os.demo      (Controller)
+--        - marcus.patel@finagent-os.demo    (CFO)
+--        - aisha.okonkwo@finagent-os.demo   (FP&A Lead)
+--
+-- Design notes:
+--   - UUIDs are NOT hardcoded. The seed joins auth.users by email, so the
+--     same script works in any environment where those three auth users
+--     have been created with matching emails.
+--   - Escalation is populated via a second UPDATE pass because the
+--     hierarchy is self-referential (Aisha → Sarah → Marcus) and rows
+--     cannot reference themselves before they exist.
+--   - Running this seed more than once will fail on the UNIQUE(email)
+--     constraint. That is intentional — seeds are one-time, not
+--     idempotent. If you need to re-seed, TRUNCATE process_owners first.
+--
+-- Escalation hierarchy:
+--   Aisha Okonkwo  (FP&A Lead)   →  Sarah Chen  (Controller)
+--   Sarah Chen     (Controller)  →  Marcus Patel (CFO)
+--   Marcus Patel   (CFO)         →  NULL (top of hierarchy)
+--
+-- Author: Rizwan Ahmed, ACCA · Velocyt Consulting
+-- Date:   2026-04-20
+-- ============================================================================
+
+-- --- Pass 1: Insert the three rows without escalation ----------------------
+
+INSERT INTO public.process_owners (id, name, role, email, escalation_to)
+SELECT u.id, 'Sarah Chen', 'Controller', 'sarah.chen@finagent-os.demo', NULL
+FROM auth.users u WHERE u.email = 'sarah.chen@finagent-os.demo';
+
+INSERT INTO public.process_owners (id, name, role, email, escalation_to)
+SELECT u.id, 'Marcus Patel', 'CFO', 'marcus.patel@finagent-os.demo', NULL
+FROM auth.users u WHERE u.email = 'marcus.patel@finagent-os.demo';
+
+INSERT INTO public.process_owners (id, name, role, email, escalation_to)
+SELECT u.id, 'Aisha Okonkwo', 'FP&A Lead', 'aisha.okonkwo@finagent-os.demo', NULL
+FROM auth.users u WHERE u.email = 'aisha.okonkwo@finagent-os.demo';
+
+-- --- Pass 2: Populate the escalation chain ---------------------------------
+
+-- Sarah (Controller) escalates to Marcus (CFO)
+UPDATE public.process_owners
+SET escalation_to = (
+  SELECT id FROM public.process_owners WHERE email = 'marcus.patel@finagent-os.demo'
+)
+WHERE email = 'sarah.chen@finagent-os.demo';
+
+-- Aisha (FP&A Lead) escalates to Sarah (Controller)
+UPDATE public.process_owners
+SET escalation_to = (
+  SELECT id FROM public.process_owners WHERE email = 'sarah.chen@finagent-os.demo'
+)
+WHERE email = 'aisha.okonkwo@finagent-os.demo';
+
+-- Marcus (CFO) has no escalation target — left NULL.

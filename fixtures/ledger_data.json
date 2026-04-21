@@ -1,0 +1,52 @@
+{
+  "_meta": {
+    "description": "Simulated internal client-liability ledger. In production this comes from NetSuite General Ledger saved searches. Paired with fixtures/wallet_data.json to exercise every branch of the Policy Outcome Decision Matrix.",
+    "snapshot_timestamp": "2026-04-16T12:00:00Z",
+    "source": "simulated_fixture",
+    "production_target": "NetSuite General Ledger — Saved Search API"
+  },
+  "ledger": [
+    {
+      "asset": "BTC",
+      "client_liabilities": 167188.68,
+      "account_count": 42871,
+      "_scenario": "Over-reserved ratio 1.149 — matches Kraken's Dec 2025 published 114.9% BTC ratio."
+    },
+    {
+      "asset": "ETH",
+      "client_liabilities": 2847100.50,
+      "account_count": 312847,
+      "_scenario": "Small positive delta of 291.68 ETH vs wallet — plausible pending-settlement timing."
+    },
+    {
+      "asset": "USDC",
+      "client_liabilities": 891723456.00,
+      "account_count": 487291,
+      "_scenario": "Exact match."
+    },
+    {
+      "asset": "USDT",
+      "client_liabilities": 1234500000.00,
+      "account_count": 521038,
+      "_scenario": "Wallet exceeds ledger by $67,890.50 — small but unexplained; above USDT materiality threshold of $10,000."
+    },
+    {
+      "asset": "SOL",
+      "client_liabilities": 9200000.00,
+      "account_count": 89472,
+      "_scenario": "Ledger claims 9.2M SOL in client liabilities but wallet only holds 8.47M — under-reserved at 92.1%. RESERVE RATIO BREACH."
+    },
+    {
+      "asset": "XRP",
+      "client_liabilities": 127500000.00,
+      "account_count": 67291,
+      "_scenario": "Wallet slightly exceeds ledger by 93,847 XRP — within tolerance."
+    },
+    {
+      "asset": "ADA",
+      "client_liabilities": -150000.00,
+      "account_count": 31847,
+      "_scenario": "NEGATIVE ledger liability injected. Real cause could be a refund batch not yet offset, or a data error. Per Kraken's 2014 krakendb note, any large negative value at a leaf requires investigation. FAO-REC-007 triggers."
+    }
+  ]
+}

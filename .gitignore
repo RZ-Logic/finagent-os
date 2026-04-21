@@ -1,0 +1,33 @@
+﻿# Secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets/
+
+# Supabase local
+supabase/.branches
+supabase/.temp
+
+# n8n local state
+.n8n/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

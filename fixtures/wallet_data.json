@@ -1,0 +1,60 @@
+{
+  "_meta": {
+    "description": "Simulated on-chain wallet balances. In production this comes from Fireblocks /v1/vault/accounts/{id}. Intentionally seeded to exercise every branch of the Policy Outcome Decision Matrix (see docs/SOX-MAPPING.md and fixtures/README.md).",
+    "snapshot_timestamp": "2026-04-16T12:00:00Z",
+    "source": "simulated_fixture",
+    "production_target": "Fireblocks REST API",
+    "scenario_count": 7
+  },
+  "wallets": [
+    {
+      "asset": "BTC",
+      "wallet_balance": 192091.25,
+      "usd_per_unit": 98000.00,
+      "last_block": 829847,
+      "_scenario": "Over-reserved at ~114.9% (matches Kraken Dec 2025 published ratio). Expected policy outcome: ALLOW."
+    },
+    {
+      "asset": "ETH",
+      "wallet_balance": 2847392.18,
+      "usd_per_unit": 3400.00,
+      "last_block": 19284739,
+      "_scenario": "Slightly over-reserved, small settlement-timing delta. Expected AI advisory: BENIGN_TIMING. Expected policy outcome: ALLOW_WITH_OBLIGATIONS."
+    },
+    {
+      "asset": "USDC",
+      "wallet_balance": 891723456.00,
+      "usd_per_unit": 1.00,
+      "last_block": 19284739,
+      "_scenario": "Exact match. Expected AI advisory: CLEAN. Expected policy outcome: ALLOW."
+    },
+    {
+      "asset": "USDT",
+      "wallet_balance": 1234567890.50,
+      "usd_per_unit": 1.00,
+      "last_block": 19284739,
+      "_scenario": "Small discrepancy ($67,890.50, ~0.0055%) — below materiality but unexplained. Expected AI advisory: ANOMALY. Expected policy outcome: REQUIRE_HUMAN (materiality-adjacent; $67K exceeds USDT threshold of $10K)."
+    },
+    {
+      "asset": "SOL",
+      "wallet_balance": 8472931.45,
+      "usd_per_unit": 180.00,
+      "last_block": 245789234,
+      "_scenario": "Under-reserved at 92.1% ratio. MATERIAL. Expected policy outcome: REQUIRE_HUMAN (critical, 2 approvers)."
+    },
+    {
+      "asset": "XRP",
+      "wallet_balance": 127593847.00,
+      "usd_per_unit": 2.15,
+      "last_block": 84729384,
+      "_scenario": "Slightly over-reserved (~0.07%). Expected AI advisory: CLEAN. Expected policy outcome: ALLOW."
+    },
+    {
+      "asset": "ADA",
+      "wallet_balance": 47293847.92,
+      "usd_per_unit": 0.72,
+      "last_block": 10284739,
+      "_scenario": "Exact match at the wallet level; however see ledger_data.json — ADA has a negative client liability injection simulating the 'negative leaf' concern Kraken flagged in krakendb (2014). Expected policy outcome: REQUIRE_HUMAN (negative-balance anomaly)."
+    }
+  ]
+}

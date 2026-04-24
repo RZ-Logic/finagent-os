@@ -1,0 +1,370 @@
+{
+  "name": "Writer",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "jsonExample",
+        "jsonExample": "{\n  \"correlation_id\": \"11111111-1111-1111-1111-111111111111\",\n  \"execution_id\": \"22222222-2222-2222-2222-222222222222\",\n  \"agent_id\": \"fao_reserve_recon_v1\",\n  \"risk_tier\": \"RED\",\n  \"inputs\": {\"test\": \"smoke test\"},\n  \"ai_prompt\": null,\n  \"ai_output\": null,\n  \"ai_confidence\": null,\n  \"fractional_cost_usd\": null,\n  \"policy_outcome\": \"ALLOW\",\n  \"policy_sub_tier\": null,\n  \"policy_rationale\": \"Smoke test of Shadow Ledger Writer\",\n  \"obligations\": [],\n  \"hitl_status\": \"NOT_REQUIRED\",\n  \"hitl_approver_id\": null,\n  \"status\": \"SUCCESS\",\n  \"error_details\": null\n}"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -256,
+        80
+      ],
+      "id": "0e8ce6e6-3570-45e6-a63f-4786330d8581",
+      "name": "Trigger input schema"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\n// Required NOT NULL fields per shadow_ledger schema\nconst required = [\n  'correlation_id',\n  'execution_id',\n  'agent_id',\n  'risk_tier',\n  'policy_outcome',\n  'policy_rationale',\n  'status'\n];\n\nconst missing = required.filter(f => input[f] === undefined || input[f] === null || input[f] === '');\nif (missing.length > 0) {\n  throw new Error(`FAO-GOV-001 writer: missing required field(s): ${missing.join(', ')}`);\n}\n\n// Enum validation\nconst validRiskTiers = ['GREEN', 'AMBER', 'RED'];\nif (!validRiskTiers.includes(input.risk_tier)) {\n  throw new Error(`FAO-GOV-001 writer: invalid risk_tier '${input.risk_tier}'. Must be one of: ${validRiskTiers.join(', ')}`);\n}\n\nconst validPolicyOutcomes = ['ALLOW', 'ALLOW_WITH_OBLIGATIONS', 'REQUIRE_HUMAN', 'DENY', 'BLOCKED'];\nif (!validPolicyOutcomes.includes(input.policy_outcome)) {\n  throw new Error(`FAO-GOV-001 writer: invalid policy_outcome '${input.policy_outcome}'. Must be one of: ${validPolicyOutcomes.join(', ')}`);\n}\n\nconst validStatuses = ['SUCCESS', 'FAILURE', 'PARTIAL', 'ROLLED_BACK'];\nif (!validStatuses.includes(input.status)) {\n  throw new Error(`FAO-GOV-001 writer: invalid status '${input.status}'. Must be one of: ${validStatuses.join(', ')}`);\n}\n\n// UUID format check\nconst uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;\nif (!uuidPattern.test(input.correlation_id)) {\n  throw new Error(`FAO-GOV-001 writer: correlation_id is not a valid UUID: '${input.correlation_id}'`);\n}\nif (!uuidPattern.test(input.execution_id)) {\n  throw new Error(`FAO-GOV-001 writer: execution_id is not a valid UUID: '${input.execution_id}'`);\n}\n\n// Normalize — fill optional nulls\nconst normalized = {\n  correlation_id: input.correlation_id,\n  execution_id: input.execution_id,\n  agent_id: input.agent_id,\n  risk_tier: input.risk_tier,\n  inputs: input.inputs ?? {},\n  ai_prompt: input.ai_prompt ?? null,\n  ai_output: input.ai_output ?? null,\n  ai_confidence: input.ai_confidence ?? null,\n  fractional_cost_usd: input.fractional_cost_usd ?? null,\n  policy_outcome: input.policy_outcome,\n  policy_sub_tier: input.policy_sub_tier ?? null,\n  policy_rationale: input.policy_rationale,\n  obligations: input.obligations ?? [],\n  hitl_status: input.hitl_status ?? 'NOT_REQUIRED',\n  hitl_approver_id: input.hitl_approver_id ?? null,\n  status: input.status,\n  error_details: input.error_details ?? null\n};\n\nreturn [{ json: normalized }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        16,
+        80
+      ],
+      "id": "a2e7985e-9a49-4b4c-8c40-dfdf8c595866",
+      "name": "Validate Payload"
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "shadow_ledger",
+          "mode": "list",
+          "cachedResultName": "shadow_ledger"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {
+            "ledger_id": 0,
+            "ai_confidence": 0,
+            "fractional_cost_usd": 0
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "ledger_id",
+              "displayName": "ledger_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "correlation_id",
+              "displayName": "correlation_id",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "execution_id",
+              "displayName": "execution_id",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "agent_id",
+              "displayName": "agent_id",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "event_timestamp",
+              "displayName": "event_timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "risk_tier",
+              "displayName": "risk_tier",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "options",
+              "canBeUsedToMatch": true,
+              "options": [
+                {
+                  "name": "GREEN",
+                  "value": "GREEN"
+                },
+                {
+                  "name": "AMBER",
+                  "value": "AMBER"
+                },
+                {
+                  "name": "RED",
+                  "value": "RED"
+                },
+                {
+                  "name": "BLOCKED",
+                  "value": "BLOCKED"
+                }
+              ]
+            },
+            {
+              "id": "inputs",
+              "displayName": "inputs",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "ai_prompt",
+              "displayName": "ai_prompt",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "ai_output",
+              "displayName": "ai_output",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "ai_confidence",
+              "displayName": "ai_confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "fractional_cost_usd",
+              "displayName": "fractional_cost_usd",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "policy_outcome",
+              "displayName": "policy_outcome",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "options",
+              "canBeUsedToMatch": true,
+              "options": [
+                {
+                  "name": "ALLOW",
+                  "value": "ALLOW"
+                },
+                {
+                  "name": "ALLOW_WITH_OBLIGATIONS",
+                  "value": "ALLOW_WITH_OBLIGATIONS"
+                },
+                {
+                  "name": "REQUIRE_HUMAN",
+                  "value": "REQUIRE_HUMAN"
+                },
+                {
+                  "name": "DENY",
+                  "value": "DENY"
+                },
+                {
+                  "name": "BLOCKED",
+                  "value": "BLOCKED"
+                }
+              ]
+            },
+            {
+              "id": "policy_sub_tier",
+              "displayName": "policy_sub_tier",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "options",
+              "canBeUsedToMatch": true,
+              "options": [
+                {
+                  "name": "STANDARD",
+                  "value": "STANDARD"
+                },
+                {
+                  "name": "CRITICAL",
+                  "value": "CRITICAL"
+                }
+              ]
+            },
+            {
+              "id": "policy_rationale",
+              "displayName": "policy_rationale",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "obligations",
+              "displayName": "obligations",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "array",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "hitl_status",
+              "displayName": "hitl_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "options",
+              "canBeUsedToMatch": true,
+              "options": [
+                {
+                  "name": "NOT_REQUIRED",
+                  "value": "NOT_REQUIRED"
+                },
+                {
+                  "name": "PENDING",
+                  "value": "PENDING"
+                },
+                {
+                  "name": "APPROVED",
+                  "value": "APPROVED"
+                },
+                {
+                  "name": "REJECTED",
+                  "value": "REJECTED"
+                }
+              ]
+            },
+            {
+              "id": "hitl_approver_id",
+              "displayName": "hitl_approver_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "options",
+              "canBeUsedToMatch": true,
+              "options": [
+                {
+                  "name": "SUCCESS",
+                  "value": "SUCCESS"
+                },
+                {
+                  "name": "FAILURE",
+                  "value": "FAILURE"
+                },
+                {
+                  "name": "PARTIAL",
+                  "value": "PARTIAL"
+                },
+                {
+                  "name": "ROLLED_BACK",
+                  "value": "ROLLED_BACK"
+                }
+              ]
+            },
+            {
+              "id": "error_details",
+              "displayName": "error_details",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        368,
+        80
+      ],
+      "id": "d02c7cfe-2068-4db6-a212-bc1d3954f3bf",
+      "name": "Insert Ledger Row",
+      "credentials": {
+        "postgres": {
+          "id": "Vh67T849XENVGttf",
+          "name": "Postgres account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Trigger input schema": {
+      "main": [
+        [
+          {
+            "node": "Validate Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Payload": {
+      "main": [
+        [
+          {
+            "node": "Insert Ledger Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "b524cadf-17bf-4212-87e3-ad69786e5ee2",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d7e19fca9705d4d0c36e6fe71822071e2ec1e1c76f266658ed6763dfc41db437"
+  },
+  "id": "dQslIEVwF3WqMliT",
+  "tags": []
+}

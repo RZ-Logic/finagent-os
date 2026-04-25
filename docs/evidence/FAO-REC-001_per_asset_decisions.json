@@ -1,0 +1,243 @@
+[
+  {
+    "correlation_id": "8b268580-e2d4-4282-b5cf-28e5b2c00abc",
+    "execution_id": "96e22c13-05ea-4d86-b91a-35e9b4b05441",
+    "agent_id": "fao_reserve_recon_v1",
+    "risk_tier": "RED",
+    "inputs": {
+      "event_type": "ASSET_RECONCILED",
+      "asset": "BTC",
+      "wallet": 167690.25,
+      "ledger": 167188.68,
+      "ratio": 1.003000023685814,
+      "discrepancy": 501.570000000007,
+      "band_status": "BELOW_BAND_LOWER",
+      "threshold": {
+        "asset_class": "Major",
+        "ratio_floor": 1,
+        "ratio_band_lower": 1.05,
+        "ratio_band_upper": 1.25,
+        "materiality_usd": 500000
+      }
+    },
+    "ai_prompt": null,
+    "ai_output": null,
+    "ai_confidence": null,
+    "fractional_cost_usd": null,
+    "policy_outcome": "ALLOW_WITH_OBLIGATIONS",
+    "policy_sub_tier": null,
+    "policy_rationale": "FAO-REC-006 BTC ratio 1.003000 below expected band lower 1.0500 but above floor 1.0000. Reserves cover liabilities but over-reservation posture has drifted. Allowed with weekly-review obligation.",
+    "obligations": [
+      "weekly_review_required",
+      "flag_drift_pattern_to_controller"
+    ],
+    "hitl_status": "NOT_REQUIRED",
+    "hitl_approver_id": null,
+    "status": "SUCCESS",
+    "error_details": null
+  },
+  {
+    "correlation_id": "8b268580-e2d4-4282-b5cf-28e5b2c00abc",
+    "execution_id": "96e22c13-05ea-4d86-b91a-35e9b4b05441",
+    "agent_id": "fao_reserve_recon_v1",
+    "risk_tier": "RED",
+    "inputs": {
+      "event_type": "ASSET_RECONCILED",
+      "asset": "ETH",
+      "wallet": 2884112,
+      "ledger": 2847100,
+      "ratio": 1.012999894629623,
+      "discrepancy": 37012,
+      "band_status": "IN_BAND",
+      "threshold": {
+        "asset_class": "Major",
+        "ratio_floor": 1,
+        "ratio_band_lower": 1,
+        "ratio_band_upper": 1.1,
+        "materiality_usd": 250000
+      }
+    },
+    "ai_prompt": null,
+    "ai_output": null,
+    "ai_confidence": null,
+    "fractional_cost_usd": null,
+    "policy_outcome": "ALLOW",
+    "policy_sub_tier": null,
+    "policy_rationale": "FAO-REC-006 ETH ratio 1.013000 within expected band [1.0000, 1.1000]. Reserved as expected.",
+    "obligations": [],
+    "hitl_status": "NOT_REQUIRED",
+    "hitl_approver_id": null,
+    "status": "SUCCESS",
+    "error_details": null
+  },
+  {
+    "correlation_id": "8b268580-e2d4-4282-b5cf-28e5b2c00abc",
+    "execution_id": "96e22c13-05ea-4d86-b91a-35e9b4b05441",
+    "agent_id": "fao_reserve_recon_v1",
+    "risk_tier": "RED",
+    "inputs": {
+      "event_type": "ASSET_RECONCILED",
+      "asset": "USDC",
+      "wallet": 891723456,
+      "ledger": 891723456,
+      "ratio": 1,
+      "discrepancy": 0,
+      "band_status": "IN_BAND",
+      "threshold": {
+        "asset_class": "Stablecoin",
+        "ratio_floor": 1,
+        "ratio_band_lower": 1,
+        "ratio_band_upper": 1.005,
+        "materiality_usd": 10000
+      }
+    },
+    "ai_prompt": null,
+    "ai_output": null,
+    "ai_confidence": null,
+    "fractional_cost_usd": null,
+    "policy_outcome": "ALLOW",
+    "policy_sub_tier": null,
+    "policy_rationale": "FAO-REC-006 USDC ratio 1.000000 within expected band [1.0000, 1.0050]. Reserved as expected.",
+    "obligations": [],
+    "hitl_status": "NOT_REQUIRED",
+    "hitl_approver_id": null,
+    "status": "SUCCESS",
+    "error_details": null
+  },
+  {
+    "correlation_id": "8b268580-e2d4-4282-b5cf-28e5b2c00abc",
+    "execution_id": "96e22c13-05ea-4d86-b91a-35e9b4b05441",
+    "agent_id": "fao_reserve_recon_v1",
+    "risk_tier": "RED",
+    "inputs": {
+      "event_type": "ASSET_RECONCILED",
+      "asset": "USDT",
+      "wallet": 1234567890.5,
+      "ledger": 1234500000,
+      "ratio": 1.0000549943296881,
+      "discrepancy": 67890.5,
+      "band_status": "IN_BAND_USD_MATERIAL",
+      "threshold": {
+        "asset_class": "Stablecoin",
+        "ratio_floor": 1,
+        "ratio_band_lower": 1,
+        "ratio_band_upper": 1.005,
+        "materiality_usd": 10000
+      }
+    },
+    "ai_prompt": null,
+    "ai_output": null,
+    "ai_confidence": null,
+    "fractional_cost_usd": null,
+    "policy_outcome": "REQUIRE_HUMAN",
+    "policy_sub_tier": "STANDARD",
+    "policy_rationale": "FAO-REC-002 USDT stablecoin: ratio 1.000055 within band [1.0000, 1.0050], BUT absolute discrepancy $67890.50 exceeds materiality threshold $10000.00. Stablecoin units are 1:1 USD; small ratio deviations on large pools are still material.",
+    "obligations": [],
+    "hitl_status": "PENDING",
+    "hitl_approver_id": null,
+    "status": "SUCCESS",
+    "error_details": null
+  },
+  {
+    "correlation_id": "8b268580-e2d4-4282-b5cf-28e5b2c00abc",
+    "execution_id": "96e22c13-05ea-4d86-b91a-35e9b4b05441",
+    "agent_id": "fao_reserve_recon_v1",
+    "risk_tier": "RED",
+    "inputs": {
+      "event_type": "ASSET_RECONCILED",
+      "asset": "SOL",
+      "wallet": 8740000,
+      "ledger": 9200000,
+      "ratio": 0.95,
+      "discrepancy": -460000,
+      "band_status": "BELOW_FLOOR",
+      "threshold": {
+        "asset_class": "Mid_cap",
+        "ratio_floor": 1,
+        "ratio_band_lower": 1,
+        "ratio_band_upper": 1.15,
+        "materiality_usd": 100000
+      }
+    },
+    "ai_prompt": null,
+    "ai_output": null,
+    "ai_confidence": null,
+    "fractional_cost_usd": null,
+    "policy_outcome": "REQUIRE_HUMAN",
+    "policy_sub_tier": "CRITICAL",
+    "policy_rationale": "FAO-REC-004 SOL ratio 0.950000 below floor 1.0000. UNDER-RESERVED — wallet holdings insufficient to cover ledger liabilities. Routed to CRITICAL HITL (RED tier, 2 approvers).",
+    "obligations": [],
+    "hitl_status": "PENDING",
+    "hitl_approver_id": null,
+    "status": "SUCCESS",
+    "error_details": null
+  },
+  {
+    "correlation_id": "8b268580-e2d4-4282-b5cf-28e5b2c00abc",
+    "execution_id": "96e22c13-05ea-4d86-b91a-35e9b4b05441",
+    "agent_id": "fao_reserve_recon_v1",
+    "risk_tier": "RED",
+    "inputs": {
+      "event_type": "ASSET_RECONCILED",
+      "asset": "XRP",
+      "wallet": 128265000,
+      "ledger": 127500000,
+      "ratio": 1.006,
+      "discrepancy": 765000,
+      "band_status": "IN_BAND",
+      "threshold": {
+        "asset_class": "Major",
+        "ratio_floor": 1,
+        "ratio_band_lower": 1,
+        "ratio_band_upper": 1.1,
+        "materiality_usd": 100000
+      }
+    },
+    "ai_prompt": null,
+    "ai_output": null,
+    "ai_confidence": null,
+    "fractional_cost_usd": null,
+    "policy_outcome": "ALLOW",
+    "policy_sub_tier": null,
+    "policy_rationale": "FAO-REC-006 XRP ratio 1.006000 within expected band [1.0000, 1.1000]. Reserved as expected.",
+    "obligations": [],
+    "hitl_status": "NOT_REQUIRED",
+    "hitl_approver_id": null,
+    "status": "SUCCESS",
+    "error_details": null
+  },
+  {
+    "correlation_id": "8b268580-e2d4-4282-b5cf-28e5b2c00abc",
+    "execution_id": "96e22c13-05ea-4d86-b91a-35e9b4b05441",
+    "agent_id": "fao_reserve_recon_v1",
+    "risk_tier": "RED",
+    "inputs": {
+      "event_type": "ASSET_RECONCILED",
+      "asset": "ADA",
+      "wallet": 47293847,
+      "ledger": -150000,
+      "ratio": null,
+      "discrepancy": 47443847,
+      "band_status": "NEGATIVE_LEDGER",
+      "threshold": {
+        "asset_class": "Major",
+        "ratio_floor": 1,
+        "ratio_band_lower": 1,
+        "ratio_band_upper": 1.1,
+        "materiality_usd": 100000
+      }
+    },
+    "ai_prompt": null,
+    "ai_output": null,
+    "ai_confidence": null,
+    "fractional_cost_usd": null,
+    "policy_outcome": "REQUIRE_HUMAN",
+    "policy_sub_tier": "CRITICAL",
+    "policy_rationale": "FAO-REC-007 ADA negative liability detected (ledger=-150000). Cannot compute meaningful ratio. Routed to CRITICAL HITL — Controller + CFO review required (RED tier, 2 approvers). Pattern flagged in krakendb 2014 reference implementation as operational concern.",
+    "obligations": [],
+    "hitl_status": "PENDING",
+    "hitl_approver_id": null,
+    "status": "SUCCESS",
+    "error_details": null
+  }
+]

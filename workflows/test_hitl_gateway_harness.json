@@ -1,0 +1,110 @@
+{
+  "name": "Test HITL Gateway Harness",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        640
+      ],
+      "id": "e06fb2a2-ed5e-46d5-94f9-79be19d4403d",
+      "name": "When clicking 'Execute workflow'"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// Test Harness — HITL Gateway smoke test\n// ----------------------------------------------------------------------------\n// Simulates a flagship REQUIRE_HUMAN execution rollup payload to exercise\n// the gateway end-to-end without running the full flagship.\n//\n// Uses Aisha as the invoker (FP&A Lead) so when we later test the SoD\n// trigger from the Approval Handler, Aisha's attempt to approve fires\n// FAO-GOV-004 (loud) and Sarah's attempt succeeds. The choice of invoker\n// is intentional and architecturally meaningful, not arbitrary.\n//\n// Each test run must use a unique correlation_id because hitl_queue has\n// UNIQUE(correlation_id). UUID v4 inline (same pattern as flagship Init).\n// ============================================================================\n\nconst randomUUID = () => {\n  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {\n    const r = Math.random() * 16 | 0;\n    const v = c === 'x' ? r : (r & 0x3 | 0x8);\n    return v.toString(16);\n  });\n};\n\nreturn [{\n  json: {\n    correlation_id:      randomUUID(),\n    execution_id:        randomUUID(),\n    agent_id:            'fao_reserve_recon_v1',\n    agent_invoker_email: 'aisha.okonkwo@finagent-os.demo',\n    risk_tier:           'RED',\n    policy_sub_tier:     'CRITICAL',\n    policy_rationale:    'FAO-REC-001 execution rollup over 7 assets. Outcomes: 3 ALLOW, 1 ALLOW_WITH_OBLIGATIONS, 3 REQUIRE_HUMAN. Worst-asset rule applied: execution outcome = REQUIRE_HUMAN (CRITICAL). Escalated assets: USDT (REQUIRE_HUMAN/STANDARD), SOL (REQUIRE_HUMAN/CRITICAL), ADA (REQUIRE_HUMAN/CRITICAL).',\n    escalated_assets:    ['USDT', 'SOL', 'ADA'],\n    execution_summary:   'Smoke test of HITL Gateway — simulated REQUIRE_HUMAN rollup'\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        640
+      ],
+      "id": "fed6c724-9ccd-4ea1-a655-69df9dfc33fd",
+      "name": "Compose Test Payload"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "mUAC9qIMkVzlV5qw",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/mUAC9qIMkVzlV5qw",
+          "cachedResultName": "fao_hitl_gateway_v1"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        448,
+        640
+      ],
+      "id": "235e5d4c-32da-4313-8e55-a4671ac6a615",
+      "name": "Call HITL Gateway"
+    },
+    {
+      "parameters": {
+        "content": "## Test HITL Gateway Harness\n\nReusable smoke test for `fao_hitl_gateway_v1`. Exercises the gateway end-to-end with a simulated flagship REQUIRE_HUMAN rollup.\n\n### Pre-import setup\n\n- **`Call HITL Gateway` node**: after importing the gateway workflow into n8n, open this node and select `fao_hitl_gateway_v1` from the workflow dropdown. (The placeholder ID won't resolve — n8n will show an error until you pick the workflow manually.)\n\n### Expected result on success\n\n- 1 row inserted into `public.hitl_queue` (PENDING, sub_tier=CRITICAL, agent_invoker_id = Aisha's UUID, timeout_at = NOW() + 24 hours)\n- 1 row inserted into `public.shadow_ledger` (event_type=HITL_REQUESTED, hitl_status=PENDING, status=SUCCESS)\n- 1 Slack message posted to #fao-reconciliation\n\n### Expected result on a deliberate-failure test\n\n- Change `agent_invoker_email` to a non-existent email (e.g. `nobody@finagent-os.demo`)\n- Re-run\n- The gateway's `Validate Insert + Compose` Code node throws loudly with `FAO-GOV-004 hitl_gateway: INSERT returned zero rows...`\n- This is the intended behavior — silent zero-row inserts are exactly what this gateway exists to prevent\n\n### Re-running\n\nEach run generates fresh UUIDs. Safe to re-run repeatedly without UNIQUE constraint conflicts.",
+        "height": 560,
+        "width": 480,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "abb71e36-3728-491e-b961-bd9cdbfb9da6",
+      "name": "Harness Note"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking 'Execute workflow'": {
+      "main": [
+        [
+          {
+            "node": "Compose Test Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose Test Payload": {
+      "main": [
+        [
+          {
+            "node": "Call HITL Gateway",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "14dbbf6a-7596-4ec9-b5ee-9245d7f0a7d4",
+  "meta": {
+    "instanceId": "d7e19fca9705d4d0c36e6fe71822071e2ec1e1c76f266658ed6763dfc41db437"
+  },
+  "id": "V87nEh6HALqINIDz",
+  "tags": []
+}

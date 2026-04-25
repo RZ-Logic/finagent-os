@@ -1,0 +1,234 @@
+{
+  "name": "fao_hitl_gateway_v1",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "jsonExample",
+        "jsonExample": "{\n  \"correlation_id\": \"11111111-1111-1111-1111-111111111111\",\n  \"execution_id\": \"22222222-2222-2222-2222-222222222222\",\n  \"agent_id\": \"fao_reserve_recon_v1\",\n  \"agent_invoker_email\": \"aisha.okonkwo@finagent-os.demo\",\n  \"risk_tier\": \"RED\",\n  \"policy_sub_tier\": \"CRITICAL\",\n  \"policy_rationale\": \"FAO-REC-001 execution rollup over 7 assets. Outcomes: 3 ALLOW, 1 ALLOW_WITH_OBLIGATIONS, 3 REQUIRE_HUMAN. Worst-asset rule applied: execution outcome = REQUIRE_HUMAN (CRITICAL). Escalated assets: USDT (REQUIRE_HUMAN/STANDARD), SOL (REQUIRE_HUMAN/CRITICAL), ADA (REQUIRE_HUMAN/CRITICAL).\",\n  \"escalated_assets\": [\"USDT\", \"SOL\", \"ADA\"],\n  \"execution_summary\": null\n}"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        640
+      ],
+      "id": "08c74942-9cdc-4cd1-9001-1d3d9cb3f344",
+      "name": "Trigger input schema"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// FAO HITL Gateway v1 — Payload Validation\n// ----------------------------------------------------------------------------\n// FAO-GOV-004: Validates payload before inserting into hitl_queue.\n// Mirrors the Writer's pattern: structural correctness only, not semantic\n// quality. Rationale quality is the policy engine's responsibility.\n//\n// Required NOT NULL fields per hitl_queue (Migration 0005):\n//   correlation_id, agent_id, agent_invoker_email, risk_tier,\n//   policy_sub_tier, policy_rationale\n//\n// Threaded through (used by Slack message + Writer event, not validated):\n//   execution_id, escalated_assets, execution_summary\n//\n// ai_human_brief is intentionally absent — wired when Claude advisory\n// lands (Apr 25 mid-day). SQL hardcodes NULL until then.\n// ============================================================================\n\nconst input = $input.first().json;\n\nconst required = [\n  'correlation_id',\n  'execution_id',\n  'agent_id',\n  'agent_invoker_email',\n  'risk_tier',\n  'policy_sub_tier',\n  'policy_rationale'\n];\n\nconst missing = required.filter(f => input[f] === undefined || input[f] === null || input[f] === '');\nif (missing.length > 0) {\n  throw new Error(`FAO-GOV-004 hitl_gateway: missing required field(s): ${missing.join(', ')}`);\n}\n\n// risk_tier — same enum as shadow_ledger\nconst validRiskTiers = ['GREEN', 'AMBER', 'RED'];\nif (!validRiskTiers.includes(input.risk_tier)) {\n  throw new Error(`FAO-GOV-004 hitl_gateway: invalid risk_tier '${input.risk_tier}'. Must be one of: ${validRiskTiers.join(', ')}`);\n}\n\n// policy_sub_tier — required for HITL (only STANDARD/CRITICAL valid here;\n// nullable in shadow_ledger but NOT NULL in hitl_queue with default STANDARD)\nconst validSubTiers = ['STANDARD', 'CRITICAL'];\nif (!validSubTiers.includes(input.policy_sub_tier)) {\n  throw new Error(`FAO-GOV-004 hitl_gateway: invalid policy_sub_tier '${input.policy_sub_tier}'. Must be one of: ${validSubTiers.join(', ')}`);\n}\n\n// UUID format\nconst uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;\nif (!uuidPattern.test(input.correlation_id)) {\n  throw new Error(`FAO-GOV-004 hitl_gateway: correlation_id is not a valid UUID: '${input.correlation_id}'`);\n}\nif (!uuidPattern.test(input.execution_id)) {\n  throw new Error(`FAO-GOV-004 hitl_gateway: execution_id is not a valid UUID: '${input.execution_id}'`);\n}\n\n// Email format — defensive check before SQL\nconst emailPattern = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;\nif (!emailPattern.test(input.agent_invoker_email)) {\n  throw new Error(`FAO-GOV-004 hitl_gateway: agent_invoker_email is not a valid email: '${input.agent_invoker_email}'`);\n}\n\n// agent_id format — alphanumeric + underscore only (matches all seeded agents)\nif (!/^[a-z0-9_]+$/i.test(input.agent_id)) {\n  throw new Error(`FAO-GOV-004 hitl_gateway: agent_id contains unexpected characters: '${input.agent_id}'`);\n}\n\n// Defensive sanitization of policy_rationale: prevent breakout from\n// dollar-quoted SQL string. We use $rationale$...$rationale$ delimiters\n// downstream; reject any rationale that contains the closing delimiter.\n// Belt-and-suspenders — policy engine doesn't produce these strings.\nif (typeof input.policy_rationale !== 'string' || input.policy_rationale.includes('$rationale$')) {\n  throw new Error(`FAO-GOV-004 hitl_gateway: policy_rationale contains reserved sequence or is not a string`);\n}\n\nreturn [{ json: {\n  correlation_id:       input.correlation_id,\n  execution_id:         input.execution_id,\n  agent_id:             input.agent_id,\n  agent_invoker_email:  input.agent_invoker_email,\n  risk_tier:            input.risk_tier,\n  policy_sub_tier:      input.policy_sub_tier,\n  policy_rationale:     input.policy_rationale,\n  escalated_assets:     Array.isArray(input.escalated_assets) ? input.escalated_assets : [],\n  execution_summary:    input.execution_summary ?? null\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        640
+      ],
+      "id": "e374d10b-01b6-44ed-a5bd-331196a275ad",
+      "name": "Validate Payload"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- ============================================================================\n-- FAO HITL Gateway v1 — Insert HITL Queue Row (via fao_hitl_create function)\n-- ----------------------------------------------------------------------------\n-- Calls Migration 0007's stored function. The function RAISEs a named\n-- FAO-GOV-004 exception if agent_invoker_email is not in process_owners\n-- or agent_id is not in agent_registry. Database-layer enforcement\n-- replaces the original application-layer throw, which had a silent-\n-- failure mode (n8n skips downstream nodes when Postgres returns zero\n-- items, so the downstream throw never executed).\n--\n-- ai_human_brief is hardcoded NULL today. Wired when Claude advisory\n-- lands (Apr 25 mid-day) — wiring will pass the brief as the 7th arg.\n-- ============================================================================\n\nSELECT *\nFROM public.fao_hitl_create(\n  '{{ $json.correlation_id }}'::uuid,\n  '{{ $json.agent_id }}',\n  '{{ $json.agent_invoker_email }}',\n  '{{ $json.risk_tier }}'::public.risk_tier,\n  '{{ $json.policy_sub_tier }}'::public.policy_sub_tier,\n  $rationale${{ $json.policy_rationale }}$rationale$,\n  NULL  -- ai_human_brief: wired when Claude advisory lands (Apr 25)\n);",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        448,
+        640
+      ],
+      "id": "0b45e8bd-e6b6-44a4-8569-510aa64b4f9c",
+      "name": "Insert HITL Row",
+      "credentials": {
+        "postgres": {
+          "id": "Vh67T849XENVGttf",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// FAO HITL Gateway v1 — Validate Insert + Compose Notification Context\n// ----------------------------------------------------------------------------\n// Postgres INSERT ... SELECT ... WHERE returns zero rows when either:\n//   - agent_invoker_email is not in process_owners, OR\n//   - agent_id is not in agent_registry\n// Catch this loudly. A silent zero-row insert here is the failure mode\n// the gateway exists to prevent.\n//\n// On success, merge the inserted row's hitl_id + timeout_at back with\n// the original validated payload so downstream nodes (Slack, Writer)\n// have everything in one item.\n//\n// Approval URLs are constructed against APPROVAL_BASE_URL — a constant\n// at the top of this node. When the HITL Approval Handler workflow\n// lands (next build, today), update APPROVAL_BASE_URL to the actual\n// webhook URL and nothing else changes.\n// ============================================================================\n\n// TODO(approval-handler): replace with the actual webhook URL of the\n// HITL Approval Handler workflow once that workflow is created.\nconst APPROVAL_BASE_URL = 'https://n8n.YOUR-DOMAIN.com/webhook/fao-hitl-resolve';\n\nconst inserted = $input.all();\n\nif (inserted.length === 0 || !inserted[0].json || !inserted[0].json.hitl_id) {\n  const ctx = $('Validate Payload').first().json;\n  throw new Error(\n    `FAO-GOV-004 hitl_gateway: INSERT returned zero rows. ` +\n    `Either agent_invoker_email '${ctx.agent_invoker_email}' is not in process_owners, ` +\n    `or agent_id '${ctx.agent_id}' is not in agent_registry. ` +\n    `Both joins must succeed for a HITL request to be created. ` +\n    `Check public.process_owners and public.agent_registry seeds.`\n  );\n}\n\nconst ctx = $('Validate Payload').first().json;\nconst row = inserted[0].json;\n\n// --- Approval URLs --------------------------------------------------------\nconst approve_url = `${APPROVAL_BASE_URL}?hitl_id=${row.hitl_id}&decision=APPROVED`;\nconst reject_url  = `${APPROVAL_BASE_URL}?hitl_id=${row.hitl_id}&decision=REJECTED`;\n\n// --- Slack message --------------------------------------------------------\nconst tier_emoji = ctx.policy_sub_tier === 'CRITICAL' ? ':rotating_light:' : ':warning:';\nconst escalated_summary = (ctx.escalated_assets && ctx.escalated_assets.length > 0)\n  ? ctx.escalated_assets.join(', ')\n  : '(none — review rationale)';\n\nconst slack_text = [\n  `${tier_emoji} *HITL Approval Required — ${ctx.agent_id}* (${ctx.policy_sub_tier})`,\n  ``,\n  `*Correlation ID:* \\`${ctx.correlation_id}\\``,\n  `*Execution ID:* \\`${ctx.execution_id}\\``,\n  `*Risk Tier:* ${ctx.risk_tier}`,\n  `*Invoker:* ${ctx.agent_invoker_email}`,\n  `*HITL ID:* ${row.hitl_id}`,\n  `*SLA timeout:* ${new Date(row.timeout_at).toISOString()}`,\n  ``,\n  `*Rationale:*`,\n  `> ${ctx.policy_rationale}`,\n  ``,\n  `*Escalated assets:* ${escalated_summary}`,\n  ``,\n  `:white_check_mark: <${approve_url}|*Approve*>   :x: <${reject_url}|*Reject*>`,\n  ``,\n  `_FAO-GOV-004: You cannot approve your own invocation. Segregation of duties is enforced at the database trigger; attempting it raises a loud exception._`\n].join('\\n');\n\nreturn [{ json: {\n  ...ctx,\n  hitl_id:           row.hitl_id,\n  agent_invoker_id:  row.agent_invoker_id,\n  timeout_at:        row.timeout_at,\n  created_at:        row.created_at,\n  approve_url,\n  reject_url,\n  slack_text\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        640
+      ],
+      "id": "3eafd0e1-4658-4540-93bd-8929d9cb5b35",
+      "name": "Validate Insert + Compose"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C0AUUAXS6G7",
+          "mode": "id"
+        },
+        "text": "={{ $json.slack_text }}",
+        "otherOptions": {
+          "mrkdwn": true
+        }
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        896,
+        640
+      ],
+      "id": "88be8947-ff64-45ca-84cb-ea8140011642",
+      "name": "Slack: HITL Notification",
+      "webhookId": "94f9a3c0-f02a-4db3-ad24-329351c7b94a",
+      "credentials": {
+        "slackApi": {
+          "id": "WeYKyjpXbhfKviDK",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// FAO HITL Gateway v1 — Compose HITL_REQUESTED Writer Payload\n// ----------------------------------------------------------------------------\n// Threads the same correlation_id and execution_id used by the parent\n// agent's STARTED/ASSET_RECONCILED rows. The shadow_ledger HITL_REQUESTED\n// row is the audit-trail record that the gateway successfully created\n// the hitl_queue request and notified the approver.\n//\n// policy_outcome stays REQUIRE_HUMAN — we are logging the fact of the\n// request, not changing the upstream decision. status is SUCCESS because\n// the gateway operation itself succeeded (request created + notified).\n//\n// hitl_status is PENDING — this row records that approval is awaited.\n// The matching HITL_RESOLVED row will be written by the Approval Handler\n// workflow when the approver decides.\n// ============================================================================\n\nconst ctx = $('Validate Insert + Compose').first().json;\n\nreturn [{ json: {\n  correlation_id:      ctx.correlation_id,\n  execution_id:        ctx.execution_id,\n  agent_id:            ctx.agent_id,\n  risk_tier:           ctx.risk_tier,\n  inputs: {\n    event_type:           'HITL_REQUESTED',\n    hitl_id:              ctx.hitl_id,\n    agent_invoker_id:     ctx.agent_invoker_id,\n    agent_invoker_email:  ctx.agent_invoker_email,\n    timeout_at:           ctx.timeout_at,\n    sub_tier:             ctx.policy_sub_tier,\n    notification_channel: 'slack',\n    approve_url:          ctx.approve_url,\n    reject_url:           ctx.reject_url,\n    escalated_assets:     ctx.escalated_assets\n  },\n  ai_prompt:           null,\n  ai_output:           null,\n  ai_confidence:       null,\n  fractional_cost_usd: null,\n  policy_outcome:      'REQUIRE_HUMAN',\n  policy_sub_tier:     ctx.policy_sub_tier,\n  policy_rationale:    `FAO-GOV-004 HITL request created (hitl_id=${ctx.hitl_id}, sub_tier=${ctx.policy_sub_tier}). Awaiting approval. Notification dispatched to Slack #fao-approvals. SLA timeout: ${ctx.timeout_at}. Underlying execution rationale: ${ctx.policy_rationale}`,\n  obligations:         [],\n  hitl_status:         'PENDING',\n  hitl_approver_id:    null,\n  status:              'SUCCESS',\n  error_details:       null\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        640
+      ],
+      "id": "b4d1ae70-e3cf-4ec2-b900-7dd58ae8f789",
+      "name": "Compose Writer Payload"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "dQslIEVwF3WqMliT",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/dQslIEVwF3WqMliT",
+          "cachedResultName": "Writer"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1344,
+        640
+      ],
+      "id": "e0e43f85-c325-4eaa-bd6b-57de57ed08e3",
+      "name": "Writer: HITL_REQUESTED"
+    },
+    {
+      "parameters": {
+        "content": "## FAO HITL Gateway v1\n\n**Control:** FAO-GOV-004 (request side)\n**Risk Tier:** inherited from caller\n**Process Owner:** caller's owner; approver enforced via DB trigger\n\n### Flow\n\n1. **Validate** — required fields, enum + UUID + email format, $rationale$ delimiter sanitization\n2. **Insert HITL Row** — single SQL: resolves invoker email -> UUID, joins agent_registry for SLA, computes timeout_at, RETURNING hitl_id\n3. **Validate Insert + Compose** — throws loudly if zero rows (silent insert is the failure mode), builds Slack message + approval URLs\n4. **Slack: HITL Notification** — posts to #fao-reconciliation\n5. **Writer: HITL_REQUESTED** — shadow_ledger audit row\n\n### Pre-import setup\n\n- **Slack node**: replace `channelId` and `slackApi` credential ID with your real values\n- **APPROVAL_BASE_URL** (in `Validate Insert + Compose`): replace placeholder once Approval Handler ships\n- **Writer workflowId**: should already be correct (`dQslIEVwF3WqMliT`); verify after import\n\n### What this does NOT do\n\n- Does not handle approval/rejection (separate workflow: HITL Approval Handler)\n- Does not write a delayed COMMITTED on approval (that lives in the Approval Handler)\n- Does not re-notify on SLA expiry (escalation is a future enhancement)",
+        "height": 560,
+        "width": 460,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "852a7b0e-73c3-4253-8c49-aafebe2710bf",
+      "name": "Architecture Note"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Trigger input schema": {
+      "main": [
+        [
+          {
+            "node": "Validate Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Payload": {
+      "main": [
+        [
+          {
+            "node": "Insert HITL Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert HITL Row": {
+      "main": [
+        [
+          {
+            "node": "Validate Insert + Compose",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Insert + Compose": {
+      "main": [
+        [
+          {
+            "node": "Slack: HITL Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack: HITL Notification": {
+      "main": [
+        [
+          {
+            "node": "Compose Writer Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose Writer Payload": {
+      "main": [
+        [
+          {
+            "node": "Writer: HITL_REQUESTED",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "b9655130-8582-4de2-8440-0a0eef4f21da",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d7e19fca9705d4d0c36e6fe71822071e2ec1e1c76f266658ed6763dfc41db437"
+  },
+  "id": "mUAC9qIMkVzlV5qw",
+  "tags": []
+}

@@ -88,7 +88,7 @@ SELECT
   '{
     "primary":   "public.shadow_ledger (append-only evidence)",
     "secondary": "public.hitl_queue (when policy_outcome = REQUIRE_HUMAN)",
-    "notification": "Slack #fao-reconciliation (notification only, not authoritative)"
+    "notification": "Slack #fao-approvals (notification only, not authoritative)"
   }'::JSONB,
   300,   -- 5 min max execution
   24,    -- 24 hr max HITL resolution for RED-tier items

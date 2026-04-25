@@ -1,60 +1,72 @@
 {
   "_meta": {
-    "description": "Simulated on-chain wallet balances. In production this comes from Fireblocks /v1/vault/accounts/{id}. Intentionally seeded to exercise every branch of the Policy Outcome Decision Matrix (see docs/SOX-MAPPING.md and fixtures/README.md).",
-    "snapshot_timestamp": "2026-04-16T12:00:00Z",
+    "description": "Simulated on-chain wallet balances. In production this comes from Fireblocks /v1/vault/accounts/{id}. Calibrated against Kraken's December 31, 2025 published Proof of Reserves for BTC, ETH, XRP (real anchors); USDC/USDT/SOL/ADA are deliberate test scenarios designed to exercise every branch of the Policy Outcome Decision Matrix. See docs/SOX-MAPPING.md, fixtures/README.md, and the agent registry row for fao_reserve_recon_v1.",
+    "snapshot_timestamp": "2026-04-24T12:00:00Z",
     "source": "simulated_fixture",
     "production_target": "Fireblocks REST API",
-    "scenario_count": 7
+    "scenario_count": 7,
+    "anchor_reference": "https://blog.kraken.com/news/december-2025-proof-of-reserves",
+    "fixture_design_principle": "3 PoR-anchored assets (real-world data shape) + 1 clean baseline + 3 synthetic anomalies (one per critical control path: FAO-REC-002, FAO-REC-004, FAO-REC-007). Single execution exercises ALLOW, ALLOW_WITH_OBLIGATIONS, REQUIRE_HUMAN STANDARD, and REQUIRE_HUMAN CRITICAL outcomes."
   },
   "wallets": [
     {
       "asset": "BTC",
-      "wallet_balance": 192091.25,
+      "wallet_balance": 167690.25,
       "usd_per_unit": 98000.00,
       "last_block": 829847,
-      "_scenario": "Over-reserved at ~114.9% (matches Kraken Dec 2025 published ratio). Expected policy outcome: ALLOW."
+      "_provenance": "kraken_por_2025_q4_anchor",
+      "_scenario": "Calibrated to Kraken's Dec 31, 2025 published BTC reserve ratio of 100.3%. Reflects the documented posture shift from March 2025 (114.9%) — Kraken tightened buffer reserves materially. Falls below the configured ratio_band_lower of 1.05 but above the 1.00 floor. Expected policy outcome: ALLOW_WITH_OBLIGATIONS (drift from over-reservation posture; weekly review obligation)."
     },
     {
       "asset": "ETH",
-      "wallet_balance": 2847392.18,
+      "wallet_balance": 2884112.00,
       "usd_per_unit": 3400.00,
       "last_block": 19284739,
-      "_scenario": "Slightly over-reserved, small settlement-timing delta. Expected AI advisory: BENIGN_TIMING. Expected policy outcome: ALLOW_WITH_OBLIGATIONS."
+      "_provenance": "kraken_por_2025_q4_anchor",
+      "_scenario": "Calibrated to Kraken's Dec 31, 2025 published ETH reserve ratio of 101.3%. Within the configured band [1.00, 1.10]. Expected policy outcome: ALLOW."
     },
     {
       "asset": "USDC",
       "wallet_balance": 891723456.00,
       "usd_per_unit": 1.00,
       "last_block": 19284739,
-      "_scenario": "Exact match. Expected AI advisory: CLEAN. Expected policy outcome: ALLOW."
+      "_provenance": "synthetic_clean_baseline",
+      "_scenario": "Exact match — exercises the in-band ALLOW path with zero discrepancy. Stablecoin band [1.0000, 1.0050] passed cleanly. Expected policy outcome: ALLOW."
     },
     {
       "asset": "USDT",
       "wallet_balance": 1234567890.50,
       "usd_per_unit": 1.00,
       "last_block": 19284739,
-      "_scenario": "Small discrepancy ($67,890.50, ~0.0055%) — below materiality but unexplained. Expected AI advisory: ANOMALY. Expected policy outcome: REQUIRE_HUMAN (materiality-adjacent; $67K exceeds USDT threshold of $10K)."
+      "_provenance": "synthetic_anomaly",
+      "_anomaly_control": "FAO-REC-002",
+      "_scenario": "Synthetic anomaly: ratio 1.0000549 sits within the tight stablecoin band [1.0000, 1.0050], BUT absolute USD discrepancy of $67,890.50 exceeds the USDT materiality threshold of $10,000. Stablecoin units are 1:1 USD; small ratio deviations on large pools are still material. Expected policy outcome: REQUIRE_HUMAN (STANDARD) per FAO-REC-002 USD-materiality breach."
     },
     {
       "asset": "SOL",
-      "wallet_balance": 8472931.45,
+      "wallet_balance": 8740000.00,
       "usd_per_unit": 180.00,
       "last_block": 245789234,
-      "_scenario": "Under-reserved at 92.1% ratio. MATERIAL. Expected policy outcome: REQUIRE_HUMAN (critical, 2 approvers)."
+      "_provenance": "synthetic_anomaly",
+      "_anomaly_control": "FAO-REC-004",
+      "_scenario": "Synthetic anomaly: under-reserved at 0.95 ratio, below the 1.00 floor. MATERIAL — wallet holdings insufficient to cover ledger liabilities. Expected policy outcome: REQUIRE_HUMAN (CRITICAL, 2 approvers required for RED-tier escalation) per FAO-REC-004 reserve ratio threshold check."
     },
     {
       "asset": "XRP",
-      "wallet_balance": 127593847.00,
+      "wallet_balance": 128265000.00,
       "usd_per_unit": 2.15,
       "last_block": 84729384,
-      "_scenario": "Slightly over-reserved (~0.07%). Expected AI advisory: CLEAN. Expected policy outcome: ALLOW."
+      "_provenance": "kraken_por_2025_q4_anchor",
+      "_scenario": "Calibrated to Kraken's Dec 31, 2025 published XRP reserve ratio of 100.6%. Within the configured band [1.00, 1.10]. Expected policy outcome: ALLOW."
     },
     {
       "asset": "ADA",
       "wallet_balance": 47293847.92,
       "usd_per_unit": 0.72,
       "last_block": 10284739,
-      "_scenario": "Exact match at the wallet level; however see ledger_data.json — ADA has a negative client liability injection simulating the 'negative leaf' concern Kraken flagged in krakendb (2014). Expected policy outcome: REQUIRE_HUMAN (negative-balance anomaly)."
+      "_provenance": "synthetic_anomaly",
+      "_anomaly_control": "FAO-REC-007",
+      "_scenario": "Wallet looks normal at the asset level; however see ledger_data.json — ADA has a negative client_liabilities injection simulating the 'negative leaf' anomaly Kraken called out in krakendb (2014 reference implementation). Reserve ratio is undefined when liability is negative. Expected policy outcome: REQUIRE_HUMAN (CRITICAL) per FAO-REC-007 negative-liability detection."
     }
   ]
 }

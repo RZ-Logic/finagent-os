@@ -318,7 +318,7 @@ Founder, Velocyt Consulting · Mississauga, ON
 - Website: [velocyt.ca](https://velocyt.ca)
 - GitHub: [@RZ-Logic](https://github.com/RZ-Logic)
 
-Also built: [Immi-OS](https://github.com/RZ-Logic/immi-os) (immigration automation, real clients) · [Signal-Driven Outbound Engine](https://github.com/RZ-Logic/signal-driven-outbound-engine) (GTM automation, $0–12/mo)
+Also built: __[Immi-OS](https://github.com/RZ-Logic/immi-os)__ (immigration automation, real clients) · __[Signal-Driven Outbound Engine](https://github.com/RZ-Logic/signal-driven-outbound-engine)__ (GTM automation) · __[Job Signal](https://github.com/RZ-Logic/jobsignal-engine)__ (job tracker, $0–12/mo)
 
 ---
 

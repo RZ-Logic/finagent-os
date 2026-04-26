@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="banner-title">
+  <title id="banner-title">FinAgent OS — Governance-first AI agent platform for SOX-regulated crypto finance</title>
+
+  <defs>
+    <!-- Background gradient: deep navy with subtle directional shift -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a0f1f"/>
+      <stop offset="60%" stop-color="#0e1428"/>
+      <stop offset="100%" stop-color="#141a35"/>
+    </linearGradient>
+
+    <!-- Soft radial highlight in upper-left, like ambient room lighting -->
+    <radialGradient id="glow" cx="20%" cy="25%" r="55%">
+      <stop offset="0%" stop-color="#5eead4" stop-opacity="0.10"/>
+      <stop offset="50%" stop-color="#5eead4" stop-opacity="0.03"/>
+      <stop offset="100%" stop-color="#5eead4" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Subtle dot-grid pattern for "ledger" texture -->
+    <pattern id="dotgrid" x="0" y="0" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="0.6" fill="#5eead4" fill-opacity="0.06"/>
+    </pattern>
+
+    <!-- Grain noise filter -->
+    <filter id="grain">
+      <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="3"/>
+      <feColorMatrix values="0 0 0 0 0.3   0 0 0 0 0.3   0 0 0 0 0.3   0 0 0 0.04 0"/>
+    </filter>
+  </defs>
+
+  <!-- Layered background: gradient + glow + dot grid + grain -->
+  <rect width="1200" height="320" fill="url(#bg)"/>
+  <rect width="1200" height="320" fill="url(#glow)"/>
+  <rect width="1200" height="320" fill="url(#dotgrid)"/>
+  <rect width="1200" height="320" filter="url(#grain)" opacity="0.55"/>
+
+  <!-- Top edge audit-strip: monospace metadata, very dim -->
+  <g font-family="'IBM Plex Mono', 'JetBrains Mono', 'Consolas', monospace" font-size="11" fill="#475569" letter-spacing="0.5">
+    <text x="64" y="32">// FAO-AUDIT-TRAIL · correlation_id 6b57616d-57fb-4cd8 · 14 controls · 56 ledger rows · append-only enforced</text>
+  </g>
+
+  <!-- Left vertical newspaper rule -->
+  <line x1="64" y1="60" x2="64" y2="260" stroke="#1e293b" stroke-width="1"/>
+
+  <!-- ─── LEFT SIDE: TITLE BLOCK ─── -->
+  <g font-family="'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <!-- Eyebrow tag -->
+    <text x="84" y="92" font-family="'IBM Plex Mono', monospace" font-size="11" font-weight="500" fill="#5eead4" letter-spacing="2.5">
+      VELOCYT CONSULTING · v1.0
+    </text>
+
+    <!-- Main title -->
+    <text x="84" y="158" font-size="62" font-weight="700" fill="#f8fafc" letter-spacing="-1.5">
+      FinAgent OS
+    </text>
+
+    <!-- Mint accent rule -->
+    <line x1="84" y1="180" x2="148" y2="180" stroke="#5eead4" stroke-width="2.5"/>
+
+    <!-- Tagline line 1 -->
+    <text x="84" y="218" font-size="20" font-weight="400" fill="#cbd5e1" letter-spacing="-0.2">
+      Governance-first AI agent platform
+    </text>
+    <!-- Tagline line 2 -->
+    <text x="84" y="245" font-size="20" font-weight="400" fill="#cbd5e1" letter-spacing="-0.2">
+      for SOX-regulated crypto finance.
+    </text>
+  </g>
+
+  <!-- ─── RIGHT SIDE: AUDIT-CHAIN VISUAL ─── -->
+  <!-- Column header -->
+  <g font-family="'IBM Plex Mono', monospace" font-size="10" fill="#475569" letter-spacing="2">
+    <text x="780" y="92">SHADOW LEDGER · ONE EXECUTION</text>
+  </g>
+
+  <!-- Audit chain as 5 stacked rows, each with event_type and count -->
+  <!-- Row template: pill background + event_type text + count chip -->
+  <g font-family="'IBM Plex Mono', 'JetBrains Mono', 'Consolas', monospace" font-size="13">
+
+    <!-- STARTED -->
+    <rect x="780" y="108" width="356" height="22" rx="3" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
+    <text x="794" y="124" fill="#94a3b8" font-weight="500">STARTED</text>
+    <text x="1118" y="124" fill="#475569" text-anchor="end">×1</text>
+
+    <!-- ASSET_RECONCILED (the 7 per-asset rows) -->
+    <rect x="780" y="134" width="356" height="22" rx="3" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
+    <text x="794" y="150" fill="#94a3b8" font-weight="500">ASSET_RECONCILED</text>
+    <text x="1118" y="150" fill="#475569" text-anchor="end">×7</text>
+
+    <!-- HITL_REQUESTED -->
+    <rect x="780" y="160" width="356" height="22" rx="3" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
+    <text x="794" y="176" fill="#94a3b8" font-weight="500">HITL_REQUESTED</text>
+    <text x="1118" y="176" fill="#475569" text-anchor="end">×1</text>
+
+    <!-- HITL_RESOLVED -->
+    <rect x="780" y="186" width="356" height="22" rx="3" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
+    <text x="794" y="202" fill="#94a3b8" font-weight="500">HITL_RESOLVED</text>
+    <text x="1118" y="202" fill="#475569" text-anchor="end">×1</text>
+
+    <!-- COMMITTED — highlighted in mint -->
+    <rect x="780" y="212" width="356" height="22" rx="3" fill="#042f2e" stroke="#5eead4" stroke-width="1.2"/>
+    <text x="794" y="228" fill="#5eead4" font-weight="600">COMMITTED</text>
+    <text x="1118" y="228" fill="#5eead4" text-anchor="end" opacity="0.7">×1</text>
+  </g>
+
+  <!-- Caption under chain -->
+  <text x="780" y="252" font-family="'IBM Plex Mono', monospace" font-size="10" fill="#475569" letter-spacing="1">
+    11 ROWS · ONE CORRELATION_ID · APPEND-ONLY
+  </text>
+
+  <!-- ─── BOTTOM EDGE STRIP ─── -->
+  <line x1="64" y1="280" x2="1136" y2="280" stroke="#1e293b" stroke-width="1"/>
+  <g font-family="'IBM Plex Mono', monospace" font-size="11" fill="#475569" letter-spacing="0.5">
+    <text x="64" y="302">RZ-Logic / finagent-os · MIT · APR 2026 · velocyt.ca</text>
+    <text x="1136" y="302" text-anchor="end">AI Authority: None (Deterministic v1)</text>
+  </g>
+</svg>

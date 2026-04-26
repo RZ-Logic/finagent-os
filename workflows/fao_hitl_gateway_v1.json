@@ -51,7 +51,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// ============================================================================\n// FAO HITL Gateway v1 — Validate Insert + Compose Notification Context\n// ----------------------------------------------------------------------------\n// Postgres INSERT ... SELECT ... WHERE returns zero rows when either:\n//   - agent_invoker_email is not in process_owners, OR\n//   - agent_id is not in agent_registry\n// Catch this loudly. A silent zero-row insert here is the failure mode\n// the gateway exists to prevent.\n//\n// On success, merge the inserted row's hitl_id + timeout_at back with\n// the original validated payload so downstream nodes (Slack, Writer)\n// have everything in one item.\n//\n// Approval URLs are constructed against APPROVAL_BASE_URL — a constant\n// at the top of this node. When the HITL Approval Handler workflow\n// lands (next build, today), update APPROVAL_BASE_URL to the actual\n// webhook URL and nothing else changes.\n// ============================================================================\n\n// TODO(approval-handler): replace with the actual webhook URL of the\n// HITL Approval Handler workflow once that workflow is created.\nconst APPROVAL_BASE_URL = 'https://n8n.YOUR-DOMAIN.com/webhook/fao-hitl-resolve';\n\nconst inserted = $input.all();\n\nif (inserted.length === 0 || !inserted[0].json || !inserted[0].json.hitl_id) {\n  const ctx = $('Validate Payload').first().json;\n  throw new Error(\n    `FAO-GOV-004 hitl_gateway: INSERT returned zero rows. ` +\n    `Either agent_invoker_email '${ctx.agent_invoker_email}' is not in process_owners, ` +\n    `or agent_id '${ctx.agent_id}' is not in agent_registry. ` +\n    `Both joins must succeed for a HITL request to be created. ` +\n    `Check public.process_owners and public.agent_registry seeds.`\n  );\n}\n\nconst ctx = $('Validate Payload').first().json;\nconst row = inserted[0].json;\n\n// --- Approval URLs --------------------------------------------------------\nconst approve_url = `${APPROVAL_BASE_URL}?hitl_id=${row.hitl_id}&decision=APPROVED`;\nconst reject_url  = `${APPROVAL_BASE_URL}?hitl_id=${row.hitl_id}&decision=REJECTED`;\n\n// --- Slack message --------------------------------------------------------\nconst tier_emoji = ctx.policy_sub_tier === 'CRITICAL' ? ':rotating_light:' : ':warning:';\nconst escalated_summary = (ctx.escalated_assets && ctx.escalated_assets.length > 0)\n  ? ctx.escalated_assets.join(', ')\n  : '(none — review rationale)';\n\nconst slack_text = [\n  `${tier_emoji} *HITL Approval Required — ${ctx.agent_id}* (${ctx.policy_sub_tier})`,\n  ``,\n  `*Correlation ID:* \\`${ctx.correlation_id}\\``,\n  `*Execution ID:* \\`${ctx.execution_id}\\``,\n  `*Risk Tier:* ${ctx.risk_tier}`,\n  `*Invoker:* ${ctx.agent_invoker_email}`,\n  `*HITL ID:* ${row.hitl_id}`,\n  `*SLA timeout:* ${new Date(row.timeout_at).toISOString()}`,\n  ``,\n  `*Rationale:*`,\n  `> ${ctx.policy_rationale}`,\n  ``,\n  `*Escalated assets:* ${escalated_summary}`,\n  ``,\n  `:white_check_mark: <${approve_url}|*Approve*>   :x: <${reject_url}|*Reject*>`,\n  ``,\n  `_FAO-GOV-004: You cannot approve your own invocation. Segregation of duties is enforced at the database trigger; attempting it raises a loud exception._`\n].join('\\n');\n\nreturn [{ json: {\n  ...ctx,\n  hitl_id:           row.hitl_id,\n  agent_invoker_id:  row.agent_invoker_id,\n  timeout_at:        row.timeout_at,\n  created_at:        row.created_at,\n  approve_url,\n  reject_url,\n  slack_text\n}}];"
+        "jsCode": "// ============================================================================\n// FAO HITL Gateway v1 — Validate Insert + Compose Notification Context\n// ----------------------------------------------------------------------------\n// (UPDATED Apr 25 v3 — APPROVAL_BASE_URL now points at /fao-hitl-confirm\n//  per Approval Handler v2's GET/POST split. GET is now read-only\n//  confirmation page; the form on that page POSTs to /fao-hitl-resolve.)\n//\n// Empirical motivation: Slack's link-expander GETs every URL in a posted\n// message within ~2-3 seconds. v1's GET endpoint mutated state, so the\n// expander auto-resolved every HITL. Apr 25 evening flagship run produced\n// 6 approval_handler executions within 3 seconds of the Slack message —\n// before the human approver could see the message, let alone click.\n//\n// HTTP semantics restored: GET is safe (shows confirmation page),\n// POST is the mutating action (form submission only).\n// ============================================================================\n\nconst APPROVAL_BASE_URL = 'https://n8n.velocyt.ca/webhook/fao-hitl-confirm';\n\nconst approvers = [\n  { email: 'sarah.chen@finagent-os.demo',     name: 'Sarah Chen',     role: 'Controller' },\n  { email: 'marcus.patel@finagent-os.demo',   name: 'Marcus Patel',   role: 'CFO' },\n  { email: 'aisha.okonkwo@finagent-os.demo',  name: 'Aisha Okonkwo',  role: 'FP&A Lead' }\n];\n\nconst inserted = $input.all();\n\nif (inserted.length === 0 || !inserted[0].json || !inserted[0].json.hitl_id) {\n  const ctx = $('Validate Payload').first().json;\n  throw new Error(\n    `FAO-GOV-004 hitl_gateway: Insert HITL Row returned zero rows unexpectedly. ` +\n    `fao_hitl_create() should have raised before reaching this node. ` +\n    `Inputs: agent_invoker_email='${ctx.agent_invoker_email}', agent_id='${ctx.agent_id}'.`\n  );\n}\n\nconst ctx = $('Validate Payload').first().json;\nconst row = inserted[0].json;\n\nconst approver_links = approvers.map(a => {\n  const approve_url = `${APPROVAL_BASE_URL}?hitl_id=${row.hitl_id}&decision=APPROVED&approver_email=${encodeURIComponent(a.email)}`;\n  const reject_url  = `${APPROVAL_BASE_URL}?hitl_id=${row.hitl_id}&decision=REJECTED&approver_email=${encodeURIComponent(a.email)}`;\n  return { ...a, approve_url, reject_url };\n});\n\nconst tier_emoji = ctx.policy_sub_tier === 'CRITICAL' ? ':rotating_light:' : ':warning:';\nconst escalated_summary = (ctx.escalated_assets && ctx.escalated_assets.length > 0)\n  ? ctx.escalated_assets.join(', ')\n  : '(none — review rationale)';\n\nconst approve_lines = approver_links.map(a =>\n  `:white_check_mark: <${a.approve_url}|*Approve as ${a.name}*> _(${a.role})_`\n).join('\\n');\n\nconst reject_lines = approver_links.map(a =>\n  `:x: <${a.reject_url}|*Reject as ${a.name}*> _(${a.role})_`\n).join('\\n');\n\nconst slack_text = [\n  `${tier_emoji} *HITL Approval Required — ${ctx.agent_id}* (${ctx.policy_sub_tier})`,\n  ``,\n  `*Correlation ID:* \\`${ctx.correlation_id}\\``,\n  `*Execution ID:* \\`${ctx.execution_id}\\``,\n  `*Risk Tier:* ${ctx.risk_tier}`,\n  `*Invoker:* ${ctx.agent_invoker_email}`,\n  `*HITL ID:* ${row.hitl_id}`,\n  `*SLA timeout:* ${new Date(row.timeout_at).toISOString()}`,\n  ``,\n  `*Rationale:*`,\n  `> ${ctx.policy_rationale}`,\n  ``,\n  `*Escalated assets:* ${escalated_summary}`,\n  ``,\n  `*Approve:*`,\n  approve_lines,\n  ``,\n  `*Reject:*`,\n  reject_lines,\n  ``,\n  `_Each link opens a confirmation page. The decision is recorded only when you click *Confirm* on that page (form POST). Slack's link-expander cannot trigger resolution._`,\n  `_FAO-GOV-004: An approver cannot resolve their own invocation. Self-approval attempts raise a loud database exception at the hitl_queue_sod_guard trigger._`\n].join('\\n');\n\nreturn [{ json: {\n  ...ctx,\n  hitl_id:           row.hitl_id,\n  agent_invoker_id:  row.agent_invoker_id,\n  timeout_at:        row.timeout_at,\n  created_at:        row.created_at,\n  approver_links,\n  slack_text\n}}];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -117,7 +117,171 @@
           "mappingMode": "defineBelow",
           "value": {},
           "matchingColumns": [],
-          "schema": [],
+          "schema": [
+            {
+              "id": "correlation_id",
+              "displayName": "correlation_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "execution_id",
+              "displayName": "execution_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "agent_id",
+              "displayName": "agent_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "risk_tier",
+              "displayName": "risk_tier",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "inputs",
+              "displayName": "inputs",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object",
+              "removed": false
+            },
+            {
+              "id": "ai_prompt",
+              "displayName": "ai_prompt",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ai_output",
+              "displayName": "ai_output",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ai_confidence",
+              "displayName": "ai_confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "fractional_cost_usd",
+              "displayName": "fractional_cost_usd",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "policy_outcome",
+              "displayName": "policy_outcome",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "policy_sub_tier",
+              "displayName": "policy_sub_tier",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "policy_rationale",
+              "displayName": "policy_rationale",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "obligations",
+              "displayName": "obligations",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "array",
+              "removed": false
+            },
+            {
+              "id": "hitl_status",
+              "displayName": "hitl_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "hitl_approver_id",
+              "displayName": "hitl_approver_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "error_details",
+              "displayName": "error_details",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
           "attemptToConvertTypes": false,
           "convertFieldsToString": true
         },
@@ -224,7 +388,7 @@
     "binaryMode": "separate",
     "availableInMCP": false
   },
-  "versionId": "b9655130-8582-4de2-8440-0a0eef4f21da",
+  "versionId": "2fa8a8e6-36b2-4899-8ead-cf38b90de73a",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "d7e19fca9705d4d0c36e6fe71822071e2ec1e1c76f266658ed6763dfc41db437"

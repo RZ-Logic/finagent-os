@@ -14,7 +14,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// ============================================================================\n// FAO Reserve Reconciliation Agent — Init Execution\n// ----------------------------------------------------------------------------\n// FAO-GOV-008: Generate correlation_id and execution_id at execution start.\n// Both are UUIDs threaded through every event for this run.\n//\n// FIXTURE DESIGN (calibrated against Kraken Dec 2025 PoR + control coverage):\n//   BTC, ETH, XRP — wallet/ledger calibrated to Kraken's published Dec 31, 2025\n//                   PoR ratios (1.003, 1.013, 1.006 respectively).\n//   USDC          — clean exact-match baseline.\n//   USDT          — synthetic anomaly: stablecoin USD-materiality breach\n//                   (FAO-REC-002).\n//   SOL           — synthetic anomaly: under-reservation floor violation\n//                   (FAO-REC-004).\n//   ADA           — synthetic anomaly: negative liability — krakendb 2014\n//                   precedent (FAO-REC-007).\n//\n// Source URL for real-anchored assets:\n//   https://blog.kraken.com/news/december-2025-proof-of-reserves\n//\n// In production, wallet_data comes from Fireblocks API and ledger_data from\n// NetSuite GL. Inline embedding here isolates policy logic from data-source\n// plumbing for the smoke test; file reads / API calls move in post-launch.\n// ============================================================================\n\n// UUID v4 generator — inline implementation to avoid n8n's sandbox restriction\n// on require('crypto'). Cryptographically adequate for correlation/execution\n// IDs (Math.random is sufficient here; we're not signing anything).\nconst randomUUID = () => {\n  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {\n    const r = Math.random() * 16 | 0;\n    const v = c === 'x' ? r : (r & 0x3 | 0x8);\n    return v.toString(16);\n  });\n};\n\nconst correlation_id = randomUUID();\nconst execution_id   = randomUUID();\nconst agent_id       = 'fao_reserve_recon_v1';\nconst risk_tier      = 'RED';\n\n// --- Fixture: simulated on-chain wallet holdings (Fireblocks proxy) -------\nconst wallet_data = {\n  BTC:  167690.25,        // anchored to Kraken Dec 2025 PoR (ratio 1.003)\n  ETH:  2884112,          // anchored to Kraken Dec 2025 PoR (ratio 1.013)\n  USDC: 891723456,        // synthetic clean exact-match baseline\n  USDT: 1234567890.50,    // synthetic stablecoin USD-materiality anomaly\n  SOL:  8740000,          // synthetic under-reservation anomaly (ratio 0.95)\n  XRP:  128265000,        // anchored to Kraken Dec 2025 PoR (ratio 1.006)\n  ADA:  47293847          // wallet positive; ledger intentionally negative\n};\n\n// --- Fixture: simulated internal client-liability ledger (NetSuite proxy) -\nconst ledger_data = {\n  BTC:  167188.68,\n  ETH:  2847100,\n  USDC: 891723456,\n  USDT: 1234500000,\n  SOL:  9200000,\n  XRP:  127500000,\n  ADA:  -150000           // FAO-REC-007 trigger, krakendb 2014 precedent\n};\n\n// --- Fixture provenance metadata (threaded into shadow_ledger evidence) ---\n// Self-identifying provenance per asset so every ledger row carries the\n// source of truth used. Auditor query:\n//   SELECT inputs->>'asset', inputs->'fixture_metadata'->>'source'\n//   FROM shadow_ledger;\nconst fixture_metadata = {\n  BTC:  { source: 'kraken_por_2025_q4_anchor',  reference_url: 'https://blog.kraken.com/news/december-2025-proof-of-reserves', notes: 'Wallet/ledger calibrated to published Dec 31 2025 ratio 100.3%' },\n  ETH:  { source: 'kraken_por_2025_q4_anchor',  reference_url: 'https://blog.kraken.com/news/december-2025-proof-of-reserves', notes: 'Wallet/ledger calibrated to published Dec 31 2025 ratio 101.3%' },\n  USDC: { source: 'synthetic_clean_baseline',   notes: 'Exact match — exercises the in-band ALLOW path with zero discrepancy' },\n  USDT: { source: 'synthetic_anomaly',          control: 'FAO-REC-002', notes: 'Stablecoin USD-materiality breach: ratio in band but absolute USD discrepancy exceeds threshold' },\n  SOL:  { source: 'synthetic_anomaly',          control: 'FAO-REC-004', notes: 'Under-reservation: ratio 0.95 below floor 1.00' },\n  XRP:  { source: 'kraken_por_2025_q4_anchor',  reference_url: 'https://blog.kraken.com/news/december-2025-proof-of-reserves', notes: 'Wallet/ledger calibrated to published Dec 31 2025 ratio 100.6%' },\n  ADA:  { source: 'synthetic_anomaly',          control: 'FAO-REC-007', notes: 'Negative liability — krakendb 2014 reference implementation precedent' }\n};\n\nconst asset_count = Object.keys(wallet_data).length;\n\nreturn [{\n  json: {\n    // --- Writer payload (17-field schema per Writer sub-workflow) -----------\n    correlation_id,\n    execution_id,\n    agent_id,\n    risk_tier,\n    inputs: {\n      event_type:        'STARTED',\n      asset_scope:       Object.keys(wallet_data),\n      asset_count:       asset_count,\n      wallet_source:     'fixture://wallet_data.json (Fireblocks proxy)',\n      ledger_source:     'fixture://ledger_data.json (NetSuite proxy)',\n      fixture_provenance: fixture_metadata\n    },\n    ai_prompt:           null,\n    ai_output:           null,\n    ai_confidence:       null,\n    fractional_cost_usd: null,\n    policy_outcome:      'ALLOW',\n    policy_sub_tier:     null,\n    policy_rationale:    `FAO-REC-001 ${agent_id} execution started. Reconciling ${asset_count} assets (${Object.keys(wallet_data).join(', ')}) against materiality thresholds. Risk tier: ${risk_tier}. Fixture mix: 3 Kraken Dec 2025 PoR anchors + 1 clean baseline + 3 synthetic control anomalies.`,\n    obligations:         [],\n    hitl_status:         'NOT_REQUIRED',\n    hitl_approver_id:    null,\n    status:              'SUCCESS',\n    error_details:       null,\n\n    // --- Internal context (underscore prefix; ignored by autoMapInputData) --\n    _wallet_data:      wallet_data,\n    _ledger_data:      ledger_data,\n    _fixture_metadata: fixture_metadata\n  }\n}];"
+        "jsCode": "// ============================================================================\n// FAO Reserve Reconciliation Agent — Init Execution\n// ----------------------------------------------------------------------------\n// FAO-GOV-008: Generate correlation_id and execution_id at execution start.\n// Both are UUIDs threaded through every event for this run.\n//\n// FIXTURE DESIGN (calibrated against Kraken Dec 2025 PoR + control coverage):\n//   BTC, ETH, XRP — wallet/ledger calibrated to Kraken's published Dec 31, 2025\n//                   PoR ratios (1.003, 1.013, 1.006 respectively).\n//   USDC          — clean exact-match baseline.\n//   USDT          — synthetic anomaly: stablecoin USD-materiality breach\n//                   (FAO-REC-002).\n//   SOL           — synthetic anomaly: under-reservation floor violation\n//                   (FAO-REC-004).\n//   ADA           — synthetic anomaly: negative liability — krakendb 2014\n//                   precedent (FAO-REC-007).\n//\n// Source URL for real-anchored assets:\n//   https://blog.kraken.com/news/december-2025-proof-of-reserves\n//\n// In production, wallet_data comes from Fireblocks API and ledger_data from\n// NetSuite GL. Inline embedding here isolates policy logic from data-source\n// plumbing for the smoke test; file reads / API calls move in post-launch.\n// ============================================================================\n\n// UUID v4 generator — inline implementation to avoid n8n's sandbox restriction\n// on require('crypto'). Cryptographically adequate for correlation/execution\n// IDs (Math.random is sufficient here; we're not signing anything).\nconst randomUUID = () => {\n  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {\n    const r = Math.random() * 16 | 0;\n    const v = c === 'x' ? r : (r & 0x3 | 0x8);\n    return v.toString(16);\n  });\n};\n\nconst correlation_id = randomUUID();\nconst execution_id   = randomUUID();\nconst agent_id       = 'fao_reserve_recon_v1';\nconst risk_tier      = 'RED';\n\n// --- Fixture: simulated on-chain wallet holdings (Fireblocks proxy) -------\nconst wallet_data = {\n  BTC:  167690.25,        // anchored to Kraken Dec 2025 PoR (ratio 1.003)\n  ETH:  2884112,          // anchored to Kraken Dec 2025 PoR (ratio 1.013)\n  USDC: 891723456,        // synthetic clean exact-match baseline\n  USDT: 1234567890.50,    // synthetic stablecoin USD-materiality anomaly\n  SOL:  8740000,          // synthetic under-reservation anomaly (ratio 0.95)\n  XRP:  128265000,        // anchored to Kraken Dec 2025 PoR (ratio 1.006)\n  ADA:  47293847          // wallet positive; ledger intentionally negative\n};\n\n// --- Fixture: simulated internal client-liability ledger (NetSuite proxy) -\nconst ledger_data = {\n  BTC:  167188.68,\n  ETH:  2847100,\n  USDC: 891723456,\n  USDT: 1234500000,\n  SOL:  9200000,\n  XRP:  127500000,\n  ADA:  -150000           // FAO-REC-007 trigger, krakendb 2014 precedent\n};\n\n// --- Fixture provenance metadata (threaded into shadow_ledger evidence) ---\n// Self-identifying provenance per asset so every ledger row carries the\n// source of truth used. Auditor query:\n//   SELECT inputs->>'asset', inputs->'fixture_metadata'->>'source'\n//   FROM shadow_ledger;\nconst fixture_metadata = {\n  BTC:  { source: 'kraken_por_2025_q4_anchor',  reference_url: 'https://blog.kraken.com/news/december-2025-proof-of-reserves', notes: 'Wallet/ledger calibrated to published Dec 31 2025 ratio 100.3%' },\n  ETH:  { source: 'kraken_por_2025_q4_anchor',  reference_url: 'https://blog.kraken.com/news/december-2025-proof-of-reserves', notes: 'Wallet/ledger calibrated to published Dec 31 2025 ratio 101.3%' },\n  USDC: { source: 'synthetic_clean_baseline',   notes: 'Exact match — exercises the in-band ALLOW path with zero discrepancy' },\n  USDT: { source: 'synthetic_anomaly',          control: 'FAO-REC-002', notes: 'Stablecoin USD-materiality breach: ratio in band but absolute USD discrepancy exceeds threshold' },\n  SOL:  { source: 'synthetic_anomaly',          control: 'FAO-REC-004', notes: 'Under-reservation: ratio 0.95 below floor 1.00' },\n  XRP:  { source: 'kraken_por_2025_q4_anchor',  reference_url: 'https://blog.kraken.com/news/december-2025-proof-of-reserves', notes: 'Wallet/ledger calibrated to published Dec 31 2025 ratio 100.6%' },\n  ADA:  { source: 'synthetic_anomaly',          control: 'FAO-REC-007', notes: 'Negative liability — krakendb 2014 reference implementation precedent' }\n};\n\nconst asset_count = Object.keys(wallet_data).length;\n\nreturn [{\n  json: {\n    // --- Writer payload (17-field schema per Writer sub-workflow) -----------\n    correlation_id,\n    execution_id,\n    agent_id,\n    agent_invoker_email: 'aisha.okonkwo@finagent-os.demo',  // ADD THIS LINE — demo-hardcoded; production sourced from auth context\n    risk_tier,\n    inputs: {\n      event_type:        'STARTED',\n      asset_scope:       Object.keys(wallet_data),\n      asset_count:       asset_count,\n      wallet_source:     'fixture://wallet_data.json (Fireblocks proxy)',\n      ledger_source:     'fixture://ledger_data.json (NetSuite proxy)',\n      fixture_provenance: fixture_metadata\n    },\n    ai_prompt:           null,\n    ai_output:           null,\n    ai_confidence:       null,\n    fractional_cost_usd: null,\n    policy_outcome:      'ALLOW',\n    policy_sub_tier:     null,\n    policy_rationale:    `FAO-REC-001 ${agent_id} execution started. Reconciling ${asset_count} assets (${Object.keys(wallet_data).join(', ')}) against materiality thresholds. Risk tier: ${risk_tier}. Fixture mix: 3 Kraken Dec 2025 PoR anchors + 1 clean baseline + 3 synthetic control anomalies.`,\n    obligations:         [],\n    hitl_status:         'NOT_REQUIRED',\n    hitl_approver_id:    null,\n    status:              'SUCCESS',\n    error_details:       null,\n\n    // --- Internal context (underscore prefix; ignored by autoMapInputData) --\n    _wallet_data:      wallet_data,\n    _ledger_data:      ledger_data,\n    _fixture_metadata: fixture_metadata\n  }\n}];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -175,7 +175,171 @@
           "mappingMode": "defineBelow",
           "value": {},
           "matchingColumns": [],
-          "schema": [],
+          "schema": [
+            {
+              "id": "correlation_id",
+              "displayName": "correlation_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "execution_id",
+              "displayName": "execution_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "agent_id",
+              "displayName": "agent_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "risk_tier",
+              "displayName": "risk_tier",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "inputs",
+              "displayName": "inputs",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object",
+              "removed": false
+            },
+            {
+              "id": "ai_prompt",
+              "displayName": "ai_prompt",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ai_output",
+              "displayName": "ai_output",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ai_confidence",
+              "displayName": "ai_confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "fractional_cost_usd",
+              "displayName": "fractional_cost_usd",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "policy_outcome",
+              "displayName": "policy_outcome",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "policy_sub_tier",
+              "displayName": "policy_sub_tier",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "policy_rationale",
+              "displayName": "policy_rationale",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "obligations",
+              "displayName": "obligations",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "array",
+              "removed": false
+            },
+            {
+              "id": "hitl_status",
+              "displayName": "hitl_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "hitl_approver_id",
+              "displayName": "hitl_approver_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "error_details",
+              "displayName": "error_details",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
           "attemptToConvertTypes": false,
           "convertFieldsToString": true
         },
@@ -192,7 +356,7 @@
     },
     {
       "parameters": {
-        "content": "## FAO Reserve Reconciliation Agent v1\n\n**Risk Tier:** RED (2 approvers required for HITL)\n**Process Owner:** Sarah Chen (Controller)\n**Controls implemented:** FAO-REC-001, FAO-REC-002, FAO-REC-004, FAO-REC-006, FAO-REC-007, FAO-GOV-001 (via Writer), FAO-GOV-008, FAO-GOV-013\n\n### Event flow per execution\n\n1. **STARTED** (1 row) — execution metadata, asset scope\n2. **ASSET_RECONCILED** (7 rows, one per asset) — observation + deterministic policy decision atomically\n3. **COMMITTED** (1 row, gated) — execution rollup; only written when no asset routes to HITL\n\nDemo run with current fixtures: 8 rows total (1 STARTED + 7 ASSET_RECONCILED + 0 COMMITTED, because SOL/ADA/USDT are REQUIRE_HUMAN).\n\nWhen HITL Gateway lands (Apr 25), REQUIRE_HUMAN executions extend the chain through approval to a delayed COMMITTED.",
+        "content": "## FAO Reserve Reconciliation Agent v1\n\n**Risk Tier:** RED (2 approvers required for HITL)\n**Process Owner:** Sarah Chen (Controller)\n**Controls implemented:** FAO-REC-001, FAO-REC-002, FAO-REC-004, FAO-REC-006, FAO-REC-007, FAO-GOV-001 (via Writer), FAO-GOV-008, FAO-GOV-013\n\n### Event flow per execution\n\n1. **STARTED** (1 row) — execution metadata, asset scope\n2. **ASSET_RECONCILED** (7 rows, one per asset) — observation + deterministic policy decision atomically\n3. **COMMITTED** (1 row, gated) — execution rollup; only written when no asset routes to HITL\n4. HITL extension active. REQUIRE_HUMAN executions route through HITL Gateway → Slack notification → human resolution → delayed COMMITTED. Audit chain extends to 11 rows for HITL-gated runs",
         "height": 504,
         "width": 480,
         "color": 4
@@ -205,6 +369,137 @@
       ],
       "id": "8afc07bf-781a-4ae5-a46e-99422053aceb",
       "name": "Architecture Note"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================================\n// FAO Reserve Recon — Compose HITL Gateway Payload\n// ----------------------------------------------------------------------------\n// Wired to the False branch of \"Any HITL Required?\" — fires only when\n// _rollup_outcome === 'REQUIRE_HUMAN'. Transforms Aggregate Rollup's\n// shadow_ledger-shaped output into the gateway's expected payload shape.\n//\n// The gateway validates required fields (correlation_id, execution_id,\n// agent_id, agent_invoker_email, risk_tier, policy_sub_tier,\n// policy_rationale) and threads escalated_assets / execution_summary\n// through to the Slack message and HITL_REQUESTED event.\n//\n// agent_invoker_email is sourced from Init Execution (single source of\n// truth). escalated_assets comes from the rollup's inputs object.\n// ============================================================================\n\nconst init   = $('Init Execution').first().json;\nconst rollup = $input.first().json;\n\n// Defensive — Aggregate Rollup must already have routed REQUIRE_HUMAN to us\nif (rollup._rollup_outcome !== 'REQUIRE_HUMAN') {\n  throw new Error(\n    `Compose HITL Gateway Payload: expected _rollup_outcome=REQUIRE_HUMAN but got '${rollup._rollup_outcome}'. ` +\n    `Check 'Any HITL Required?' If node — false branch should only fire for REQUIRE_HUMAN.`\n  );\n}\n\nif (!init.agent_invoker_email) {\n  throw new Error(\n    `Compose HITL Gateway Payload: agent_invoker_email is missing from Init Execution. ` +\n    `Add 'agent_invoker_email' to Init Execution's returned object.`\n  );\n}\n\n// Per-asset summary — for the gateway's Slack message body / future use\nconst per_asset_summary = (rollup.inputs && rollup.inputs.per_asset_summary) || [];\n\nreturn [{ json: {\n  correlation_id:      rollup.correlation_id,\n  execution_id:        rollup.execution_id,\n  agent_id:            rollup.agent_id,\n  agent_invoker_email: init.agent_invoker_email,\n  risk_tier:           rollup.risk_tier,\n  policy_sub_tier:     rollup.policy_sub_tier,\n  policy_rationale:    rollup.policy_rationale,\n  escalated_assets:    (rollup.inputs && rollup.inputs.escalated_assets) || [],\n  execution_summary:   {\n    counts:            (rollup.inputs && rollup.inputs.counts) || null,\n    per_asset_summary: per_asset_summary,\n    obligations:       rollup.obligations || []\n  }\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        432
+      ],
+      "id": "de20d590-3f8b-488f-9d8f-d4d70a9ca7ab",
+      "name": "Compose HITL Gateway Payload"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "mUAC9qIMkVzlV5qw",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/mUAC9qIMkVzlV5qw",
+          "cachedResultName": "fao_hitl_gateway_v1"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "correlation_id",
+              "displayName": "correlation_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "execution_id",
+              "displayName": "execution_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "agent_id",
+              "displayName": "agent_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "agent_invoker_email",
+              "displayName": "agent_invoker_email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "risk_tier",
+              "displayName": "risk_tier",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "policy_sub_tier",
+              "displayName": "policy_sub_tier",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "policy_rationale",
+              "displayName": "policy_rationale",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "escalated_assets",
+              "displayName": "escalated_assets",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "array",
+              "removed": false
+            },
+            {
+              "id": "execution_summary",
+              "displayName": "execution_summary",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        2176,
+        432
+      ],
+      "id": "a176d377-c050-4c3a-9505-5f69e419e383",
+      "name": "HITL Gateway"
     }
   ],
   "pinData": {},
@@ -294,6 +589,24 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Compose HITL Gateway Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose HITL Gateway Payload": {
+      "main": [
+        [
+          {
+            "node": "HITL Gateway",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     }
@@ -304,7 +617,7 @@
     "binaryMode": "separate",
     "availableInMCP": false
   },
-  "versionId": "b32f185d-9266-425b-81b9-d1944bf8438d",
+  "versionId": "79037ef4-5469-445c-b313-d021a04e4677",
   "meta": {
     "instanceId": "d7e19fca9705d4d0c36e6fe71822071e2ec1e1c76f266658ed6763dfc41db437"
   },

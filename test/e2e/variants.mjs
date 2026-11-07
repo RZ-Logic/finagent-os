@@ -17,6 +17,12 @@
 //    demand and wait for it. The production sweeper is imported but not
 //    published: a five-minute schedule would sweep the shared local stack
 //    under other test runs. All other sweeper nodes are the export's.
+// 3. Fix round 3 (S13, FAO-GOV-007 / FAO-GOV-008): a notifier stand-in that
+//    always throws, and a second on-demand sweeper copy whose HITL Gateway
+//    calls it, so one sweep has a failed notifier call and sweep item_errors
+//    together. That copy differs from the export only in its trigger (as in
+//    2) and its HITL Gateway target; the stand-in keeps the notifier's
+//    Execute Workflow Trigger node and adds one throwing Code node.
 // ============================================================================
 
 import { randomUUID } from 'node:crypto';
@@ -38,6 +44,12 @@ export const PUBLISH_ORDER = ['writer', 'gateway', 'errorHandler', 'flagship'];
 export const FLAGSHIP_PATH = 'fao-recon-invoke';
 export const SWEEP_PATH = 'fao-e2e-sweep';
 export const SWEEP_ID = 'FaoE2eSweepHook1';
+// Fix round 3 (S13): the failing notifier stand-in and the sweeper copy that
+// calls it.
+export const FAILING_NOTIFIER_ID = 'FaoE2eNotifFail1';
+export const FAILING_NOTIFIER_MESSAGE = 'FAO e2e: forced notifier failure';
+export const SWEEP_NFAIL_PATH = 'fao-e2e-sweep-notifier-fails';
+export const SWEEP_NFAIL_ID = 'FaoE2eSweepNfal1';
 // The flagship agent and the local-only agent S10 runs under (lib.mjs
 // re-exports both).
 export const FLAGSHIP_AGENT = 'fao_reserve_recon_v1';
@@ -196,14 +208,14 @@ export function flagshipVariant(root, name) {
   return wf;
 }
 
-export function sweeperOnDemand(root) {
+export function sweeperOnDemand(root, { id = SWEEP_ID, path = SWEEP_PATH, label = 'e2e on-demand trigger' } = {}) {
   const wf = readExport(root, 'sweeper');
   const idx = wf.nodes.findIndex((n) => n.type === 'n8n-nodes-base.scheduleTrigger');
   if (idx < 0) throw new Error('variants: sweeper has no Schedule Trigger');
   const old = wf.nodes[idx];
   const name = 'E2E Sweep Webhook';
   wf.nodes[idx] = {
-    parameters: { httpMethod: 'POST', path: SWEEP_PATH, authentication: 'headerAuth', responseMode: 'lastNode', options: {} },
+    parameters: { httpMethod: 'POST', path, authentication: 'headerAuth', responseMode: 'lastNode', options: {} },
     id: randomUUID(),
     name,
     type: 'n8n-nodes-base.webhook',
@@ -214,10 +226,59 @@ export function sweeperOnDemand(root) {
   };
   wf.connections[name] = wf.connections[old.name];
   delete wf.connections[old.name];
-  wf.id = SWEEP_ID;
-  wf.name = 'fao_hitl_sweeper_v1 [e2e on-demand trigger]';
+  wf.id = id;
+  wf.name = `fao_hitl_sweeper_v1 [${label}]`;
   wf.versionId = randomUUID();
   wf.tags = [];
+  return wf;
+}
+
+// S13: the notifier's own Execute Workflow Trigger (same inputs), then a Code
+// node that always throws, so the sweeper's HITL Gateway call fails the way
+// a broken or unpublished notifier does. No error workflow, no credentials.
+export function failingNotifier(root) {
+  const gw = readExport(root, 'gateway');
+  const trigger = gw.nodes.find((n) => n.type === 'n8n-nodes-base.executeWorkflowTrigger');
+  if (!trigger) throw new Error('variants: notifier has no Execute Workflow Trigger');
+  const fail = 'E2E Forced Failure';
+  return {
+    name: 'fao_hitl_gateway_v1 [e2e always fails]',
+    nodes: [
+      { ...structuredClone(trigger), id: randomUUID() },
+      {
+        parameters: { mode: 'runOnceForAllItems', jsCode: `throw new Error(${JSON.stringify(FAILING_NOTIFIER_MESSAGE)});` },
+        type: 'n8n-nodes-base.code',
+        typeVersion: 2,
+        position: [trigger.position[0] + 220, trigger.position[1]],
+        id: randomUUID(),
+        name: fail,
+      },
+    ],
+    pinData: {},
+    connections: { [trigger.name]: { main: [[{ node: fail, type: 'main', index: 0 }]] } },
+    active: false,
+    settings: { executionOrder: 'v1' },
+    versionId: randomUUID(),
+    id: FAILING_NOTIFIER_ID,
+    tags: [],
+  };
+}
+
+// S13: the on-demand sweeper with exactly one change more, HITL Gateway
+// calling the failing stand-in instead of the notifier.
+export function sweeperNotifierFails(root) {
+  const wf = sweeperOnDemand(root, { id: SWEEP_NFAIL_ID, path: SWEEP_NFAIL_PATH, label: 'e2e notifier fails' });
+  const calls = wf.nodes.filter((n) => n.type === 'n8n-nodes-base.executeWorkflow');
+  const gw = calls.find((n) => n.name === 'HITL Gateway');
+  if (calls.length !== 1 || !gw || !gw.parameters.workflowId || gw.parameters.workflowId.value !== EXPORTS.gateway.id) {
+    throw new Error(`variants: expected one Execute Workflow node, HITL Gateway calling ${EXPORTS.gateway.id}`);
+  }
+  gw.parameters.workflowId = {
+    ...gw.parameters.workflowId,
+    value: FAILING_NOTIFIER_ID,
+    cachedResultUrl: `/workflow/${FAILING_NOTIFIER_ID}`,
+    cachedResultName: 'fao_hitl_gateway_v1 [e2e always fails]',
+  };
   return wf;
 }
 
@@ -227,13 +288,18 @@ export function buildWorkflowSet(root) {
   for (const key of Object.keys(EXPORTS)) out[EXPORTS[key].file] = readExport(root, key);
   for (const name of Object.keys(VARIANTS)) out[`e2e_recon_${name}.json`] = flagshipVariant(root, name);
   out['e2e_sweeper_on_demand.json'] = sweeperOnDemand(root);
+  out['e2e_notifier_always_fails.json'] = failingNotifier(root);
+  out['e2e_sweeper_notifier_fails.json'] = sweeperNotifierFails(root);
   return out;
 }
 
+// The failing stand-in is published before the sweeper copy that calls it.
 export function publishIds() {
   return [
     ...PUBLISH_ORDER.map((k) => EXPORTS[k].id),
     ...Object.values(VARIANTS).map((v) => v.id),
     SWEEP_ID,
+    FAILING_NOTIFIER_ID,
+    SWEEP_NFAIL_ID,
   ];
 }

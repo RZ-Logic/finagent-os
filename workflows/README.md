@@ -110,13 +110,19 @@ Schedule Trigger (every 5 minutes)
   -> Run Sweep                 [postgres: fao_maintenance_sweep()]
        -> Expand Notifications [code: one notifier input per escalation and re-notify entry]
             -> HITL Gateway    [execute workflow: notifier, each item, continue on error]
-                 -> Check Notifier Results [code: fails the execution when any notifier call failed]
-       -> Check Sweep Errors   [code: fails the execution when item_errors is not empty]
+                 -> Check Notifier Results [code: lists each failed notifier call; never stops the execution]
+       -> Check Sweep Errors   [code: runs last; fails the execution once for notifier failures and item_errors]
 ```
 
 The sweep (in SQL) expires unclaimed tokens, fails stale runs, expires overdue requests and writes their final COMMITTED (status FAILURE), escalates once, and lists failed notifications for retry up to `notify_max_attempts`. Deadlines do not depend on the schedule: `fao_hitl_decide` refuses a decision at or after the deadline on its own.
 
-HITL Gateway keeps going when one notifier call fails, so every listed notice is attempted. Check Notifier Results then fails the sweeper execution with `FAO-GOV-007 sweep: <n> notifier failures: <hitl_id:kind:level (message)>, ...` when any call failed (a database error in the notifier, or an unpublished notifier), so the failure shows as a failed sweeper execution, not a green one. Failures the notifier records itself (Slack errors and unusable settings) are not errors here; the sweep retries and escalates them.
+HITL Gateway keeps going when one notifier call fails, so every listed notice is attempted. Check Notifier Results lists each failed call (a database error in the notifier, or an unpublished notifier) as `hitl_id:kind:level (message)` and does not throw. Check Sweep Errors is the only node that fails the sweeper execution. With execution order v1, Run Sweep's two branches run one after the other, topmost on the canvas first; Check Sweep Errors sits below Expand Notifications, so it runs last, on every sweep, after every notice was attempted. It throws once, naming both kinds of failure, each part only when it applies:
+
+```
+FAO-GOV-007 sweep: <n> notifier failures: <hitl_id:kind:level (message)>, ...; FAO-GOV-008 sweep: <n> item errors: <step:id:sqlstate>, ...
+```
+
+It fails closed: when the sweep listed notices but no notifier results can be read, or fewer calls than were listed, that counts as a notifier failure (`missing (...)`). `scripts/check-exports.mjs` holds the order (execution order v1, the positions, the two Run Sweep branches, no other sweeper Code node throws). Failures the notifier records itself (Slack errors and unusable settings) are not errors here; the sweep retries and escalates them.
 
 ### 6. Error handler: `fao_error_handler_v1`
 

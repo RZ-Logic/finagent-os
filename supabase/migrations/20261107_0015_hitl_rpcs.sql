@@ -253,8 +253,17 @@ COMMENT ON FUNCTION public.fao_hitl_get(json) IS
 --      the hitl_queue row guard re-checks every rule
 --   9. HITL_RESOLVED
 --  10. the run must be AWAITING_HITL (else raise, rolling everything back);
---      rollup; COMMITTED and run COMMITTED, or COMMIT_BLOCKED and run FAILED
---      (AUDIT_CHAIN_MISMATCH, ok:true, not journaled)
+--      the agent row is read FOR SHARE, so a concurrent status change waits
+--      for this decision or is seen by it; rollup; then
+--      APPROVED and the agent not ACTIVE (fix round 3, FAO-GOV-002): never
+--        committed; COMMIT_BLOCKED with inputs.code AGENT_NOT_ACTIVE, the
+--        agent status and the rollup problems, run FAILED, and the refusal
+--        envelope AGENT_NOT_ACTIVE (409, journaled) carrying the decision
+--        fields; the decision and HITL_RESOLVED stand
+--      chain not intact: COMMIT_BLOCKED and run FAILED (AUDIT_CHAIN_MISMATCH,
+--        ok:true, not journaled)
+--      otherwise COMMITTED and run COMMITTED (REJECTED commits with status
+--        ROLLED_BACK whatever the agent status)
 -- Every refusal in steps 1 to 7 is journaled with target hitl_queue, the id
 -- text as key and the attempted decision (plus invalid_body when the body
 -- was refused), and returns no request data.
@@ -288,6 +297,7 @@ DECLARE
   v_ledger    bigint;
   v_obl       text[];
   v_symbols   jsonb;
+  v_status    public.agent_status;
 BEGIN
   v_key     := left(p_hitl_id, 20);
   v_attempt := jsonb_build_object('decision', left(p_decision, 200)) || (v_in->'note');
@@ -405,7 +415,48 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
+  -- FAO-GOV-002 (fix round 3): the registry status gate holds at commit. The
+  -- share lock orders this decision against fao_admin_set_agent, which locks
+  -- the row FOR UPDATE; a missing row reads as not ACTIVE (fail closed).
+  SELECT ar.status INTO v_status
+    FROM public.agent_registry ar
+   WHERE ar.agent_id = v_run.agent_id
+     FOR SHARE;
+
   r := fao_private.run_rollup(v_req.correlation_id);
+
+  IF v_decision = 'APPROVED'::public.hitl_decision
+     AND v_status IS DISTINCT FROM 'ACTIVE'::public.agent_status THEN
+    PERFORM fao_private.append_event(
+      v_req.correlation_id,
+      'COMMIT_BLOCKED',
+      jsonb_build_object(
+        'hitl_id',      v_req.hitl_id,
+        'problems',     r->'problems',
+        'code',         'AGENT_NOT_ACTIVE',
+        'agent_status', v_status::text),
+      'BLOCKED'::public.policy_outcome,
+      NULL,
+      format('FAO-GOV-002 agent %s status %s at commit; approved run not committed', v_run.agent_id, coalesce(v_status::text, 'MISSING'))
+        || CASE WHEN (r->>'chain_ok')::boolean IS NOT TRUE THEN '; FAO-GOV-001 audit chain incomplete' ELSE '' END,
+      NULL,
+      v_decision::text::public.hitl_status,
+      NULL,
+      'FAILURE'::public.execution_status,
+      NULL);
+
+    UPDATE public.run_invocations
+       SET state = 'FAILED', finished_at = now(), last_error = 'agent not ACTIVE at commit'
+     WHERE correlation_id = v_req.correlation_id;
+
+    RETURN fao_private.refuse(c_entry, 'hitl_queue', v_key, v_attempt, 'AGENT_NOT_ACTIVE')
+      || jsonb_build_object(
+           'hitl_id',             v_req.hitl_id,
+           'decision',            v_decision::text,
+           'decided_at',          v_decided,
+           'committed',           false,
+           'committed_ledger_id', NULL);
+  END IF;
 
   IF (r->>'chain_ok')::boolean IS NOT TRUE THEN
     PERFORM fao_private.append_event(
@@ -475,7 +526,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.fao_hitl_decide(json) IS
-  'FAO-GOV-004, FAO-GOV-001, FAO-REC-001: the only way a HITL decision is recorded; body {p_hitl_id, p_decision, p_notes?} decoded by fao_private.client_args. Approver from auth.uid() only; approver role required; the invoker is refused (SOD_SELF_APPROVAL); refused at or after the deadline; decision, HITL_RESOLVED, rollup and COMMITTED (or COMMIT_BLOCKED) in one transaction. Refusals are journaled.';
+  'FAO-GOV-004, FAO-GOV-001, FAO-REC-001: the only way a HITL decision is recorded; body {p_hitl_id, p_decision, p_notes?} decoded by fao_private.client_args. Approver from auth.uid() only; approver role required; the invoker is refused (SOD_SELF_APPROVAL); refused at or after the deadline; decision, HITL_RESOLVED, rollup and COMMITTED (or COMMIT_BLOCKED) in one transaction. An APPROVED decision for an agent that is not ACTIVE is never committed: COMMIT_BLOCKED (inputs.code AGENT_NOT_ACTIVE), run FAILED, envelope AGENT_NOT_ACTIVE with the decision fields. Refusals are journaled.';
 
 -- ----------------------------------------------------------------------------
 -- 4. fao_notification_context (FAO-GOV-007)

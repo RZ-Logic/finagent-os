@@ -188,7 +188,8 @@ export const SECTION4 = {
     ],
     absent: [],
     // FAO-GOV-007: the gateway's swallowed errors are read after every item
-    // was attempted; FAO-GOV-008: sweep item errors on their own branch.
+    // was attempted; FAO-GOV-008: Check Sweep Errors on its own branch, run
+    // last, fails the execution once for both (checkSweeperOrder).
     edges: [
       ['Run Sweep', 0, 'Expand Notifications'],
       ['Run Sweep', 0, 'Check Sweep Errors'],
@@ -457,6 +458,7 @@ export const RULES = [
       }
       if (file === FLAGSHIP_FILE) v.push(...checkInvokeWebhook(byName.get('Webhook: Invoke')));
       if (file === 'fao_hitl_gateway_v1.json') v.push(...checkSlackPost(byName.get('Slack: Post Message')));
+      if (file === 'fao_hitl_sweeper_v1.json') v.push(...checkSweeperOrder(wf, byName));
       return v;
     },
   },
@@ -611,6 +613,37 @@ function checkSlackPost(n) {
   if (p.nodeCredentialType !== 'slackApi') v.push('Slack: Post Message nodeCredentialType is not slackApi');
   const ref = (n.credentials || {}).slackApi || {};
   if (ref.name !== CREDENTIALS.slackApi.name) v.push('Slack: Post Message does not use FAO Slack Bot');
+  return v;
+}
+
+// FAO-GOV-007 / FAO-GOV-008 (fix round 3): one sweeper execution surfaces
+// both notifier failures and sweep item errors. Check Sweep Errors is the
+// only sweeper node that throws, so it must run last: with executionOrder v1,
+// Run Sweep's branches run one after the other, topmost on the canvas first
+// (leftmost when level), so Expand Notifications must sit above Check Sweep
+// Errors. Check Notifier Results must not throw.
+function checkSweeperOrder(wf, byName) {
+  const v = [];
+  if ((wf.settings || {}).executionOrder !== 'v1') v.push('sweeper: settings.executionOrder is not v1');
+  const pos = (n) => (n && Array.isArray(n.position) && n.position.length === 2 ? n.position : null);
+  const a = pos(byName.get('Expand Notifications'));
+  const b = pos(byName.get('Check Sweep Errors'));
+  if (!a || !b) {
+    v.push('sweeper: Expand Notifications or Check Sweep Errors has no position');
+  } else if (!(a[1] < b[1] || (a[1] === b[1] && a[0] < b[0]))) {
+    v.push('sweeper: Check Sweep Errors must sit below Expand Notifications so it runs last (executionOrder v1)');
+  }
+  const outs = ((((wf.connections || {})['Run Sweep'] || {}).main || [])[0] || []).map((c) => c && c.node);
+  if (outs.length !== 2 || !outs.includes('Expand Notifications') || !outs.includes('Check Sweep Errors')) {
+    v.push(`sweeper: Run Sweep output 0 must lead to exactly Expand Notifications and Check Sweep Errors, found ${JSON.stringify(outs)}`);
+  }
+  for (const n of nodesOf(wf)) {
+    if (n.type !== T.code || n.name === 'Check Sweep Errors') continue;
+    const code = String(params(n).jsCode || '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    if (/\bthrow\b/.test(code)) {
+      v.push(`sweeper: Code node "${n.name}" throws; only Check Sweep Errors may fail the execution (it names both kinds of failure)`);
+    }
+  }
   return v;
 }
 

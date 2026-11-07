@@ -6,7 +6,8 @@
 --     expires.
 --   FAO-GOV-002 (R04): an idempotency replay issues no new token once the
 --     agent is not ACTIVE (AGENT_NOT_ACTIVE, run EXPIRED); claim refuses an
---     agent that is not ACTIVE; finalize raises for one.
+--     agent that is not ACTIVE; finalize blocks the commit for one
+--     (fix round 3: COMMIT_BLOCKED and run FAILED instead of a raise).
 --   FAO-GOV-001 (R05): ASSET_RECONCILED status agrees with the outcome.
 --   FAO-GOV-008 (R06): claim locks the run row before the token row and
 --     checks the hash again; a token rotated by a replay is INVALID_TOKEN.
@@ -24,7 +25,7 @@
 -- user triggers disabled) come last so earlier cases do not depend on them.
 -- ============================================================================
 BEGIN;
-SELECT plan(73);
+SELECT plan(74);
 
 CREATE TEMP TABLE v (k text PRIMARY KEY, j jsonb);
 CREATE FUNCTION pg_temp.g(p_k text) RETURNS jsonb LANGUAGE sql AS $$ SELECT j FROM v WHERE k = p_k $$;
@@ -218,10 +219,18 @@ SELECT is(pg_temp.g('r4b_claim')->>'code' || '/' || (pg_temp.g('r4b_claim')->>'h
 SELECT is(tests.run_state(pg_temp.c('r4b')) || '/' || pg_temp.consumed(pg_temp.c('r4b'))::text, 'EXPIRED/false',
   'R04: the refused claim expires the run and leaves the token unconsumed');
 SELECT is(pg_temp.jcount('AGENT_NOT_ACTIVE'), 1::bigint, 'R04: the refused claim is journaled');
-SELECT throws_matching(format('SELECT tests.finalize(%L::uuid)', pg_temp.c('r4c')), 'agent fao_ratelimit_test_v1 is not ACTIVE',
-  'R04: finalize of an all-ALLOW run raises once the agent is not ACTIVE');
-SELECT is(tests.run_state(pg_temp.c('r4c')) || '/' || tests.ledger_count(pg_temp.c('r4c'), 'COMMITTED')::text, 'RUNNING/0',
-  'R04: nothing is committed; the run stays RUNNING for the sweep');
+-- Fix round 3: finalize no longer raises; it records the block (see 144).
+INSERT INTO v VALUES ('r4c_fin', tests.finalize(pg_temp.c('r4c')));
+SELECT is(pg_temp.g('r4c_fin')->>'ok' || '/' || (pg_temp.g('r4c_fin')->>'code') || '/' || (pg_temp.g('r4c_fin')->>'http_status')
+          || '/' || (pg_temp.g('r4c_fin')->>'state') || '/' || coalesce(pg_temp.g('r4c_fin')->>'committed_ledger_id', 'null'),
+  'false/AGENT_NOT_ACTIVE/409/FAILED/null',
+  'R04: finalize of an all-ALLOW run once the agent is not ACTIVE answers AGENT_NOT_ACTIVE (409), state FAILED, nothing committed');
+SELECT is(tests.run_state(pg_temp.c('r4c')) || '/' || tests.ledger_count(pg_temp.c('r4c'), 'COMMITTED')::text
+          || '/' || tests.ledger_count(pg_temp.c('r4c'), 'COMMIT_BLOCKED')::text, 'FAILED/0/1',
+  'R04: nothing is committed; the run is FAILED with one COMMIT_BLOCKED');
+SELECT is((SELECT (inputs->>'code') || '/' || (inputs->>'agent_status') || '/' || status::text || '/' || policy_outcome::text
+             FROM public.shadow_ledger WHERE correlation_id = pg_temp.c('r4c') AND inputs->>'event_type' = 'COMMIT_BLOCKED'),
+  'AGENT_NOT_ACTIVE/DEPRECATED/FAILURE/BLOCKED', 'R04: the COMMIT_BLOCKED row names the code and the agent status');
 
 -- ============================================================================
 -- R03: revoked or deactivated invokers' tokens are refused at claim

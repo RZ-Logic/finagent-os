@@ -938,9 +938,16 @@ COMMENT ON FUNCTION public.fao_ledger_append_batch(jsonb) IS
 -- ----------------------------------------------------------------------------
 -- fao_run_finalize (FAO-REC-001, FAO-GOV-004, FAO-GOV-001)
 -- ----------------------------------------------------------------------------
--- One transaction. The run must be RUNNING and its agent ACTIVE (else raise;
--- fix round 2 R04: the registry status gate holds at commit too, on both the
--- COMMITTED and the review branch). The one rollup decides:
+-- One transaction. The run must be RUNNING (else raise). Fix round 2 R04: the
+-- registry status gate holds at commit too, on both the COMMITTED and the
+-- review branch; the agent row is read FOR SHARE, so a concurrent status
+-- change waits for this finalize or is seen by it. The one rollup decides:
+--   agent not ACTIVE -> (fix round 3, FAO-GOV-002, the same shape as
+--                       fao_hitl_decide) COMMIT_BLOCKED with inputs.code
+--                       AGENT_NOT_ACTIVE, the agent status and the rollup
+--                       problems, run FAILED, no request; the refusal
+--                       envelope AGENT_NOT_ACTIVE (409, journaled) with the
+--                       finalize fields and state FAILED
 --   chain not intact -> COMMIT_BLOCKED, run FAILED, AUDIT_CHAIN_MISMATCH
 --                       (ok:true, nothing committed)
 --   review needed    -> request plus HITL_REQUESTED (create_request), run
@@ -960,6 +967,7 @@ DECLARE
   v_ledger  bigint;
   v_obl     text[];
   v_symbols jsonb;
+  v_status  public.agent_status;
 BEGIN
   SELECT * INTO v_run
     FROM public.run_invocations ri
@@ -970,14 +978,56 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  IF NOT EXISTS (SELECT 1 FROM public.agent_registry ar
-                  WHERE ar.agent_id = v_run.agent_id
-                    AND ar.status = 'ACTIVE'::public.agent_status) THEN
-    RAISE EXCEPTION 'FAO-GOV-002 run_finalize: agent % is not ACTIVE', v_run.agent_id
-      USING ERRCODE = '42501';
-  END IF;
+  -- The share lock orders this finalize against fao_admin_set_agent, which
+  -- locks the row FOR UPDATE; a missing row reads as not ACTIVE (fail closed).
+  SELECT ar.status INTO v_status
+    FROM public.agent_registry ar
+   WHERE ar.agent_id = v_run.agent_id
+     FOR SHARE;
 
   r := fao_private.run_rollup(p_correlation_id);
+
+  -- Agent not ACTIVE: never committed and no request, the rollup evidence
+  -- kept (fix round 3).
+  IF v_status IS DISTINCT FROM 'ACTIVE'::public.agent_status THEN
+    PERFORM fao_private.append_event(
+      p_correlation_id,
+      'COMMIT_BLOCKED',
+      jsonb_build_object(
+        'hitl_id',      NULL,
+        'problems',     r->'problems',
+        'code',         'AGENT_NOT_ACTIVE',
+        'agent_status', v_status::text),
+      'BLOCKED'::public.policy_outcome,
+      NULL,
+      format('FAO-GOV-002 agent %s status %s at commit; run not committed', v_run.agent_id, coalesce(v_status::text, 'MISSING'))
+        || CASE WHEN (r->>'chain_ok')::boolean IS NOT TRUE THEN '; FAO-GOV-001 audit chain incomplete' ELSE '' END,
+      NULL,
+      'NOT_REQUIRED'::public.hitl_status,
+      NULL,
+      'FAILURE'::public.execution_status,
+      NULL);
+
+    UPDATE public.run_invocations
+       SET state = 'FAILED', finished_at = now(), last_error = 'agent not ACTIVE at commit'
+     WHERE correlation_id = p_correlation_id;
+
+    RETURN fao_private.refuse('rpc:fao_run_finalize', 'run_invocations', p_correlation_id::text,
+                              jsonb_build_object('agent_id', v_run.agent_id), 'AGENT_NOT_ACTIVE')
+      || jsonb_build_object(
+           'hitl_required',            false,
+           'hitl_id',                  NULL,
+           'approval_url',             NULL,
+           'timeout_at',               NULL,
+           'hitl_requested_ledger_id', NULL,
+           'rollup_outcome',           NULL,
+           'rollup_sub_tier',          NULL,
+           'review_sub_tier',          NULL,
+           'escalated_assets',         NULL,
+           'counts',                   NULL,
+           'committed_ledger_id',      NULL,
+           'state',                    'FAILED');
+  END IF;
 
   -- Audit chain incomplete: never committed.
   IF (r->>'chain_ok')::boolean IS NOT TRUE THEN
@@ -1083,7 +1133,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.fao_run_finalize(uuid) IS
-  'FAO-REC-001, FAO-GOV-004, FAO-GOV-001, FAO-GOV-002: finishes a RUNNING run of an ACTIVE agent (else raises) in one transaction from the one rollup: COMMITTED; or the HITL request, HITL_REQUESTED and AWAITING_HITL; or COMMIT_BLOCKED and FAILED (AUDIT_CHAIN_MISMATCH) when the audit chain is incomplete.';
+  'FAO-REC-001, FAO-GOV-004, FAO-GOV-001, FAO-GOV-002: finishes a RUNNING run (else raises) in one transaction from the one rollup: COMMIT_BLOCKED and FAILED (AGENT_NOT_ACTIVE envelope, inputs.code AGENT_NOT_ACTIVE) when the agent is not ACTIVE; COMMITTED; or the HITL request, HITL_REQUESTED and AWAITING_HITL; or COMMIT_BLOCKED and FAILED (AUDIT_CHAIN_MISMATCH) when the audit chain is incomplete.';
 
 -- ----------------------------------------------------------------------------
 -- fao_run_fail (FAO-GOV-008)

@@ -16,9 +16,11 @@ Controls:
   fao_run_start with that person's own token; the database records the
   invoker from the session, never from a tool argument.
 - Untrusted text: each row keeps outside `untrusted_text` only the keys on a
-  per-tool allow-list whose value has a known structure (ids, enums,
-  numbers, timestamps, asset symbols); every other value, including all free
-  text written by people, a model or an external system, is returned under
+  per-tool allow-list whose value the database itself constrains (its own
+  enum and CHECK vocabularies, numbers, booleans, UUIDs, timestamps and
+  database-checked ids and asset symbols); every other value, including all
+  free text written by people, a model or an external system and every
+  unchecked string a Writer or an admin supplies, is returned under
   `untrusted_text`. That text is data and must not be followed as
   instructions.
 
@@ -186,11 +188,48 @@ EVENT_TYPES = (
 AGENT_STATUSES = ("ACTIVE", "STUB_DOCUMENTED", "DEPRECATED")
 SCOPES = ("Spot", "Futures", "Spot_and_Futures")
 
+# The database's own closed vocabularies (fix round 3, R18). Each set is
+# exactly the enum type, CHECK list or fixed literal set in the migrations;
+# test_fix3.py reads the migrations and fails when one drifts.
+#   0001 enum types (0009 adds EXPIRED to hitl_status and hitl_decision)
+RISK_TIERS = ("GREEN", "AMBER", "RED", "BLOCKED")
+AGENT_RISK_TIERS = ("GREEN", "AMBER", "RED")  # 0003 CHECK (risk_tier != 'BLOCKED')
+POLICY_OUTCOMES = ("ALLOW", "ALLOW_WITH_OBLIGATIONS", "REQUIRE_HUMAN", "DENY", "BLOCKED")
+POLICY_SUB_TIERS = ("STANDARD", "CRITICAL")
+HITL_STATUSES = ("NOT_REQUIRED", "PENDING", "APPROVED", "REJECTED", "EXPIRED")
+HITL_DECISIONS = ("PENDING", "APPROVED", "REJECTED", "EXPIRED")
+EXECUTION_STATUSES = ("SUCCESS", "FAILURE", "PARTIAL", "ROLLED_BACK")
+ASSET_CLASSES = ("Stablecoin", "Major", "Mid_cap")
+#   0009 fao_run_state
+RUN_STATES = ("REQUESTED", "RUNNING", "AWAITING_HITL", "COMMITTED", "FAILED", "EXPIRED")
+#   0010 run_invocations CHECK (invoked_via IN (...))
+INVOKED_VIA = ("mcp", "cli", "test")
+#   0010 fao_notifications CHECK (kind IN (...)); 0015 refuses any other kind
+NOTIFICATION_KINDS = ("REQUESTED", "ESCALATED")
+#   0012 create_request: the only notification_channel literal
+NOTIFICATION_CHANNELS = ("slack",)
+#   inputs.source and inputs.stage: the only literals the database writes
+#   (0013 cutover; 0014 writer, error_workflow; 0015 sweep)
+LEDGER_SOURCES = ("writer", "error_workflow", "sweep", "cutover")
+LEDGER_STAGES = ("before_request", "after_request")
+#   0011 code_http: every result and journal code; any other code raises
+RESULT_CODES = (
+    "OK", "NO_SESSION", "INVALID_INPUT", "NOT_AN_OWNER", "NOT_AUTHORISED",
+    "SOD_SELF_APPROVAL", "SELF_CHANGE", "NOT_FOUND", "UNKNOWN_AGENT",
+    "AGENT_NOT_ACTIVE", "BUSY", "NO_RUN_RECORD", "ALREADY_CLAIMED",
+    "ALREADY_DECIDED", "EXPIRED", "TOKEN_EXPIRED", "INVALID_TOKEN",
+    "RATE_LIMITED", "AUDIT_CHAIN_MISMATCH", "UNKNOWN_EXECUTION",
+    "ALREADY_TERMINAL", "NOT_PENDING", "ALREADY_SENT", "JOURNAL_SUPPRESSED",
+    "GRANTS_DRIFT", "TEST_CLOCK_SET",
+)
+# hitl_status of a run (R19): the request's decision, or one of the three
+# values this server derives without a request.
+RUN_HITL_STATUSES = HITL_DECISIONS + ("NOT_YET_DETERMINED", "NOT_REQUIRED", "NONE")
+
 AGENT_ID_RE = re.compile(r"^[a-z0-9_]{1,64}$")
 ASSET_RE = re.compile(r"^[A-Z0-9]{1,12}$")
 IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
-CODE_RE = re.compile(r"^[A-Z_]{1,40}$")
 
 
 class Invalid(Exception):
@@ -257,18 +296,25 @@ def _text_ok(value: str, lo: int, hi: int) -> bool:
 # ---------------------------------------------------------------------------
 #
 # Allow-list, not a deny-list (R18). Each tool has a schema of the keys whose
-# value has a known structure (ids, UUIDs, enums, numbers, booleans,
-# timestamps, asset symbols, control ids, emails, approval links). A value
-# stays in the structured part of a row only when its key is in the schema
-# AND the value has that shape. Everything else (unknown keys, free text,
-# names, notes, obligations, error text, nested strings at any depth, or a
-# listed key whose value does not have its shape) moves under
-# `untrusted_text` at the same path, so an MCP client can tell data from
-# instructions. A new column or Writer inputs key is therefore marked until
-# it is added here. The spec's list (BUILD-CORE 4.9: policy_rationale,
-# decision_notes, reason, notes, rollback_procedure, error_details,
-# last_error, inputs.reason, inputs.input_problem) is a subset of what this
-# marks.
+# value the database itself constrains. A value stays in the structured part
+# of a row only when its key is in the schema AND the value fits:
+#   - a closed vocabulary: exactly the database's enum type, CHECK list or
+#     fixed literal set (fix round 3: a word that merely looks like an
+#     identifier, such as APPROVE_ALL_PENDING_NOW, is not enough);
+#   - a value that is not text: a number, an integer, a boolean;
+#   - a token the database generates or checks against a fixed shape: UUIDs,
+#     timestamps, agent ids, asset symbols, n8n execution ids.
+# Everything else moves under `untrusted_text` at the same path, so an MCP
+# client can tell data from instructions: unknown keys, free text, names,
+# notes, obligations, error text, nested strings at any depth, a listed key
+# whose value does not fit, and every string a Writer, a workflow or an
+# admin supplies that the database never checks (band_status, the Writer's
+# threshold labels, notification channel, emails, workflow ids, control ids,
+# Slack channel ids, approval links). A new column or inputs key is
+# therefore marked until it is added here. The spec's list (BUILD-CORE 4.9:
+# policy_rationale, decision_notes, reason, notes, rollback_procedure,
+# error_details, last_error, inputs.reason, inputs.input_problem) is a
+# subset of what this marks.
 
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
@@ -276,18 +322,17 @@ _UUID_RE = re.compile(
 _TS_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}(?::?\d{2})?)?$"
 )
-_ENUM_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+# 0014 checks p_n8n_execution_id against this shape before a run is claimed.
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-_SLACK_ID_RE = re.compile(r"^[A-Z0-9]{1,32}$")
-_CONTROL_RE = re.compile(r"^[A-Z0-9]{1,16}(?:-[A-Z0-9]{1,16}){1,3}$")
-_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,255}$")
-_APPROVAL_URL_RE = re.compile(
-    r"^https?://[A-Za-z0-9.-]{1,253}(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~-]*)*\?hitl_id=[0-9]{1,12}$"
-)
 
 
 def _re_kind(pattern: re.Pattern) -> Callable[[Any], bool]:
     return lambda v: isinstance(v, str) and pattern.fullmatch(v) is not None
+
+
+def _set_kind(values: tuple) -> Callable[[Any], bool]:
+    allowed = frozenset(values)
+    return lambda v: isinstance(v, str) and v in allowed
 
 
 def _is_int(v: Any) -> bool:
@@ -304,24 +349,45 @@ def _is_bool(v: Any) -> bool:
 
 K_UUID = _re_kind(_UUID_RE)
 K_TS = _re_kind(_TS_RE)
-K_ENUM = _re_kind(_ENUM_RE)
 K_ID = _re_kind(_ID_RE)
 K_AGENT = _re_kind(AGENT_ID_RE)
 K_ASSET = _re_kind(ASSET_RE)
-K_SLACK_ID = _re_kind(_SLACK_ID_RE)
-K_CONTROL = _re_kind(_CONTROL_RE)
-K_EMAIL = _re_kind(_EMAIL_RE)
-K_APPROVAL_URL = _re_kind(_APPROVAL_URL_RE)
 K_INT = _is_int
 K_NUM = _is_num
 K_BOOL = _is_bool
+K_EVENT_TYPE = _set_kind(EVENT_TYPES)
+K_RISK_TIER = _set_kind(RISK_TIERS)
+K_AGENT_RISK_TIER = _set_kind(AGENT_RISK_TIERS)
+K_AGENT_STATUS = _set_kind(AGENT_STATUSES)
+K_POLICY_OUTCOME = _set_kind(POLICY_OUTCOMES)
+K_SUB_TIER = _set_kind(POLICY_SUB_TIERS)
+K_HITL_STATUS = _set_kind(HITL_STATUSES)
+K_HITL_DECISION = _set_kind(HITL_DECISIONS)
+K_EXEC_STATUS = _set_kind(EXECUTION_STATUSES)
+K_ASSET_CLASS = _set_kind(ASSET_CLASSES)
+K_SCOPE = _set_kind(SCOPES)
+K_RUN_STATE = _set_kind(RUN_STATES)
+K_INVOKED_VIA = _set_kind(INVOKED_VIA)
+K_NOTIFICATION_KIND = _set_kind(NOTIFICATION_KINDS)
+K_NOTIFICATION_CHANNEL = _set_kind(NOTIFICATION_CHANNELS)
+K_SOURCE = _set_kind(LEDGER_SOURCES)
+K_STAGE = _set_kind(LEDGER_STAGES)
+K_CODE = _set_kind(RESULT_CODES)
+K_RUN_HITL_STATUS = _set_kind(RUN_HITL_STATUSES)
 
 
 class ListOf:
-    """A JSON array whose every element fits `item`; else the whole array is untrusted."""
+    """A JSON array whose every element fits `item`; else the whole array is untrusted.
 
-    def __init__(self, item: Any) -> None:
+    `text_keys` names keys an element object may carry as free text: they
+    are split off every element first and returned under `untrusted_text`
+    as a list of the same length (one object per element, empty when the
+    element has none), so the rest of each element can stay structured.
+    """
+
+    def __init__(self, item: Any, text_keys: tuple = ()) -> None:
         self.item = item
+        self.text_keys = text_keys
 
 
 class MapOf:
@@ -341,58 +407,59 @@ class OneOf:
 
 _MISSING = object()
 
+# Rollup items (0012 run_rollup): asset from the run scope, outcome and
+# sub-tier from the enum columns, ratio a number. band_status is the Writer's
+# own label, never checked, so it is split off as free text.
 ASSET_ITEM_SCHEMA = {
     "asset": K_ASSET,
-    "band_status": K_ENUM,
-    "policy_outcome": K_ENUM,
-    "policy_sub_tier": K_ENUM,
+    "policy_outcome": K_POLICY_OUTCOME,
+    "policy_sub_tier": K_SUB_TIER,
     "ratio": K_NUM,
 }
-THRESHOLD_SCHEMA = {
-    "asset_symbol": K_ASSET,
-    "scope": K_ENUM,
-    "asset_class": K_ENUM,
+ASSET_ITEM_TEXT_KEYS = ("band_status",)
+# The Writer's threshold copy in ASSET_RECONCILED inputs: only the numbers.
+# Its symbol, scope and class strings are never checked by the database.
+THRESHOLD_INPUT_SCHEMA = {
     "materiality_usd": K_NUM,
     "ratio_floor": K_NUM,
     "ratio_band_lower": K_NUM,
     "ratio_band_upper": K_NUM,
 }
-# Keys the database and the Writer put in shadow_ledger.inputs (2.10, 2.11),
-# by shape. Free-text keys (reason, input_problem, decision_notes, error,
-# external_ref, failed_node, problems, wallet_source, ledger_source,
-# fixture_provenance) are absent on purpose.
+# Keys of shadow_ledger.inputs (2.10, 2.11) whose value the database checks
+# or writes itself, by shape. Absent on purpose: free text (reason,
+# input_problem, decision_notes, error, external_ref, failed_node, problems,
+# wallet_source, ledger_source, fixture_provenance); the Writer's unchecked
+# labels (band_status; policy_outcome, policy_sub_tier and hitl_status are
+# columns and never a database-written inputs key); the workflow-supplied
+# notification channel (0015 checks only a pattern); the approval link and
+# Slack channel id, which come from admin-set fao_settings values.
 LEDGER_INPUTS_SCHEMA = {
-    "event_type": K_ENUM,
+    "event_type": K_EVENT_TYPE,
     "asset": K_ASSET,
-    "band_status": K_ENUM,
     "wallet": K_NUM,
     "ledger": K_NUM,
     "discrepancy": K_NUM,
     "ratio": K_NUM,
-    "threshold": THRESHOLD_SCHEMA,
-    "policy_outcome": K_ENUM,
-    "policy_sub_tier": K_ENUM,
-    "sub_tier": K_ENUM,
-    "decision": K_ENUM,
-    "counts": MapOf(K_ENUM, K_INT),
-    "escalated_assets": ListOf(OneOf(K_ASSET, ASSET_ITEM_SCHEMA)),
-    "per_asset_summary": ListOf(ASSET_ITEM_SCHEMA),
+    "threshold": THRESHOLD_INPUT_SCHEMA,
+    "sub_tier": K_SUB_TIER,
+    "decision": K_HITL_DECISION,
+    "counts": MapOf(K_POLICY_OUTCOME, K_INT),
+    "escalated_assets": ListOf(OneOf(K_ASSET, ASSET_ITEM_SCHEMA), ASSET_ITEM_TEXT_KEYS),
+    "per_asset_summary": ListOf(ASSET_ITEM_SCHEMA, ASSET_ITEM_TEXT_KEYS),
     "asset_count": K_INT,
     "asset_scope": ListOf(K_ASSET),
-    "invoked_via": K_ENUM,
+    "invoked_via": K_INVOKED_VIA,
     "invoker_id": K_UUID,
     "n8n_execution_id": K_ID,
-    "source": K_ENUM,
-    "stage": K_ENUM,
-    "code": K_ENUM,
-    "agent_status": K_ENUM,
+    "source": K_SOURCE,
+    "stage": K_STAGE,
+    "code": K_CODE,
+    "agent_status": K_AGENT_STATUS,
     "hitl_id": K_INT,
     "agent_invoker_id": K_UUID,
-    "approval_url": K_APPROVAL_URL,
     "configured_approvals": K_INT,
     "enforced_approvals": K_INT,
-    "notification_channel": K_ENUM,
-    "slack_channel_id": K_SLACK_ID,
+    "notification_channel": K_NOTIFICATION_CHANNEL,
     "timeout_at": K_TS,
     "approver_id": K_UUID,
     "approvers": ListOf(K_UUID),
@@ -401,8 +468,7 @@ LEDGER_INPUTS_SCHEMA = {
     "level": K_INT,
     "target_owner_id": K_UUID,
     "attempt": K_INT,
-    "channel": K_ENUM,
-    "kind": K_ENUM,
+    "kind": K_NOTIFICATION_KIND,
     "corrects_ledger_id": K_INT,
     "corrected_by": K_UUID,
 }
@@ -412,52 +478,55 @@ LEDGER_SCHEMA = {
     "execution_id": K_UUID,
     "agent_id": K_AGENT,
     "event_timestamp": K_TS,
-    "risk_tier": K_ENUM,
+    "risk_tier": K_RISK_TIER,
     "inputs": LEDGER_INPUTS_SCHEMA,
     "ai_confidence": K_NUM,
     "fractional_cost_usd": K_NUM,
-    "policy_outcome": K_ENUM,
-    "policy_sub_tier": K_ENUM,
-    "hitl_status": K_ENUM,
+    "policy_outcome": K_POLICY_OUTCOME,
+    "policy_sub_tier": K_SUB_TIER,
+    "hitl_status": K_HITL_STATUS,
     "hitl_approver_id": K_UUID,
-    "status": K_ENUM,
+    "status": K_EXEC_STATUS,
     "corrects_ledger_id": K_INT,
 }
-# Names, roles and display names are free text written by an admin, so they
-# are marked too; an email has a fixed shape.
-OWNER_EMBED_SCHEMA = {"email": K_EMAIL}
+# Admin-written text the database never checks is marked: display names,
+# workflow ids, control ids and the whole owner embed (name, role and email;
+# process_owners.email has no CHECK).
 REGISTRY_SCHEMA = {
     "agent_id": K_AGENT,
-    "risk_tier": K_ENUM,
-    "status": K_ENUM,
-    "workflow_id": K_ID,
+    "risk_tier": K_AGENT_RISK_TIER,
+    "status": K_AGENT_STATUS,
     "approval_threshold": K_INT,
     "max_runs_per_hour": K_INT,
-    "sox_control_ids": ListOf(K_CONTROL),
     "ai_advisory_enabled": K_BOOL,
     "sla_max_execution_seconds": K_INT,
     "sla_max_hitl_resolution_hrs": K_INT,
     "process_owner_id": K_UUID,
-    "process_owners": OWNER_EMBED_SCHEMA,
 }
+# hitl_queue: the approval link carries the admin-set base URL and the
+# invoker embed carries admin-written name, role and email, so both are
+# marked.
 HITL_SCHEMA = {
     "hitl_id": K_INT,
     "correlation_id": K_UUID,
     "agent_id": K_AGENT,
     "agent_invoker_id": K_UUID,
     "created_at": K_TS,
-    "risk_tier": K_ENUM,
-    "sub_tier": K_ENUM,
+    "risk_tier": K_RISK_TIER,
+    "sub_tier": K_SUB_TIER,
     "timeout_at": K_TS,
     "configured_approvals": K_INT,
     "enforced_approvals": K_INT,
-    "escalated_assets": ListOf(ASSET_ITEM_SCHEMA),
-    "approval_url": K_APPROVAL_URL,
-    "decision": K_ENUM,
-    "invoker": OWNER_EMBED_SCHEMA,
+    "escalated_assets": ListOf(ASSET_ITEM_SCHEMA, ASSET_ITEM_TEXT_KEYS),
+    "decision": K_HITL_DECISION,
 }
+# materiality_thresholds: scope and asset_class are enum columns; 0016
+# fao_admin_set_threshold checks asset_symbol against ^[A-Z0-9]{1,12}$.
 THRESHOLDS_SCHEMA = {
-    **THRESHOLD_SCHEMA,
+    "asset_symbol": K_ASSET,
+    "scope": K_SCOPE,
+    "asset_class": K_ASSET_CLASS,
+    **THRESHOLD_INPUT_SCHEMA,
     "last_reviewed_by": K_UUID,
     "last_reviewed_at": K_TS,
     "created_at": K_TS,
@@ -467,17 +536,17 @@ EXECUTION_SCHEMA = {
     "correlation_id": K_UUID,
     "agent_id": K_AGENT,
     "invoker_id": K_UUID,
-    "invoked_via": K_ENUM,
-    "run_state": K_ENUM,
+    "invoked_via": K_INVOKED_VIA,
+    "run_state": K_RUN_STATE,
     "started_at": K_TS,
     "latest_event_at": K_TS,
     "event_count": K_INT,
     "hitl_id": K_INT,
-    "hitl_status": K_ENUM,
+    "hitl_status": K_RUN_HITL_STATUS,
     "decided_at": K_TS,
     "approver_id": K_UUID,
-    "outcome": K_ENUM,
-    "status": K_ENUM,
+    "outcome": K_POLICY_OUTCOME,
+    "status": K_EXEC_STATUS,
     "committed_count": K_INT,
     "conflict": K_BOOL,
     "commit_blocked": K_BOOL,
@@ -485,9 +554,9 @@ EXECUTION_SCHEMA = {
     "correction_count": K_INT,
     "has_run_record": K_BOOL,
 }
+# process_owners: name, role and email are admin-written text.
 OWNER_SCHEMA = {
     "id": K_UUID,
-    "email": K_EMAIL,
     "active": K_BOOL,
     "escalation_to": K_UUID,
 }
@@ -520,12 +589,18 @@ def _split(value: Any, spec: Any) -> tuple:
         if not isinstance(value, list):
             return _MISSING, value
         out = []
+        texts = []
         for item in value:
+            text: dict = {}
+            if spec.text_keys and isinstance(item, dict):
+                text = {k: item[k] for k in spec.text_keys if k in item}
+                item = {k: v for k, v in item.items() if k not in spec.text_keys}
             t, u = _split(item, spec.item)
             if u is not _MISSING or t is _MISSING:
                 return _MISSING, value
             out.append(t)
-        return out, _MISSING
+            texts.append(text)
+        return out, (texts if any(texts) else _MISSING)
     if isinstance(spec, OneOf):
         for option in spec.options:
             t, u = _split(value, option)
@@ -1104,7 +1179,7 @@ def build_server(
                 ref = env.get("ref")
                 return {
                     "status": "refused",
-                    "code": code if isinstance(code, str) and CODE_RE.match(code) else "UNKNOWN",
+                    "code": code if K_CODE(code) else "UNKNOWN",
                     "http_status": status if isinstance(status, int) else None,
                     "ref": ref if isinstance(ref, int) and not isinstance(ref, bool) else None,
                     "idempotency_key": key,
@@ -1120,7 +1195,7 @@ def build_server(
                     return {
                         "status": "replayed",
                         "correlation_id": correlation_id,
-                        "state": state if isinstance(state, str) else None,
+                        "state": state if K_RUN_STATE(state) else None,
                         "idempotency_key": key,
                     }
                 return {
@@ -1165,7 +1240,7 @@ def build_server(
                 "correlation_id": correlation_id,
                 "idempotency_key": key,
             }
-            if isinstance(code, str) and CODE_RE.match(code):
+            if K_CODE(code):
                 result["code"] = code
             return result
 

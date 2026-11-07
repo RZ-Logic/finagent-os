@@ -17,7 +17,7 @@ import { test, after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import * as L from './lib.mjs';
-import { MARKUP_NOTE, MARKUP_NOTE_2 } from './variants.mjs';
+import { MARKUP_NOTE, MARKUP_NOTE_2, FAILING_NOTIFIER_ID, FAILING_NOTIFIER_MESSAGE, SWEEP_NFAIL_ID, SWEEP_NFAIL_PATH } from './variants.mjs';
 
 const P = L.state.variant_paths;
 const FLAGSHIP_PATH = L.state.flagship_path;
@@ -307,7 +307,9 @@ test('S09 a forced node failure goes through the error handler and the run ends 
 });
 
 // ---------------------------------------------------------------------------
-test('S10 markup and injection-shaped values are stored verbatim and escaped in the Slack text', T, async (t) => {
+// The local-only markup agent (S10, S13): process owner Sarah. Kept until the
+// next db:reset.
+async function ensureMarkupAgent() {
   await L.ownerTx(async (c) => {
     await c.query("SELECT set_config('fao.change_reason', 'e2e n8n: local-only markup agent for the escaping scenario', true)");
     await c.query(
@@ -323,6 +325,10 @@ test('S10 markup and injection-shaped values are stored verbatim and escaped in 
       [L.MARKUP_AGENT, MARKUP_AGENT_NAME],
     );
   });
+}
+
+test('S10 markup and injection-shaped values are stored verbatim and escaped in the Slack text', T, async (t) => {
+  await ensureMarkupAgent();
   assert.equal((await L.one('SELECT display_name FROM public.agent_registry WHERE agent_id = $1', [L.MARKUP_AGENT])).display_name, MARKUP_AGENT_NAME);
 
   await L.slack.reset();
@@ -515,5 +521,101 @@ test('S08 expiry and one escalation through the sweeper with the owner-only test
   record(t, 'S08', {
     corr, hitl_id: req.hitl_id, offset_seconds: offset, sweep_http: s.status, ledger: rows.map((r) => r.t),
     executions: `${L.brief(ex)} | ${L.brief(byWorkflow(ex2, SWEEP_WF))}`,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S13 (fix round 3): a failed notifier call and a sweep item error in the
+// same sweep both surface in one failed sweeper execution. The sweeper copy
+// SWEEP_NFAIL_ID calls a notifier stand-in that always throws (variants.mjs).
+// The item error is NO_ESCALATION_TARGET: B (Sarah) invokes the markup agent
+// she owns while her escalation_to is NULL for the sweep, so the TIMEOUT
+// escalation has no target (never the invoker) and is still listed for the
+// channel notice. Her seeded escalation_to (Marcus) is put back in a finally;
+// the helper refuses to start unless it finds that seeded value.
+async function withNoEscalationTarget(user, fn) {
+  const email = (await L.one('SELECT email FROM public.process_owners WHERE id = $1', [L.uid(user)])).email;
+  const seeded = L.uid('marcus');
+  await L.ownerTx(async (c) => {
+    await c.query("SELECT set_config('fao.change_reason', 'e2e n8n S13: no escalation target for one sweep', true)");
+    const u = await c.query('UPDATE public.process_owners SET escalation_to = NULL WHERE email = $1 AND escalation_to = $2', [email, seeded]);
+    if (u.rowCount !== 1) throw new Error(`e2e S13: ${email} escalation_to is not the seeded value; not changing it`);
+  });
+  try {
+    return await fn();
+  } finally {
+    await L.ownerTx(async (c) => {
+      await c.query("SELECT set_config('fao.change_reason', 'e2e n8n S13: restore the seeded escalation_to', true)");
+      await c.query('UPDATE public.process_owners SET escalation_to = $2 WHERE email = $1 AND escalation_to IS NULL', [email, seeded]);
+    });
+  }
+}
+
+test('S13 a notifier failure and a sweep item error in the same sweep both fail one sweeper execution', T, async (t) => {
+  // The setup step waits only for the standing webhook paths; wait for this one.
+  await L.waitUntil(`webhook ${SWEEP_NFAIL_PATH}`, async () => (await L.webhook(SWEEP_NFAIL_PATH, {}, { key: null })).status === 403,
+    { timeoutMs: 60000, everyMs: 500 });
+  await ensureMarkupAgent();
+  await L.slack.reset();
+  const { corr, run, ex } = await invoke('sarah', P.markup, { agent: L.MARKUP_AGENT, reason: 'e2e S13 notifier failure plus item error', minExecutions: 4 });
+  assert.equal(run.state, 'AWAITING_HITL');
+  const req = await openRequest(corr);
+  assert.equal(req.agent_invoker_id, L.uid('sarah'));
+  const offset = Math.ceil((new Date(req.timeout_at).getTime() - Date.now()) / 1000) + 120;
+  assert.ok(offset > 0 && offset <= 2592000);
+
+  const before = L.lastExecutionId();
+  let sweepResponse;
+  await withNoEscalationTarget('sarah', () => L.withTestClock(offset, async () => {
+    sweepResponse = L.webhook(SWEEP_NFAIL_PATH, {});
+    await L.waitUntil('request to expire', async () => (await openRequest(corr)).decision === 'EXPIRED', { timeoutMs: 60000, everyMs: 200 });
+  }));
+  const s = await sweepResponse;
+  const ex2 = await L.waitExecutions(before, 2);
+  assert.equal((await L.q('SELECT count(*)::int AS n FROM fao_private.test_clock')).at(0).n, 0, 'test clock cleared');
+  assert.equal((await L.one('SELECT escalation_to FROM public.process_owners WHERE id = $1', [L.uid('sarah')])).escalation_to, L.uid('marcus'), 'escalation_to restored');
+
+  // The database side: expired, escalated with no target, COMMITTED FAILURE.
+  const rows = await L.ledger(corr);
+  const tail = rows.map((r) => r.t).slice(rows.findIndex((r) => r.t === 'HITL_EXPIRED'));
+  assert.deepEqual(tail, ['HITL_EXPIRED', 'HITL_ESCALATED', 'COMMITTED']);
+  const esc1 = rows.find((r) => r.t === 'HITL_ESCALATED');
+  assert.equal(esc1.inputs.reason, 'TIMEOUT');
+  assert.equal(esc1.inputs.target_owner_id, null, 'never the invoker');
+  assert.equal(rows.at(-1).status, 'FAILURE');
+  assert.equal((await L.run(corr)).state, 'EXPIRED');
+
+  // The n8n side: the stand-in was called and failed, and the sweeper
+  // execution failed once, at Check Sweep Errors, naming both failures.
+  const stand = byWorkflow(ex2, FAILING_NOTIFIER_ID);
+  assert.ok(stand.length >= 1 && stand.every((e) => e.status === 'error'), `stand-in executions ${L.brief(stand)}`);
+  const sweepEx = byWorkflow(ex2, SWEEP_NFAIL_ID);
+  assert.equal(sweepEx.length, 1, `sweep webhook answered ${s.status}`);
+  assert.equal(sweepEx[0].status, 'error');
+  assert.ok(sweepEx[0].error, L.brief(sweepEx));
+  // n8n 2.46.6 stores no node name on a Code node's top-level error (as S09
+  // shows), so the failing node is read from lastNodeExecuted and the per-node
+  // errors: exactly one, at Check Sweep Errors, after Check Notifier Results ran.
+  assert.equal(sweepEx[0].lastNodeExecuted, 'Check Sweep Errors', L.brief(sweepEx));
+  assert.deepEqual((sweepEx[0].nodeErrors || []).map((e) => e.node), ['Check Sweep Errors'], L.brief(sweepEx));
+  const nodesRun = sweepEx[0].nodes || [];
+  assert.ok(nodesRun.indexOf('Check Notifier Results') >= 0
+    && nodesRun.indexOf('Check Notifier Results') < nodesRun.indexOf('Check Sweep Errors'), nodesRun.join(', '));
+  const msg = sweepEx[0].error.message;
+  assert.equal(sweepEx[0].nodeErrors[0].message, msg);
+  const i007 = msg.indexOf('FAO-GOV-007 sweep: ');
+  const i008 = msg.indexOf('FAO-GOV-008 sweep: ');
+  assert.ok(i007 >= 0 && i008 > i007, msg);
+  assert.ok(msg.slice(i007, i008).includes(`${req.hitl_id}:ESCALATED:1 (`), msg);
+  assert.ok(msg.slice(i007, i008).includes(FAILING_NOTIFIER_MESSAGE), msg);
+  assert.ok(msg.slice(i008).includes(`expire_request:${req.hitl_id}:NO_ESCALATION_TARGET`), msg);
+
+  // The failed call recorded nothing: only the REQUESTED notice from the run.
+  const notes = await L.notifications(req.hitl_id);
+  assert.deepEqual(notes.map((n) => `${n.kind}/${n.level}/${n.outcome}`), ['REQUESTED/0/SENT']);
+  assert.equal((await L.slack.forHitl(req.hitl_id)).length, 1, 'no escalation notice reached Slack');
+  record(t, 'S13', {
+    corr, hitl_id: req.hitl_id, offset_seconds: offset, sweep_http: s.status, sweep_error: msg,
+    executions: `${L.brief(ex)} | ${L.brief(ex2)}`,
   });
 });

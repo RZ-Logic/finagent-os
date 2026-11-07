@@ -271,10 +271,11 @@ async def test_registry_status_filter_owner_embed_and_untrusted(harness: Harness
     (agent,) = result["agents"]
     assert "rollback_procedure" not in agent
     assert agent["untrusted_text"]["rollback_procedure"].startswith("Append")
-    # R18: a person's name and role are free text, so they are marked; the
-    # email keeps its place in the owner embed.
-    assert agent["process_owners"] == {"email": "s@x"}
-    assert agent["untrusted_text"]["process_owners"] == {"name": "Sarah Chen", "role": "Controller"}
+    # R18: a person's name and role are free text, so they are marked; fix
+    # round 3: so is the email (admin-written, no CHECK), so the whole embed
+    # is marked.
+    assert "process_owners" not in agent
+    assert agent["untrusted_text"]["process_owners"] == {"name": "Sarah Chen", "role": "Controller", "email": "s@x"}
     (req,) = harness.router.calls("/rest/v1/agent_registry")
     params = req.url.params.multi_items()
     assert ("status", "eq.ACTIVE") in params

@@ -1,0 +1,559 @@
+{
+  "_meta": {
+    "description": "FAO-REC-001, FAO-REC-002, FAO-REC-004, FAO-REC-006, FAO-REC-007: one Per-Asset Reconcile input per policy branch and per bad-input class. Used by test/node/recon.test.mjs against the exported Code node. Thresholds mirror seeds/0006 (scope Spot) in the shape the Get Materiality Thresholds query returns.",
+    "special_values": "A value written as {\"$special\": \"undefined\" | \"NaN\" | \"Infinity\" | \"-Infinity\"} stands for that JavaScript value, which JSON cannot carry. The key is kept present on that side.",
+    "expect_ratio": "number: inputs.ratio must be a finite number; null: inputs.ratio must be null; any: not checked."
+  },
+  "thresholds": [
+    {
+      "asset_symbol": "ADA",
+      "asset_class": "Major",
+      "ratio_floor": 1,
+      "ratio_band_lower": 1,
+      "ratio_band_upper": 1.1,
+      "materiality_usd": 100000
+    },
+    {
+      "asset_symbol": "BTC",
+      "asset_class": "Major",
+      "ratio_floor": 1,
+      "ratio_band_lower": 1.05,
+      "ratio_band_upper": 1.25,
+      "materiality_usd": 500000
+    },
+    {
+      "asset_symbol": "ETH",
+      "asset_class": "Major",
+      "ratio_floor": 1,
+      "ratio_band_lower": 1,
+      "ratio_band_upper": 1.1,
+      "materiality_usd": 250000
+    },
+    {
+      "asset_symbol": "SOL",
+      "asset_class": "Mid_cap",
+      "ratio_floor": 1,
+      "ratio_band_lower": 1,
+      "ratio_band_upper": 1.15,
+      "materiality_usd": 100000
+    },
+    {
+      "asset_symbol": "USDC",
+      "asset_class": "Stablecoin",
+      "ratio_floor": 1,
+      "ratio_band_lower": 1,
+      "ratio_band_upper": 1.005,
+      "materiality_usd": 10000
+    },
+    {
+      "asset_symbol": "USDT",
+      "asset_class": "Stablecoin",
+      "ratio_floor": 1,
+      "ratio_band_lower": 1,
+      "ratio_band_upper": 1.005,
+      "materiality_usd": 10000
+    },
+    {
+      "asset_symbol": "XRP",
+      "asset_class": "Major",
+      "ratio_floor": 1,
+      "ratio_band_lower": 1,
+      "ratio_band_upper": 1.1,
+      "materiality_usd": 100000
+    }
+  ],
+  "cases": [
+    {
+      "id": "negative_ledger",
+      "branch": "NEGATIVE_LEDGER",
+      "wallet": {
+        "ADA": 47293847.92
+      },
+      "ledger": {
+        "ADA": -150000
+      },
+      "expect": {
+        "asset": "ADA",
+        "band_status": "NEGATIVE_LEDGER",
+        "policy_outcome": "REQUIRE_HUMAN",
+        "policy_sub_tier": "CRITICAL",
+        "hitl_status": "PENDING",
+        "ratio": "any"
+      }
+    },
+    {
+      "id": "zero_ledger",
+      "branch": "ZERO_LEDGER",
+      "wallet": {
+        "ADA": 1000
+      },
+      "ledger": {
+        "ADA": 0
+      },
+      "expect": {
+        "asset": "ADA",
+        "band_status": "ZERO_LEDGER",
+        "policy_outcome": "REQUIRE_HUMAN",
+        "policy_sub_tier": "STANDARD",
+        "hitl_status": "PENDING",
+        "ratio": "any"
+      }
+    },
+    {
+      "id": "below_floor",
+      "branch": "BELOW_FLOOR",
+      "wallet": {
+        "SOL": 8740000
+      },
+      "ledger": {
+        "SOL": 9200000
+      },
+      "expect": {
+        "asset": "SOL",
+        "band_status": "BELOW_FLOOR",
+        "policy_outcome": "REQUIRE_HUMAN",
+        "policy_sub_tier": "CRITICAL",
+        "hitl_status": "PENDING",
+        "ratio": "any"
+      }
+    },
+    {
+      "id": "above_band_upper",
+      "branch": "ABOVE_BAND_UPPER",
+      "wallet": {
+        "ETH": 1200
+      },
+      "ledger": {
+        "ETH": 1000
+      },
+      "expect": {
+        "asset": "ETH",
+        "band_status": "ABOVE_BAND_UPPER",
+        "policy_outcome": "REQUIRE_HUMAN",
+        "policy_sub_tier": "STANDARD",
+        "hitl_status": "PENDING",
+        "ratio": "any"
+      }
+    },
+    {
+      "id": "in_band_usd_material",
+      "branch": "IN_BAND_USD_MATERIAL",
+      "wallet": {
+        "USDT": 1234567890.5
+      },
+      "ledger": {
+        "USDT": 1234500000
+      },
+      "expect": {
+        "asset": "USDT",
+        "band_status": "IN_BAND_USD_MATERIAL",
+        "policy_outcome": "REQUIRE_HUMAN",
+        "policy_sub_tier": "STANDARD",
+        "hitl_status": "PENDING",
+        "ratio": "any"
+      }
+    },
+    {
+      "id": "below_band_lower",
+      "branch": "BELOW_BAND_LOWER",
+      "wallet": {
+        "BTC": 167690.25
+      },
+      "ledger": {
+        "BTC": 167188.68
+      },
+      "expect": {
+        "asset": "BTC",
+        "band_status": "BELOW_BAND_LOWER",
+        "policy_outcome": "ALLOW_WITH_OBLIGATIONS",
+        "policy_sub_tier": null,
+        "hitl_status": "NOT_REQUIRED",
+        "ratio": "number"
+      }
+    },
+    {
+      "id": "in_band",
+      "branch": "IN_BAND",
+      "wallet": {
+        "ETH": 2884112
+      },
+      "ledger": {
+        "ETH": 2847100
+      },
+      "expect": {
+        "asset": "ETH",
+        "band_status": "IN_BAND",
+        "policy_outcome": "ALLOW",
+        "policy_sub_tier": null,
+        "hitl_status": "NOT_REQUIRED",
+        "ratio": "number"
+      }
+    },
+    {
+      "id": "in_band_numeric_string",
+      "branch": "IN_BAND",
+      "wallet": {
+        "XRP": "128265000"
+      },
+      "ledger": {
+        "XRP": "127500000"
+      },
+      "expect": {
+        "asset": "XRP",
+        "band_status": "IN_BAND",
+        "policy_outcome": "ALLOW",
+        "policy_sub_tier": null,
+        "hitl_status": "NOT_REQUIRED",
+        "ratio": "number"
+      }
+    },
+    {
+      "id": "no_threshold",
+      "branch": "NO_THRESHOLD",
+      "wallet": {
+        "DOGE": 100
+      },
+      "ledger": {
+        "DOGE": 100
+      },
+      "expect": {
+        "asset": "DOGE",
+        "band_status": "NO_THRESHOLD",
+        "policy_outcome": "BLOCKED",
+        "policy_sub_tier": null,
+        "hitl_status": "PENDING",
+        "ratio": "null"
+      }
+    },
+    {
+      "id": "one_sided_wallet_only",
+      "branch": "ONE_SIDED",
+      "wallet": {
+        "XRP": 100
+      },
+      "ledger": {},
+      "expect": {
+        "asset": "XRP",
+        "band_status": "ONE_SIDED",
+        "policy_outcome": "BLOCKED",
+        "policy_sub_tier": null,
+        "hitl_status": "PENDING",
+        "ratio": "null",
+        "input_problem_side": "ledger"
+      }
+    },
+    {
+      "id": "one_sided_ledger_only",
+      "branch": "ONE_SIDED",
+      "wallet": {},
+      "ledger": {
+        "XRP": 100
+      },
+      "expect": {
+        "asset": "XRP",
+        "band_status": "ONE_SIDED",
+        "policy_outcome": "BLOCKED",
+        "policy_sub_tier": null,
+        "hitl_status": "PENDING",
+        "ratio": "null",
+        "input_problem_side": "wallet"
+      }
+    },
+    {
+      "id": "invalid_wallet_undefined",
+      "branch": "INVALID_INPUT",
+      "wallet": {
+        "ETH": {
+          "$special": "undefined"
+        }
+      },
+      "ledger": {
+        "ETH": 1000
+      },
+      "expect": {
+        "asset": "ETH",
+        "band_status": "INVALID_INPUT",
+        "policy_outcome": "BLOCKED",
+        "policy_sub_tier": null,
+        "hitl_status": "PENDING",
+        "ratio": "null",
+        "input_problem_side": "wallet",
+        "input_problem_class": "undefined"
+      }
+    },
+    {
+      "id": "invalid_wallet_null",
+      "branch": "INVALID_INPUT",
+      "wallet": {
+        "ETH": null
+      },
+      "ledger": {
+        "ETH": 1000
+      },
+      "expect": {
+        "asset": "ETH",
+        "band_status": "INVALID_INPUT",
+        "policy_outcome": "BLOCKED",
+        "policy_sub_tier": null,
+        "hitl_status": "PENDING",
+        "ratio": "null",
+        "input_problem_side": "wallet",
+        "input_problem_class": "null"
+      }
+    },
+    {
+      "id": "invalid_wallet_empty",
+      "branch": "INVALID_INPUT",
+      "wallet": {
+        "ETH": ""
+      },
+      "ledger": {
+        "ETH": 1000
+      },
+      "expect": {
+        "asset": "ETH",
+        "band_status": "INVALID_INPUT",
+        "policy_outcome": "BLOCKED",
+        "policy_sub_tier": null,
+        "hitl_status": "PENDING",
+        "ratio": "null",
+        "input_problem_side": "wallet",
+        "input_problem_class": "empty"
+      }
+    },
+    {
+      "id": "invalid_wallet_non_numeric",
+      "branch": "INVALID_INPUT",
+      "wallet": {
+        "ETH": "abc"
+      },
+      "ledger": {
+        "ETH": 1000
+      },
+      "expect": {
+        "asset": "ETH",
+        "band_status": "INVALID_INPUT",
+        "policy_outcome": "BLOCKED",
+        "policy_sub_tier": null,
+        "hitl_status": "PENDING",
+        "ratio": "null",
+        "input_problem_side": "wallet",
+        "input_problem_class": "non_numeric"
+      }
+    },
+    {
+      "id": "invalid_wallet_nan",
+      "branch": "INVALID_INPUT",
+      "wallet": {
+        "ETH": {
+          "$special": "NaN"
+        }
+      },
+      "ledger": {
+        "ETH": 1000
+      },
+      "expect": {
+        "asset": "ETH",
+        "band_status": "INVALID_INPUT",
+        "policy_outcome": "BLOCKED",
+        "policy_sub_tier": null,
+        "hitl_status": "PENDING",
+        "ratio": "null",
+        "input_problem_side": "wallet",
+        "input_problem_class": "nan"
+      }
+    },
+    {
+      "id": "invalid_wallet_infinite",
+      "branch": "INVALID_INPUT",
+      "wallet": {
+        "ETH": {
+          "$special": "Infinity"
+        }
+      },
+      "ledger": {
+        "ETH": 1000
+      },
+      "expect": {
+        "asset": "ETH",
+        "band_status": "INVALID_INPUT",
+        "policy_outcome": "BLOCKED",
+        "policy_sub_tier": null,
+        "hitl_status": "PENDING",
+        "ratio": "null",
+        "input_problem_side": "wallet",
+        "input_problem_class": "infinite"
+      }
+    },
+    {
+      "id": "invalid_wallet_infinite_negative",
+      "branch": "INVALID_INPUT",
+      "wallet": {
+        "ETH": {
+          "$special": "-Infinity"
+        }
+      },
+      "ledger": {
+        "ETH": 1000
+      },
+      "expect": {
+        "asset": "ETH",
+        "band_status": "INVALID_INPUT",
+        "policy_outcome": "BLOCKED",
+        "policy_sub_tier": null,
+        "hitl_status": "PENDING",
+        "ratio": "null",
+        "input_problem_side": "wallet",
+        "input_problem_class": "infinite"
+      }
+    },
+    {
+      "id": "invalid_ledger_undefined",
+      "branch": "INVALID_INPUT",
+      "wallet": {
+        "ETH": 1000
+      },
+      "ledger": {
+        "ETH": {
+          "$special": "undefined"
+        }
+      },
+      "expect": {
+        "asset": "ETH",
+        "band_status": "INVALID_INPUT",
+        "policy_outcome": "BLOCKED",
+        "policy_sub_tier": null,
+        "hitl_status": "PENDING",
+        "ratio": "null",
+        "input_problem_side": "ledger",
+        "input_problem_class": "undefined"
+      }
+    },
+    {
+      "id": "invalid_ledger_null",
+      "branch": "INVALID_INPUT",
+      "wallet": {
+        "ETH": 1000
+      },
+      "ledger": {
+        "ETH": null
+      },
+      "expect": {
+        "asset": "ETH",
+        "band_status": "INVALID_INPUT",
+        "policy_outcome": "BLOCKED",
+        "policy_sub_tier": null,
+        "hitl_status": "PENDING",
+        "ratio": "null",
+        "input_problem_side": "ledger",
+        "input_problem_class": "null"
+      }
+    },
+    {
+      "id": "invalid_ledger_empty",
+      "branch": "INVALID_INPUT",
+      "wallet": {
+        "ETH": 1000
+      },
+      "ledger": {
+        "ETH": ""
+      },
+      "expect": {
+        "asset": "ETH",
+        "band_status": "INVALID_INPUT",
+        "policy_outcome": "BLOCKED",
+        "policy_sub_tier": null,
+        "hitl_status": "PENDING",
+        "ratio": "null",
+        "input_problem_side": "ledger",
+        "input_problem_class": "empty"
+      }
+    },
+    {
+      "id": "invalid_ledger_non_numeric",
+      "branch": "INVALID_INPUT",
+      "wallet": {
+        "ETH": 1000
+      },
+      "ledger": {
+        "ETH": "abc"
+      },
+      "expect": {
+        "asset": "ETH",
+        "band_status": "INVALID_INPUT",
+        "policy_outcome": "BLOCKED",
+        "policy_sub_tier": null,
+        "hitl_status": "PENDING",
+        "ratio": "null",
+        "input_problem_side": "ledger",
+        "input_problem_class": "non_numeric"
+      }
+    },
+    {
+      "id": "invalid_ledger_nan",
+      "branch": "INVALID_INPUT",
+      "wallet": {
+        "ETH": 1000
+      },
+      "ledger": {
+        "ETH": {
+          "$special": "NaN"
+        }
+      },
+      "expect": {
+        "asset": "ETH",
+        "band_status": "INVALID_INPUT",
+        "policy_outcome": "BLOCKED",
+        "policy_sub_tier": null,
+        "hitl_status": "PENDING",
+        "ratio": "null",
+        "input_problem_side": "ledger",
+        "input_problem_class": "nan"
+      }
+    },
+    {
+      "id": "invalid_ledger_infinite",
+      "branch": "INVALID_INPUT",
+      "wallet": {
+        "ETH": 1000
+      },
+      "ledger": {
+        "ETH": {
+          "$special": "Infinity"
+        }
+      },
+      "expect": {
+        "asset": "ETH",
+        "band_status": "INVALID_INPUT",
+        "policy_outcome": "BLOCKED",
+        "policy_sub_tier": null,
+        "hitl_status": "PENDING",
+        "ratio": "null",
+        "input_problem_side": "ledger",
+        "input_problem_class": "infinite"
+      }
+    },
+    {
+      "id": "invalid_ledger_infinite_negative",
+      "branch": "INVALID_INPUT",
+      "wallet": {
+        "ETH": 1000
+      },
+      "ledger": {
+        "ETH": {
+          "$special": "-Infinity"
+        }
+      },
+      "expect": {
+        "asset": "ETH",
+        "band_status": "INVALID_INPUT",
+        "policy_outcome": "BLOCKED",
+        "policy_sub_tier": null,
+        "hitl_status": "PENDING",
+        "ratio": "null",
+        "input_problem_side": "ledger",
+        "input_problem_class": "infinite"
+      }
+    }
+  ]
+}

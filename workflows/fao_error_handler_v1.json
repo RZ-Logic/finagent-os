@@ -1,0 +1,106 @@
+{
+  "name": "fao_error_handler_v1",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        320
+      ],
+      "id": "e242ff5e-e6ec-5f62-a67e-c1064ab5437a",
+      "name": "Error Trigger"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ============================================================================\n// FAO Error Handler - Extract Failure\n// ----------------------------------------------------------------------------\n// FAO-GOV-008: set as errorWorkflow on the flagship only. When a flagship\n// execution fails (including a failed Writer or notifier call), this\n// workflow receives the flagship's execution id, which fao_run_claim\n// recorded on the run. Record Run Failure passes it to fao_run_fail, which\n// writes FAILED and moves the run to FAILED (or, after a request exists,\n// leaves the request standing for the sweep).\n//\n// The error message is untrusted text: control characters become spaces\n// and it is cut to 500 characters before it reaches the database.\n// ============================================================================\n\nconst data = (($input.first() || {}).json) || {};\nconst execution = data.execution && typeof data.execution === 'object' ? data.execution : {};\n\nconst id = execution.id;\nif (id === undefined || id === null || id === '') {\n  throw new Error('FAO-GOV-008 error handler: the error payload has no execution id');\n}\n\nconst clean = (v, max) => String(v === undefined || v === null ? '' : v)\n  .replace(/[\\u0000-\\u001f\\u007f]/g, ' ')\n  .slice(0, max);\n\nconst err = execution.error && typeof execution.error === 'object' ? execution.error : {};\n\nreturn [{\n  json: {\n    n8n_execution_id: id,\n    failed_node: clean(execution.lastNodeExecuted, 200),\n    message: clean(err.message, 500)\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        320
+      ],
+      "id": "8f1fbb3c-8e42-5b6d-bb5e-fd2958ee8150",
+      "name": "Extract Failure"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT public.fao_run_fail($1, $2, $3) AS r;",
+        "options": {
+          "queryReplacement": "={{ [ $json.n8n_execution_id, $json.failed_node, $json.message ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        440,
+        320
+      ],
+      "id": "6e8ed001-c914-52f3-8a55-395a8de53367",
+      "name": "Record Run Failure",
+      "credentials": {
+        "postgres": {
+          "id": "FaoPgWorkflow001",
+          "name": "FAO Postgres (fao_workflow)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## FAO Error Handler v1\n\n**Control:** FAO-GOV-008\n\nSet as `errorWorkflow` on the flagship only, so the execution id it receives is the flagship's, which `fao_run_claim` recorded on the run.\n\n1. **Extract Failure**: execution id, last node, message (control characters removed, 500 characters)\n2. **Record Run Failure** (`fao_run_fail`): FAILED in the ledger; the run moves to FAILED, or, when a request already exists, the request stands for the sweep\n\nAn execution that matches no run returns `UNKNOWN_EXECUTION` and nothing is written.",
+        "height": 400,
+        "width": 560,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -200
+      ],
+      "id": "79a4a3b1-a737-541f-9dd6-15f269d2369c",
+      "name": "Architecture Note"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Extract Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Failure": {
+      "main": [
+        [
+          {
+            "node": "Record Run Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "b4f2a5c1-0e57-4d0e-8a6b-25a000000005",
+  "meta": {
+    "instanceId": "d7e19fca9705d4d0c36e6fe71822071e2ec1e1c76f266658ed6763dfc41db437"
+  },
+  "id": "FaoErrHandlerV01",
+  "tags": []
+}

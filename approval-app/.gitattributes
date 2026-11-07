@@ -1,0 +1,2 @@
+# Vendored files are hashed byte for byte (vendor/SHA256SUMS); never convert line endings.
+vendor/** -text

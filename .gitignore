@@ -31,3 +31,9 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# FinAgent OS phase 2-5 local toolchain (never committed)
+.local/
+node_modules/
+approval-app/config.js
+mcp/.env

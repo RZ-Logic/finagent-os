@@ -20,15 +20,14 @@
 --     hierarchy is self-referential (Aisha → Sarah → Marcus) and rows
 --     cannot reference themselves before they exist.
 --   - Running this seed more than once will fail on the UNIQUE(email)
---     constraint. That is intentional — seeds are one-time, not
---     idempotent. If you need to re-seed, TRUNCATE process_owners first.
---   - WARNING: process_owners is referenced by agent_registry,
---     shadow_ledger, hitl_queue and materiality_thresholds, so a bare
---     TRUNCATE fails and only TRUNCATE ... CASCADE succeeds. CASCADE also
---     empties all four, including shadow_ledger and hitl_queue, which
---     erases audit evidence.
---     Re-seed only a fresh database; never re-seed one that holds
---     evidence.
+--     constraint. That is intentional: seeds are one-time, not
+--     idempotent. Re-seed only a fresh database; never re-seed one that
+--     holds evidence. TRUNCATE is refused on process_owners and on every
+--     table that references it (FAO-GOV-001, phase 2-5 migration 0013).
+--   - Phase 2-5: the first statement sets fao.change_reason, which every
+--     change to process_owners now needs (FAO-GOV-002). The closing check
+--     raises unless exactly three owners exist, because the inserts below
+--     silently add zero rows when the Auth users are missing.
 --
 -- Escalation hierarchy:
 --   Aisha Okonkwo  (FP&A Lead)   →  Sarah Chen  (Controller)
@@ -38,6 +37,10 @@
 -- Author: Rizwan Ahmed, ACCA · Velocyt Consulting
 -- Date:   2026-04-20
 -- ============================================================================
+
+-- FAO-GOV-002: change reason for this session (required by the
+-- process_owners triggers).
+SELECT set_config('fao.change_reason', 'seed 0002', false);
 
 -- --- Pass 1: Insert the three rows without escalation ----------------------
 
@@ -70,3 +73,18 @@ SET escalation_to = (
 WHERE email = 'aisha.okonkwo@finagent-os.demo';
 
 -- Marcus (CFO) has no escalation target — left NULL.
+
+-- --- Check: exactly three owners -------------------------------------------
+-- The inserts above add zero rows, silently, when an Auth user is missing.
+-- Fail loudly instead (FAO-GOV-013: every agent needs a named owner).
+DO $$
+DECLARE
+  v_n int;
+BEGIN
+  SELECT count(*) INTO v_n FROM public.process_owners;
+  IF v_n <> 3 THEN
+    RAISE EXCEPTION 'FAO-GOV-013 seed 0002: expected exactly 3 process owners, found %; create the three Auth users first', v_n
+      USING ERRCODE = '22023';
+  END IF;
+END
+$$;

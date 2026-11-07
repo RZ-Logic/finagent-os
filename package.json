@@ -1,0 +1,35 @@
+{
+  "name": "finagent-os",
+  "version": "2.0.0-core",
+  "private": true,
+  "type": "module",
+  "description": "FinAgent OS: SOX-aligned governance for finance agents (local toolchain and tests)",
+  "license": "SEE LICENSE IN LICENSE",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "stage": "node scripts/stage-local-supabase.mjs",
+    "sb:start": "supabase start --workdir .local/supabase",
+    "sb:stop": "supabase stop --workdir .local/supabase",
+    "db:reset": "supabase db reset --workdir .local/supabase && node scripts/local-setup.mjs",
+    "test": "node scripts/test-all.mjs",
+    "test:offline": "node scripts/test-all.mjs --offline",
+    "test:node": "node --test --test-reporter=spec \"test/node/*.test.mjs\"",
+    "test:db": "supabase test db --workdir .local/supabase",
+    "test:api": "node --test --test-concurrency=1 --test-reporter=spec \"test/api/*.test.mjs\"",
+    "test:py": "python -m pytest mcp/tests -q",
+    "vendor": "node scripts/vendor-supabase-js.mjs",
+    "check:exports": "node scripts/check-exports.mjs",
+    "serve:approval": "serve approval-app -l 4173 -c serve.json"
+  },
+  "devDependencies": {
+    "@supabase/supabase-js": "2.118.0",
+    "pg": "8.23.1",
+    "serve": "14.2.6",
+    "supabase": "2.122.0"
+  },
+  "overrides": {
+    "compression": "1.8.2"
+  }
+}

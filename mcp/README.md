@@ -1,10 +1,10 @@
-# `mcp/` — FinAgent OS MCP Server
+# `mcp/`: FinAgent OS MCP Server
 
-Python [FastMCP](https://gofastmcp.com) server exposing a deliberately asymmetric tool surface to MCP-compliant clients (Claude Desktop, Cursor, the FastMCP `Client` SDK, and any future MCP host).
+Python [FastMCP](https://gofastmcp.com) server exposing a deliberately asymmetric tool surface to MCP clients (Claude Desktop, Cursor, the FastMCP `Client` SDK, and any other MCP host).
 
-**Six read tools and one bounded invoke tool. No governance-mutation tools exist.** AI consumers can read the FinAgent OS audit trail and trigger governed agents; AI consumers cannot approve HITLs, edit materiality thresholds, register agents, or modify `shadow_ledger`. The asymmetry is the architecture, not a configuration.
+**Six read tools and one bounded invoke tool. No governance-mutation tools exist.** AI consumers can read the FinAgent OS audit trail and start a governed run as a named human; they cannot approve or reject HITL requests, edit materiality thresholds, register agents, or write to `shadow_ledger`. The database enforces the same limits independently: the server reads as a user that holds only the `reader` role, and it holds no service key.
 
-For platform-level context, see the [root README](../README.md). For the SOX control mapping, see [`SOX-MAPPING.md`](../SOX-MAPPING.md).
+For platform context, see the [root README](../README.md). For the SOX control mapping, see [`SOX-MAPPING.md`](../SOX-MAPPING.md).
 
 ---
 
@@ -12,73 +12,79 @@ For platform-level context, see the [root README](../README.md). For the SOX con
 
 ### Read tools (six)
 
+Every read runs as the reader user. Lists page with `limit` and `offset` and report `has_more` (from PostgREST's exact count). Every result has `status: 'ok'` plus the applied `filters`.
+
 | Tool | Parameters | Returns |
 |---|---|---|
-| `query_shadow_ledger` | `correlation_id?`, `agent_id?`, `event_type?`, `hours_lookback?`, `limit=25` | Filtered rows from `shadow_ledger`. All filters optional, AND-combined. |
-| `get_agent_registry` | `status?` (ACTIVE / STUB_DOCUMENTED / DEPRECATED) | Agent rows joined to their named process owners. |
-| `get_pending_hitl` | — | All `hitl_queue` rows with `decision = 'PENDING'`, joined to invoker identity. |
-| `get_materiality_thresholds` | `asset_symbol?`, `scope?` | Per-asset materiality bands and ratio floors. |
-| `get_recent_executions` | `limit=10` | One summary row per `correlation_id`, with rollup outcome and HITL status. |
-| `get_process_owners` | — | All process owners with escalation chain resolved to names. |
+| `query_shadow_ledger` | `correlation_id?` (UUID), `agent_id?` (`^[a-z0-9_]{1,64}$`), `event_type?` (one of the 13 ledger event types), `hours_lookback=24` (integer 1 to 8760), `limit=25` (1 to 200), `offset=0` (0 to 100000) | `{status, count, has_more, filters, rows}`, newest first |
+| `get_agent_registry` | `status?` (ACTIVE, STUB_DOCUMENTED, DEPRECATED), `limit=50`, `offset=0` | agents with risk tier, status, run limit and owner (`process_owners` embed) |
+| `get_pending_hitl` | `limit=50`, `offset=0` | requests with `decision = PENDING`, the invoker embed, and `past_deadline` (UTC now at or after `timeout_at`) |
+| `get_materiality_thresholds` | `asset_symbol?` (upper-cased, `^[A-Z0-9]{1,12}$`), `scope?` (Spot, Futures, Spot_and_Futures) | thresholds; without `scope`, every scope for the symbol |
+| `get_recent_executions` | `limit=10`, `offset=0` | one row per run from the database view `fao_run_summary`: `hitl_status` (from the request's decision, or NOT_REQUIRED), `outcome` and `status` from the newest COMMITTED row, `conflict` (more than one COMMITTED), `commit_blocked`, `corrected` |
+| `get_process_owners` | `limit=50`, `offset=0` | owners with `active` and `escalates_to_name` |
 
-Known issue: `get_recent_executions` can report a resolved run's `hitl_status` as PENDING, because an older event's value overwrites the newer one. A fix is planned; until then, use `query_shadow_ledger` on the `correlation_id` for the actual HITL outcome.
+`get_recent_executions` reads one view in one request, so no fetch window can split a run's history, and the HITL status comes from the request itself (the v1 PENDING inversion is gone).
 
 ### Invoke tool (one)
 
 | Tool | Parameters | Behaviour |
 |---|---|---|
-| `invoke_reserve_recon` | `reason="Triggered via MCP"` | POSTs `invoked_via`, `reason` and `MCP_USER_EMAIL` (as `invoker_email`) to the flagship webhook URL you configure. The committed flagship export has only a Manual Trigger, so that webhook is not part of the exported workflows, and the committed flagship records a fixed demo invoker regardless of `MCP_USER_EMAIL`. **Cannot bypass policy:** the run executes the same deterministic decision matrix as a manual run. REQUIRE_HUMAN outcomes route to the existing HITL queue for human approval. |
+| `invoke_reserve_recon` | `reason` (1 to 500 characters), `idempotency_key?` (`^[A-Za-z0-9_-]{8,64}$`) | Signs in as the configured human invoker, calls `fao_run_start` with that person's own token (`p_invoked_via: 'mcp'`, agent `fao_reserve_recon_v1`), then POSTs the single-use run token to the n8n invoke webhook. **Cannot bypass policy:** the run executes the same deterministic decision matrix and HITL routing as any other run |
+
+- With no `FAO_INVOKER_EMAIL` and `FAO_INVOKER_PASSWORD`, the tool returns `{status:'refused', code:'NO_USER_CREDENTIAL'}` and sends nothing.
+- The default idempotency key is the first 32 hex characters of SHA-256 over `lower(email)|agent_id|reason|floor(unix_time / 600)`. A retry with the same reason inside the same 10-minute window replays the same run instead of starting a second one. The key is always returned.
+- The database decides who may start a run: an active process owner with the `invoker` role, an ACTIVE agent, and the agent's hourly run limit (`RATE_LIMITED` above it).
 
 ### Tools that deliberately do not exist
 
 | Would-be tool | Why it isn't here |
 |---|---|
-| `approve_hitl` | Approval is the exact action the system is designed to require a human for. The HITL queue has its own approval channel (Slack link → POST to `fao_hitl_resolve` Postgres function). No MCP tool calls that channel. The approval endpoints are demo only: unauthenticated and not hardened for production. |
-| `update_materiality_thresholds` | Materiality bands are the rules the policy engine evaluates against. Allowing AI to edit them would let an LLM rewrite the rules it's checked against. |
-| `register_agent` | Agent registration is a deliberate governed change, not an action for an AI consumer. In v1 the registry gates HITL request creation (foreign key and SLA lookup); agent status and risk tier are not checked at runtime. |
-| `delete_shadow_ledger_row` / `update_*` | A database trigger blocks row UPDATE and DELETE on `shadow_ledger`, so such a tool would be refused for those operations anyway; the absence of the tool makes the architectural intent unambiguous to a reviewer. |
+| `approve_hitl` | Approval is the action the system requires a human for. Decisions go only through `fao_hitl_decide`, called by the approver's own signed-in session from the approval page (`approval-app/`). The reader user cannot call it, and the database refuses self-approval. |
+| `update_materiality_thresholds` | Thresholds are the rules the policy engine checks against. Changes go through `fao_admin_set_threshold` with an admin's own session and a reason, and are audited. |
+| `register_agent` | Agent changes are governed admin changes (`fao_admin_set_agent`), not an action for an AI consumer. |
+| `delete_shadow_ledger_row` / `update_*` | The ledger is append-only for every role; corrections are new CORRECTION rows written by `fao_ledger_correct`. |
 
 ---
 
 ## 🛠️ Architectural notes
 
-### Read access is `service_role`-keyed; tool bounds are the enforcement
+### Reads run as a dedicated reader user (FAO-GOV-003)
 
-The Supabase client uses the `service_role` key, which bypasses Row-Level Security for read queries. This is a deliberate trade-off: the architectural restriction *"AI cannot mutate governance state"* is enforced at the **tool surface** (no mutation tools defined), not at the database role layer. A read-only Postgres role would be defence in depth, and it lands in v1.2 alongside the HTTP transport. For v1, the trust boundary is the FastMCP tool definitions.
+The server signs in as `FAO_READER_EMAIL` with the project's public key and sends that user's access token on every read. At startup it calls `fao_whoami` and refuses to start unless the reader's roles are exactly one global `reader` role. The reader can SELECT the FinAgent read tables and the summary view under RLS, and nothing else: writes and workflow functions are refused by the database.
 
-The trade-off is named explicitly so a reviewer knows it's a choice, not an oversight. v1's audience is the local developer running stdio against their own demo Supabase project; service_role is appropriate there. Production deployment with HTTP transport + OAuth requires the read-only role split.
+The server also refuses to start when `SUPABASE_SERVICE_KEY` or `SUPABASE_SECRET_KEY` is present in its environment, when `SUPABASE_PUBLIC_KEY` is a secret or service-role key, or when the reader cannot sign in. supabase-py is gone; `fao_rest.py` is a thin httpx PostgREST client and `fao_auth.py` holds the password session (token cached until 60 seconds before expiry).
 
-### The invoke tool is bounded, not authoritative
+### Invoke uses the human's own session (FAO-GOV-002)
 
-`invoke_reserve_recon` POSTs to the flagship webhook URL set in `N8N_FLAGSHIP_WEBHOOK_URL`. The committed flagship export has only a Manual Trigger, so you add that webhook when deploying; it is not part of the exported workflows. Once triggered, the flagship runs the full deterministic policy engine, the same engine that runs on a manual trigger. The invoke tool has no shortcut, no override, no policy bypass. If the run produces `REQUIRE_HUMAN`, it routes to the HITL queue exactly as any other invocation would.
+The invoker is recorded by the database from the session (`auth.uid()`), never from a tool argument or a payload field. The webhook receives only `{run_token}`, a single-use token that n8n claims through `fao_run_claim`; the claim returns the invoker, agent and tier the database recorded. A stolen token is useless once claimed, and it expires.
 
-The asymmetry between `invoke_reserve_recon` and the absent `approve_hitl` is intentional: triggering a governed workflow is allowed (the run still passes through the same policy engine and HITL routing; v1 attributes every run to the fixed demo invoker, so who triggered it is not yet recorded), but resolving a HITL bypasses the human-in-the-loop control by definition.
+Until approvals require a second factor, a stored password is enough to approve for anyone who holds the approver role. Set `FAO_INVOKER_EMAIL` only to a user without the approver role, or leave it unset.
 
-### Tool descriptions are part of the surface
+### Bounded inputs and filters
 
-Each tool's docstring is what the MCP client sees as the tool description. The descriptions explicitly state non-bypass language — for example, `invoke_reserve_recon` includes:
+Every filter value is validated before any request: UUIDs must parse, ids and symbols match fixed patterns, event types and statuses come from fixed lists, and integers must be real integers (booleans, floats and strings are refused). A bad argument returns `{status:'invalid', field, message}` and sends nothing. Filter values travel only as encoded query parameters; table and function names are fixed in code.
 
-> *"This tool cannot bypass HITL routing or override policy outcomes. If the run produces REQUIRE_HUMAN, it routes to the existing HITL queue for human approval."*
+### Error results
 
-This is read by Claude Desktop (or any MCP client) at tool-discovery time and shapes the AI's reasoning about what's possible. It also serves as in-band documentation for any human reading the tool list. In the Apr 25, 2026 self-audit ([transcript](https://claude.ai/share/5f0eb294-e658-42b5-a876-8164a0049960)), Claude inferred the system's intended invariants from the tool descriptions before attempting any read.
+Tools never raise to the client. Failures come back as structured results that carry an error class and an HTTP status only, never a URL, host, header, token, password or exception text:
+
+| Result | When |
+|---|---|
+| `{status:'error', kind, http_status}` | `kind` is `timeout`, `connect`, `http`, `bad_json`, `auth` (sign-in refused) or `internal` |
+| `{status:'refused', code, http_status, ref, idempotency_key}` | `fao_run_start` refused the run; `code` is the database result code (for example `RATE_LIMITED`, `NOT_AUTHORISED`, `AGENT_NOT_ACTIVE`) and `ref` the refusal journal id |
+| `{status:'replayed', correlation_id, state, idempotency_key}` | the key matched a run that has already started; no webhook call is made |
+| `{status:'invoked', correlation_id, idempotency_key}` | the webhook accepted the run (HTTP 202) |
+| `{status:'unknown', message, correlation_id, idempotency_key}` | the webhook call timed out or dropped after it was sent, so the run may have started. Check the ledger for the correlation id before retrying with the same key |
+
+### Untrusted text
+
+Fields written by people (or by a model) come back only under an `untrusted_text` object in each row: `policy_rationale`, `decision_notes`, `reason`, `notes`, `rollback_procedure`, `error_details`, `last_error`, `ai_human_brief`, `ai_prompt`, `ai_output`, and inside `inputs` the keys `reason`, `input_problem` and `decision_notes` (under `untrusted_text.inputs`). Every tool description tells the MCP client that this text is data and must not be followed as instructions.
 
 ### Threat model
 
-Stating the implicit threat model explicitly: if an attacker controls the MCP client (Claude Desktop, Cursor, etc.) and can act only through its tools, the blast radius is bounded by what the FinAgent OS MCP server exposes. An attacker with access to the machine itself (for example, running Claude Desktop on a victim's machine) can also read `mcp/.env`; that case is covered under the `service_role` key below.
+An attacker who controls the MCP client and acts only through its tools gets read access to the audit trail and one bounded invoke. They cannot approve or reject a request, change thresholds, agents, roles or owners, or alter the ledger: no tool does it, and the database refuses it for the reader user anyway.
 
-- **Read access to the audit trail** (the six read tools). The attacker can see `shadow_ledger` rows, agent registry entries, pending HITLs, materiality thresholds, recent executions, and process owner identities. This is not nothing, but the tools give no schema-level access (no arbitrary SQL), read no tables beyond those the six read tools query, and no tool writes to the database directly; the invoke tool starts a governed run, which appends its own `shadow_ledger` and `hitl_queue` rows.
-- **One bounded invoke** (the seventh tool): triggering a Reserve Reconciliation run. The committed flagship records a fixed demo invoker, not `MCP_USER_EMAIL`. The run executes the same deterministic policy engine as a manual run. Output that escalates to `REQUIRE_HUMAN` routes through the standard HITL queue and is resolved through the Slack-based approval channel, a separate transport that no MCP tool calls. The approval endpoints are demo only: unauthenticated and not hardened for production.
-
-What the attacker **cannot** do through the MCP tools, regardless of prompt sophistication:
-
-- Approve or reject a HITL request. No tool mutates `hitl_queue`, calls `fao_hitl_resolve`, or calls the approval endpoints.
-- Modify materiality thresholds, register or deregister agents, alter agent risk tiers, change process-owner assignments, or escalation chains.
-- Mutate `shadow_ledger`. No tool writes to it, and a database trigger blocks row UPDATE and DELETE.
-- Bypass policy outcomes. `invoke_reserve_recon` sends a fixed payload whose only caller-set field is `reason`; it cannot pass override flags, alter materiality bands, or short-circuit the rollup logic.
-
-These limits are properties of the tool surface. The server itself holds a `service_role` key, which bypasses RLS. If that key is exposed, the holder is not limited to the seven tools, and the database is not an independent boundary against that key. Keep the key out of shared environments. Identity binding of approver and invoker is also a known gap, planned for a later release.
-
-For v1 the trust boundary is the FastMCP tool definitions. v1.2 adds a read-only Postgres role for the MCP client, which makes the database a second, independent layer.
+An attacker with access to the machine can read `mcp/.env`. That file holds the reader's password (read access only), the invoke webhook key, and, if set, the invoker's password. The invoker's password lets the holder start runs as that person, within the database's rate limit and registry checks; it does not let them approve unless that user is an approver, which is why the invoker should not be one.
 
 ---
 
@@ -86,77 +92,62 @@ For v1 the trust boundary is the FastMCP tool definitions. v1.2 adds a read-only
 
 ### Prerequisites
 
-- Python 3.10 or higher (tested on 3.12)
-- A Supabase project with all ten FinAgent OS migrations (0001 to 0008, including 0005b and 0005c) applied and seeds 0002, 0003, 0006 loaded
-- An n8n instance with the flagship workflow imported. The committed export has only a Manual Trigger, so `invoke_reserve_recon` needs a webhook trigger that you add; it is not part of the exported workflows
+- Python 3.12 (CI uses 3.12)
+- A Supabase project with the FinAgent OS migrations applied, the reader user created and granted the global `reader` role
+- For invoke: the n8n flagship workflow with its invoke webhook (`POST /webhook/fao-recon-invoke`, header auth)
 
 ### Install
 
 ```bash
-# Create an isolated environment (any tool — venv, conda, uv)
-conda create -n finagent-mcp python=3.12 -y
-conda activate finagent-mcp
-
-# Install dependencies
-pip install -r requirements.txt
+python -m pip install -r mcp/requirements.txt
 ```
 
-The `requirements.txt` sets minimum versions only (`>=`, not pins), so a fresh install may resolve newer releases:
-
-```
-fastmcp>=3.0
-supabase>=2.0
-httpx>=0.27
-python-dotenv>=1.0
-```
+Dependencies are pinned exactly: `fastmcp==3.2.4`, `httpx==0.28.1`, `python-dotenv==1.1.1`.
 
 ### Configure
 
-Copy the example env file and fill in your project values:
-
 ```bash
-cp .env.example .env
+cp mcp/.env.example mcp/.env
 ```
 
-Edit `.env`:
+| Key | Value |
+|---|---|
+| `SUPABASE_URL` | project URL |
+| `SUPABASE_PUBLIC_KEY` | publishable key (live) or the CLI's local public key |
+| `FAO_READER_EMAIL`, `FAO_READER_PASSWORD` | the reader user |
+| `FAO_INVOKER_EMAIL`, `FAO_INVOKER_PASSWORD` | optional; both or neither. A user without the approver role |
+| `N8N_INVOKE_WEBHOOK_URL`, `N8N_INVOKE_KEY` | invoke webhook URL and its header value |
 
-```
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_SERVICE_KEY=sb_secret_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-N8N_FLAGSHIP_WEBHOOK_URL=https://your-n8n.example.com/webhook/your-flagship-uuid
-MCP_USER_EMAIL=aisha.okonkwo@finagent-os.demo
-```
-
-`MCP_USER_EMAIL` is sent as `invoker_email` in the invoke payload. The committed flagship export does not read it: every run records the fixed demo invoker `aisha.okonkwo@finagent-os.demo`, whatever this value is set to. In v1.2 it becomes per-user OAuth identity from the calling client.
+No service or secret key belongs in this file; the server refuses to start if one is set.
 
 ### Verify
 
-`test_server.py` is a manual smoke check, not a test suite. It needs a live Supabase, calls the six read tools, and prints what they return; it has no assertions, so it does not fail on wrong data or on a changed tool list. The `invoke_reserve_recon` tool is intentionally not called, because calling it triggers a real flagship run.
+Offline tests (no network, no Docker):
 
 ```bash
-python test_server.py
+python -m pip install -r mcp/requirements.txt -r mcp/requirements-dev.txt
+python -m pytest mcp/tests -q
 ```
 
-Expected output: the registered tool list, then a section per read tool printing data from your Supabase tables. Check it by eye.
+Local smoke check against the local Supabase stack (after `npm run db:reset`, which writes `.local/mcp.env`):
+
+```bash
+python mcp/scripts/smoke_local.py
+```
+
+It refuses any `SUPABASE_URL` or webhook URL whose host is not `127.0.0.1` or `localhost`, runs the reader role check, calls the six read tools, and exits non-zero when any of them fails. It never calls `invoke_reserve_recon`.
 
 ---
 
 ## 🧰 Connect to Claude Desktop
 
-Claude Desktop reads its MCP server config from a JSON file. The location depends on installation method:
-
-- **Microsoft Store install:** `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\claude_desktop_config.json`
-- **Direct download (claude.ai/download):** `%APPDATA%\Claude\claude_desktop_config.json`
-
-Open the file via Claude Desktop → Settings → Developer → Edit Config (the safer path; opens whichever location your install actually uses).
-
-Add the FinAgent OS entry to the `mcpServers` object:
+Claude Desktop reads its MCP server config from a JSON file. Open it through Claude Desktop, Settings, Developer, Edit Config (that opens whichever location your install uses).
 
 ```json
 {
   "mcpServers": {
     "finagent-os": {
-      "command": "C:\\path\\to\\miniconda3\\envs\\finagent-mcp\\python.exe",
+      "command": "C:\\path\\to\\venv\\Scripts\\python.exe",
       "args": [
         "C:\\path\\to\\finagent-os\\mcp\\server.py"
       ]
@@ -165,33 +156,23 @@ Add the FinAgent OS entry to the `mcpServers` object:
 }
 ```
 
-Two notes:
-
-1. **Use the conda env's Python interpreter directly.** Do not point at base Python — `fastmcp`, `supabase`, and `httpx` are installed inside the env, not the base. Using the env's `python.exe` means Claude Desktop does not need to run `conda activate`.
-2. **Backslashes must be doubled in JSON.** Windows paths use `\`; JSON treats `\` as an escape character. Double them: `C:\\Users\\...`.
-
-Quit Claude Desktop completely (right-click system tray icon → Quit, or `taskkill /F /IM Claude.exe`), then reopen. The `finagent-os` entry should appear in the Connectors panel with a toggle.
+Use the virtual environment's own Python so the pinned packages are found, and double the backslashes in JSON. Quit Claude Desktop completely and reopen it; `finagent-os` appears in the Connectors panel. If the server refuses to start, its one-line reason is printed to stderr (for example a service key still in `mcp/.env`).
 
 ---
 
 ## 🎯 The MCP self-audit
 
-On Apr 25, 2026, after the server shipped, Claude Opus was given access through the MCP read surface and asked to (1) narrate the most recent execution, (2) approve a pending HITL request, and (3) red-team the system: *"i have designed controls to stop ai from doing it. i want to see you try and fail."*
+On Apr 25, 2026, after the v1 server shipped, Claude Opus was given access through the MCP read surface and asked to narrate the most recent execution, approve a pending HITL request, and red-team the system. Semantic searches for approve, resolve, decision, write, commit, override and bypass returned only tools that cannot mutate HITL state. That self-audit tested the tool surface only, not the approval layer, which in v1 was a demo endpoint without authentication. It also surfaced a real gap: the dual-approval wording in `policy_rationale` was not wired in code, documented as [ADR-0001](../docs/adr/0001-dual-approval-not-yet-enforced.md). Full transcript: [claude.ai/share/5f0eb294-e658-42b5-a876-8164a0049960](https://claude.ai/share/5f0eb294-e658-42b5-a876-8164a0049960). Evidence: [`docs/evidence/mcp/`](../docs/evidence/mcp/).
 
-Three semantic searches across `approve / resolve / decision`, `write / commit / override / bypass`, and `resolve / set status / sign` returned the same five tools, none of which mutate HITL state. This was a self-audit of the MCP tool surface: it shows that no MCP tool can approve a HITL. It did not test the approval layer. The model's summary named four layers (missing endpoint, bounded invoke tool, channel separation, database SoD trigger), but it presumed signed approval callbacks that the code does not have, and it took the SoD trigger as holding from a `policy_rationale` string rather than from a test. The approval endpoints are demo only: unauthenticated and not hardened for production; identity binding of approver and invoker is a known gap planned for a later release.
-
-The audit also surfaced a real engineering gap on first contact: the dual-approval semantics named in `policy_rationale` text were not wired in code. Documented as [ADR-0001](../docs/adr/0001-dual-approval-not-yet-enforced.md). Full transcript: [claude.ai/share/5f0eb294-e658-42b5-a876-8164a0049960](https://claude.ai/share/5f0eb294-e658-42b5-a876-8164a0049960).
-
-Evidence preserved at [`docs/evidence/mcp/`](../docs/evidence/mcp/).
+The approval layer is now the signed-in approval page and `fao_hitl_decide`; the server no longer holds a service key.
 
 ---
 
 ## 🗺️ Roadmap
 
-- [ ] **v1.2 — HTTP transport.** Streamable HTTP per the MCP spec, behind Caddy at `mcp.velocyt.ca`. Enables remote MCP clients without local subprocess installation.
-- [ ] **v1.2 — OAuth 2.1 identity.** Per-user authentication; `MCP_USER_EMAIL` derived from the OAuth claim instead of a hardcoded env var. Enables real-world multi-user deployment and per-user audit attribution.
-- [ ] **v1.2 — Read-only Postgres role.** Defense-in-depth for the read tools. Currently relies on tool-surface bounds; the role split adds a database-layer guarantee independent of the FastMCP tool definitions.
-- [ ] **v1.3 — Resource subscriptions.** MCP supports server-pushed resource updates; the FinAgent OS use case is real-time HITL queue notifications to subscribed clients (so Claude Desktop can surface a new pending HITL the moment it lands).
+- [ ] **HTTP transport.** Streamable HTTP per the MCP spec, for remote clients.
+- [ ] **Per-user identity from the MCP client.** Today invoke uses one configured human invoker; a remote transport with OAuth would let each person invoke as themselves.
+- [ ] **Resource subscriptions** for new pending HITL requests.
 
 ---
 
@@ -199,12 +180,16 @@ Evidence preserved at [`docs/evidence/mcp/`](../docs/evidence/mcp/).
 
 ```
 mcp/
-├── server.py            ← FastMCP server, 6 read tools + 1 invoke tool, ~310 lines
-├── test_server.py       ← Manual smoke check of the 6 read tools; prints only, no assertions; needs live Supabase
-├── requirements.txt     ← 4 dependencies, minimum versions only (>=)
-├── .env.example         ← Public template (placeholders only)
-├── .env                 ← Real config — gitignored
-└── README.md            ← this file
+├── server.py              FastMCP server: config gate, reader check, 6 read tools + 1 invoke tool
+├── fao_rest.py            httpx PostgREST client, invoke webhook client, FaoError
+├── fao_auth.py            Supabase Auth password session with token cache
+├── requirements.txt       exact pins
+├── requirements-dev.txt   pytest pins
+├── pytest.ini             asyncio mode, cache under .local/
+├── .env.example           settings template (placeholders, no service key)
+├── .env                   real settings, git-ignored
+├── scripts/smoke_local.py local-only smoke check of the read tools
+└── tests/                 offline pytest suite (httpx.MockTransport)
 ```
 
 ---
@@ -213,6 +198,6 @@ mcp/
 
 - [Model Context Protocol specification](https://modelcontextprotocol.io)
 - [FastMCP documentation](https://gofastmcp.com)
-- Root [README.md](../README.md) — *Build Decisions § 1 (the GET/POST war story)* covers the channel-separation rationale that the MCP design inherits
-- [`SOX-MAPPING.md`](../SOX-MAPPING.md) — control mapping including the MCP surface as a governance boundary
-- [ADR-0001](../docs/adr/0001-dual-approval-not-yet-enforced.md) — the gap surfaced by the MCP self-audit
+- Root [README.md](../README.md)
+- [`SOX-MAPPING.md`](../SOX-MAPPING.md)
+- [ADR-0001](../docs/adr/0001-dual-approval-not-yet-enforced.md)

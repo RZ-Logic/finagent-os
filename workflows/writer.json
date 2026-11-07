@@ -4,7 +4,7 @@
     {
       "parameters": {
         "inputSource": "jsonExample",
-        "jsonExample": "{\n  \"correlation_id\": \"11111111-1111-1111-1111-111111111111\",\n  \"execution_id\": \"22222222-2222-2222-2222-222222222222\",\n  \"agent_id\": \"fao_reserve_recon_v1\",\n  \"risk_tier\": \"RED\",\n  \"inputs\": {\"test\": \"smoke test\"},\n  \"ai_prompt\": null,\n  \"ai_output\": null,\n  \"ai_confidence\": null,\n  \"fractional_cost_usd\": null,\n  \"policy_outcome\": \"ALLOW\",\n  \"policy_sub_tier\": null,\n  \"policy_rationale\": \"Smoke test of Shadow Ledger Writer\",\n  \"obligations\": [],\n  \"hitl_status\": \"NOT_REQUIRED\",\n  \"hitl_approver_id\": null,\n  \"status\": \"SUCCESS\",\n  \"error_details\": null\n}"
+        "jsonExample": "{\n  \"correlation_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"event_type\": \"ASSET_RECONCILED\",\n  \"inputs\": {\n    \"asset\": \"BTC\",\n    \"ratio\": 1.003,\n    \"band_status\": \"IN_BAND\"\n  },\n  \"policy_outcome\": \"ALLOW\",\n  \"policy_sub_tier\": null,\n  \"policy_rationale\": \"FAO-REC-006 BTC ratio 1.003000 within expected band. Reserved as expected.\",\n  \"obligations\": [],\n  \"status\": \"SUCCESS\",\n  \"error_details\": null,\n  \"ai_prompt\": null,\n  \"ai_output\": null,\n  \"ai_confidence\": null,\n  \"fractional_cost_usd\": null,\n  \"hitl_status\": \"NOT_REQUIRED\",\n  \"execution_id\": \"22222222-2222-4222-8222-222222222222\",\n  \"agent_id\": \"fao_reserve_recon_v1\",\n  \"risk_tier\": \"RED\"\n}"
       },
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.1,
@@ -17,316 +17,70 @@
     },
     {
       "parameters": {
-        "jsCode": "const input = $input.first().json;\n\n// Required NOT NULL fields per shadow_ledger schema\nconst required = [\n  'correlation_id',\n  'execution_id',\n  'agent_id',\n  'risk_tier',\n  'policy_outcome',\n  'policy_rationale',\n  'status'\n];\n\nconst missing = required.filter(f => input[f] === undefined || input[f] === null || input[f] === '');\nif (missing.length > 0) {\n  throw new Error(`FAO-GOV-001 writer: missing required field(s): ${missing.join(', ')}`);\n}\n\n// Enum validation\nconst validRiskTiers = ['GREEN', 'AMBER', 'RED'];\nif (!validRiskTiers.includes(input.risk_tier)) {\n  throw new Error(`FAO-GOV-001 writer: invalid risk_tier '${input.risk_tier}'. Must be one of: ${validRiskTiers.join(', ')}`);\n}\n\nconst validPolicyOutcomes = ['ALLOW', 'ALLOW_WITH_OBLIGATIONS', 'REQUIRE_HUMAN', 'DENY', 'BLOCKED'];\nif (!validPolicyOutcomes.includes(input.policy_outcome)) {\n  throw new Error(`FAO-GOV-001 writer: invalid policy_outcome '${input.policy_outcome}'. Must be one of: ${validPolicyOutcomes.join(', ')}`);\n}\n\nconst validStatuses = ['SUCCESS', 'FAILURE', 'PARTIAL', 'ROLLED_BACK'];\nif (!validStatuses.includes(input.status)) {\n  throw new Error(`FAO-GOV-001 writer: invalid status '${input.status}'. Must be one of: ${validStatuses.join(', ')}`);\n}\n\n// UUID format check\nconst uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;\nif (!uuidPattern.test(input.correlation_id)) {\n  throw new Error(`FAO-GOV-001 writer: correlation_id is not a valid UUID: '${input.correlation_id}'`);\n}\nif (!uuidPattern.test(input.execution_id)) {\n  throw new Error(`FAO-GOV-001 writer: execution_id is not a valid UUID: '${input.execution_id}'`);\n}\n\n// Normalize — fill optional nulls\nconst normalized = {\n  correlation_id: input.correlation_id,\n  execution_id: input.execution_id,\n  agent_id: input.agent_id,\n  risk_tier: input.risk_tier,\n  inputs: input.inputs ?? {},\n  ai_prompt: input.ai_prompt ?? null,\n  ai_output: input.ai_output ?? null,\n  ai_confidence: input.ai_confidence ?? null,\n  fractional_cost_usd: input.fractional_cost_usd ?? null,\n  policy_outcome: input.policy_outcome,\n  policy_sub_tier: input.policy_sub_tier ?? null,\n  policy_rationale: input.policy_rationale,\n  obligations: input.obligations ?? [],\n  hitl_status: input.hitl_status ?? 'NOT_REQUIRED',\n  hitl_approver_id: input.hitl_approver_id ?? null,\n  status: input.status,\n  error_details: input.error_details ?? null\n};\n\nreturn [{ json: normalized }];"
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ============================================================================\n// Shadow Ledger Writer - Validate Batch\n// ----------------------------------------------------------------------------\n// FAO-GOV-001: the Writer appends a whole batch or nothing. It reads every\n// incoming item ($input.all()), strips keys that start with an underscore,\n// and checks each event against the Writer input contract:\n//   - event_type is STARTED, ASSET_RECONCILED or FAILED (every other event,\n//     including HITL_*, COMMITTED and CORRECTION, is written only by\n//     database functions);\n//   - required fields, enum values and UUID shape;\n//   - event_timestamp, hitl_approver_id, ledger_id and corrects_ledger_id\n//     must be absent (the database sets them);\n//   - hitl_status is NOT_REQUIRED, or PENDING only on an ASSET_RECONCILED\n//     whose outcome rank is >= 2.\n// Every problem is collected as \"item <i>: <reason>\" (i is 0-based, the\n// same numbering fao_ledger_append_batch uses) and any problem throws one\n// named error, so nothing is silently dropped. A clean batch becomes one\n// item {events_json, expected} for Append Ledger Batch, where the database\n// runs its own checks (run state, asset scope, duplicates) all or none.\n//\n// Null optional fields are left out of the stored event: the trigger's input\n// schema fills fields a caller did not send with null.\n// ============================================================================\n\nconst UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;\nconst AGENT = /^[a-z0-9_]{1,64}$/;\nconst SYMBOL = /^[A-Z0-9]{1,12}$/;\nconst EVENT_TYPES = ['STARTED', 'ASSET_RECONCILED', 'FAILED'];\nconst OUTCOME_RANK = { ALLOW: 0, ALLOW_WITH_OBLIGATIONS: 1, REQUIRE_HUMAN: 2, DENY: 3, BLOCKED: 4 };\nconst SUB_TIERS = ['STANDARD', 'CRITICAL'];\nconst STATUSES = ['SUCCESS', 'FAILURE', 'PARTIAL', 'ROLLED_BACK'];\nconst TIERS = ['GREEN', 'AMBER', 'RED'];\nconst FORBIDDEN = ['event_timestamp', 'hitl_approver_id', 'ledger_id', 'corrects_ledger_id'];\nconst ALLOWED = [\n  'correlation_id', 'event_type', 'inputs', 'policy_outcome', 'policy_sub_tier',\n  'policy_rationale', 'obligations', 'status', 'error_details', 'ai_prompt',\n  'ai_output', 'ai_confidence', 'fractional_cost_usd', 'hitl_status',\n  'execution_id', 'agent_id', 'risk_tier'\n];\nconst MAX_ITEMS = 200;\nconst MAX_TEXT = 20000;\n\nconst has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);\nconst isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);\nconst present = (o, k) => has(o, k) && o[k] !== null && o[k] !== undefined;\n\nconst items = $input.all();\nconst problems = [];\nconst events = [];\n\nif (items.length < 1 || items.length > MAX_ITEMS) {\n  throw new Error(`FAO-GOV-001 writer: batch must hold 1 to ${MAX_ITEMS} events, got ${items.length}`);\n}\n\nlet first_correlation = null;\nlet started_seen = 0;\nconst assets_seen = new Set();\n\nitems.forEach((item, i) => {\n  const raw = item && isObj(item.json) ? item.json : {};\n  const p = [];\n\n  // Strip internal keys.\n  const ev = {};\n  for (const k of Object.keys(raw)) {\n    if (!k.startsWith('_')) ev[k] = raw[k];\n  }\n\n  for (const k of FORBIDDEN) {\n    if (has(ev, k)) p.push(`${k} must be absent`);\n  }\n  for (const k of Object.keys(ev)) {\n    if (!ALLOWED.includes(k) && !FORBIDDEN.includes(k)) p.push(`unknown field ${k}`);\n  }\n\n  // correlation_id\n  if (!present(ev, 'correlation_id')) p.push('missing correlation_id');\n  else if (typeof ev.correlation_id !== 'string' || !UUID.test(ev.correlation_id)) p.push('correlation_id is not a UUID');\n  else {\n    if (first_correlation === null) first_correlation = ev.correlation_id.toLowerCase();\n    else if (ev.correlation_id.toLowerCase() !== first_correlation) p.push('correlation_id differs from the batch');\n  }\n\n  // event_type\n  const et = ev.event_type;\n  if (!present(ev, 'event_type')) p.push('missing event_type');\n  else if (!EVENT_TYPES.includes(et)) p.push('event_type not allowed');\n\n  // inputs\n  if (!present(ev, 'inputs')) p.push('missing inputs');\n  else if (!isObj(ev.inputs)) p.push('inputs is not an object');\n  else if (has(ev.inputs, 'event_type') && ev.inputs.event_type !== et) p.push('inputs.event_type differs from event_type');\n\n  // policy_outcome\n  const outcome = ev.policy_outcome;\n  if (!present(ev, 'policy_outcome')) p.push('missing policy_outcome');\n  else if (!has(OUTCOME_RANK, outcome) || typeof outcome !== 'string') p.push('policy_outcome invalid');\n\n  // policy_rationale\n  if (!present(ev, 'policy_rationale')) p.push('missing policy_rationale');\n  else if (typeof ev.policy_rationale !== 'string' || ev.policy_rationale.length < 1 || ev.policy_rationale.length > 4000) {\n    p.push('policy_rationale must be 1 to 4000 characters');\n  }\n\n  // status\n  if (!present(ev, 'status')) p.push('missing status');\n  else if (!STATUSES.includes(ev.status)) p.push('status invalid');\n\n  // Optional fields.\n  if (present(ev, 'policy_sub_tier') && !SUB_TIERS.includes(ev.policy_sub_tier)) p.push('policy_sub_tier invalid');\n  if (present(ev, 'execution_id') && (typeof ev.execution_id !== 'string' || !UUID.test(ev.execution_id))) p.push('execution_id is not a UUID');\n  if (present(ev, 'agent_id') && (typeof ev.agent_id !== 'string' || !AGENT.test(ev.agent_id))) p.push('agent_id invalid');\n  if (present(ev, 'risk_tier') && !TIERS.includes(ev.risk_tier)) p.push('risk_tier invalid');\n  if (present(ev, 'obligations')) {\n    const ob = ev.obligations;\n    if (!Array.isArray(ob) || ob.length > 50 || ob.some(o => typeof o !== 'string' || o.length > 200)) {\n      p.push('obligations must be at most 50 strings of at most 200 characters');\n    }\n  }\n  for (const k of ['error_details', 'ai_prompt', 'ai_output']) {\n    if (present(ev, k) && (typeof ev[k] !== 'string' || ev[k].length > MAX_TEXT)) p.push(`${k} must be a string of at most ${MAX_TEXT} characters`);\n  }\n  if (present(ev, 'ai_confidence')) {\n    const c = ev.ai_confidence;\n    if (typeof c !== 'number' || !Number.isFinite(c) || c < 0 || c > 1) p.push('ai_confidence must be a number from 0 to 1');\n  }\n  if (present(ev, 'fractional_cost_usd')) {\n    const c = ev.fractional_cost_usd;\n    if (typeof c !== 'number' || !Number.isFinite(c)) p.push('fractional_cost_usd must be a finite number');\n  }\n  if (present(ev, 'hitl_status')) {\n    const hs = ev.hitl_status;\n    if (hs === 'PENDING') {\n      if (!(et === 'ASSET_RECONCILED' && has(OUTCOME_RANK, outcome) && OUTCOME_RANK[outcome] >= 2)) {\n        p.push('hitl_status PENDING is allowed only on ASSET_RECONCILED with outcome REQUIRE_HUMAN, DENY or BLOCKED');\n      }\n    } else if (hs !== 'NOT_REQUIRED') {\n      p.push('hitl_status must be NOT_REQUIRED or PENDING');\n    }\n  }\n\n  // Event-specific rules.\n  const inputs = isObj(ev.inputs) ? ev.inputs : {};\n  if (et === 'STARTED') {\n    started_seen += 1;\n    if (started_seen > 1) p.push('second STARTED in the batch');\n    if (outcome !== 'ALLOW') p.push('STARTED requires policy_outcome ALLOW');\n    if (ev.status !== 'SUCCESS') p.push('STARTED requires status SUCCESS');\n    const scope = inputs.asset_scope;\n    if (!Array.isArray(scope) || scope.length < 1 || scope.length > 50\n        || scope.some(s => typeof s !== 'string' || !SYMBOL.test(s))\n        || new Set(scope).size !== scope.length) {\n      p.push('inputs.asset_scope must be 1 to 50 unique asset symbols');\n    } else if (inputs.asset_count !== scope.length) {\n      p.push('inputs.asset_count must equal the asset_scope length');\n    }\n  } else if (et === 'ASSET_RECONCILED') {\n    const asset = inputs.asset;\n    if (typeof asset !== 'string' || !SYMBOL.test(asset)) p.push('inputs.asset invalid');\n    else if (assets_seen.has(asset)) p.push(`duplicate asset ${asset}`);\n    else assets_seen.add(asset);\n    if ((outcome === 'ALLOW' || outcome === 'ALLOW_WITH_OBLIGATIONS')\n        && !(typeof inputs.ratio === 'number' && Number.isFinite(inputs.ratio))) {\n      p.push('ALLOW outcomes require a finite numeric inputs.ratio');\n    }\n  } else if (et === 'FAILED') {\n    if (ev.status !== 'FAILURE') p.push('FAILED requires status FAILURE');\n  }\n\n  if (p.length > 0) {\n    for (const reason of p) problems.push(`item ${i}: ${reason}`);\n    return;\n  }\n\n  // Normalized event: required fields plus non-null optional fields.\n  const out = {};\n  for (const k of ALLOWED) {\n    if (present(ev, k)) out[k] = ev[k];\n  }\n  events.push(out);\n});\n\nif (problems.length > 0) {\n  throw new Error(`FAO-GOV-001 writer: ${problems.join('; ')}`);\n}\n\nreturn [{ json: { events_json: JSON.stringify(events), expected: events.length } }];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        16,
+        0,
         80
       ],
       "id": "a2e7985e-9a49-4b4c-8c40-dfdf8c595866",
-      "name": "Validate Payload"
+      "name": "Validate Batch"
     },
     {
       "parameters": {
-        "schema": {
-          "__rl": true,
-          "mode": "list",
-          "value": "public"
-        },
-        "table": {
-          "__rl": true,
-          "value": "shadow_ledger",
-          "mode": "list",
-          "cachedResultName": "shadow_ledger"
-        },
-        "columns": {
-          "mappingMode": "autoMapInputData",
-          "value": {
-            "ledger_id": 0,
-            "ai_confidence": 0,
-            "fractional_cost_usd": 0
-          },
-          "matchingColumns": [],
-          "schema": [
-            {
-              "id": "ledger_id",
-              "displayName": "ledger_id",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "number",
-              "canBeUsedToMatch": true
-            },
-            {
-              "id": "correlation_id",
-              "displayName": "correlation_id",
-              "required": true,
-              "defaultMatch": false,
-              "display": true,
-              "type": "string",
-              "canBeUsedToMatch": true
-            },
-            {
-              "id": "execution_id",
-              "displayName": "execution_id",
-              "required": true,
-              "defaultMatch": false,
-              "display": true,
-              "type": "string",
-              "canBeUsedToMatch": true
-            },
-            {
-              "id": "agent_id",
-              "displayName": "agent_id",
-              "required": true,
-              "defaultMatch": false,
-              "display": true,
-              "type": "string",
-              "canBeUsedToMatch": true
-            },
-            {
-              "id": "event_timestamp",
-              "displayName": "event_timestamp",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "dateTime",
-              "canBeUsedToMatch": true
-            },
-            {
-              "id": "risk_tier",
-              "displayName": "risk_tier",
-              "required": true,
-              "defaultMatch": false,
-              "display": true,
-              "type": "options",
-              "canBeUsedToMatch": true,
-              "options": [
-                {
-                  "name": "GREEN",
-                  "value": "GREEN"
-                },
-                {
-                  "name": "AMBER",
-                  "value": "AMBER"
-                },
-                {
-                  "name": "RED",
-                  "value": "RED"
-                },
-                {
-                  "name": "BLOCKED",
-                  "value": "BLOCKED"
-                }
-              ]
-            },
-            {
-              "id": "inputs",
-              "displayName": "inputs",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "object",
-              "canBeUsedToMatch": true
-            },
-            {
-              "id": "ai_prompt",
-              "displayName": "ai_prompt",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "string",
-              "canBeUsedToMatch": true
-            },
-            {
-              "id": "ai_output",
-              "displayName": "ai_output",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "string",
-              "canBeUsedToMatch": true
-            },
-            {
-              "id": "ai_confidence",
-              "displayName": "ai_confidence",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "number",
-              "canBeUsedToMatch": true
-            },
-            {
-              "id": "fractional_cost_usd",
-              "displayName": "fractional_cost_usd",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "number",
-              "canBeUsedToMatch": true
-            },
-            {
-              "id": "policy_outcome",
-              "displayName": "policy_outcome",
-              "required": true,
-              "defaultMatch": false,
-              "display": true,
-              "type": "options",
-              "canBeUsedToMatch": true,
-              "options": [
-                {
-                  "name": "ALLOW",
-                  "value": "ALLOW"
-                },
-                {
-                  "name": "ALLOW_WITH_OBLIGATIONS",
-                  "value": "ALLOW_WITH_OBLIGATIONS"
-                },
-                {
-                  "name": "REQUIRE_HUMAN",
-                  "value": "REQUIRE_HUMAN"
-                },
-                {
-                  "name": "DENY",
-                  "value": "DENY"
-                },
-                {
-                  "name": "BLOCKED",
-                  "value": "BLOCKED"
-                }
-              ]
-            },
-            {
-              "id": "policy_sub_tier",
-              "displayName": "policy_sub_tier",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "options",
-              "canBeUsedToMatch": true,
-              "options": [
-                {
-                  "name": "STANDARD",
-                  "value": "STANDARD"
-                },
-                {
-                  "name": "CRITICAL",
-                  "value": "CRITICAL"
-                }
-              ]
-            },
-            {
-              "id": "policy_rationale",
-              "displayName": "policy_rationale",
-              "required": true,
-              "defaultMatch": false,
-              "display": true,
-              "type": "string",
-              "canBeUsedToMatch": true
-            },
-            {
-              "id": "obligations",
-              "displayName": "obligations",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "array",
-              "canBeUsedToMatch": true
-            },
-            {
-              "id": "hitl_status",
-              "displayName": "hitl_status",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "options",
-              "canBeUsedToMatch": true,
-              "options": [
-                {
-                  "name": "NOT_REQUIRED",
-                  "value": "NOT_REQUIRED"
-                },
-                {
-                  "name": "PENDING",
-                  "value": "PENDING"
-                },
-                {
-                  "name": "APPROVED",
-                  "value": "APPROVED"
-                },
-                {
-                  "name": "REJECTED",
-                  "value": "REJECTED"
-                }
-              ]
-            },
-            {
-              "id": "hitl_approver_id",
-              "displayName": "hitl_approver_id",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "string",
-              "canBeUsedToMatch": true
-            },
-            {
-              "id": "status",
-              "displayName": "status",
-              "required": true,
-              "defaultMatch": false,
-              "display": true,
-              "type": "options",
-              "canBeUsedToMatch": true,
-              "options": [
-                {
-                  "name": "SUCCESS",
-                  "value": "SUCCESS"
-                },
-                {
-                  "name": "FAILURE",
-                  "value": "FAILURE"
-                },
-                {
-                  "name": "PARTIAL",
-                  "value": "PARTIAL"
-                },
-                {
-                  "name": "ROLLED_BACK",
-                  "value": "ROLLED_BACK"
-                }
-              ]
-            },
-            {
-              "id": "error_details",
-              "displayName": "error_details",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "type": "string",
-              "canBeUsedToMatch": true
-            }
-          ],
-          "attemptToConvertTypes": false,
-          "convertFieldsToString": false
-        },
-        "options": {}
+        "operation": "executeQuery",
+        "query": "SELECT public.fao_ledger_append_batch($1::jsonb) AS r;",
+        "options": {
+          "queryReplacement": "={{ [ $json.events_json ] }}"
+        }
       },
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.6,
       "position": [
-        368,
+        240,
         80
       ],
-      "id": "d02c7cfe-2068-4db6-a212-bc1d3954f3bf",
-      "name": "Insert Ledger Row",
+      "id": "1153e1b2-827a-56ca-94f5-f074e08ac6cf",
+      "name": "Append Ledger Batch",
       "credentials": {
         "postgres": {
-          "id": "Vh67T849XENVGttf",
-          "name": "Postgres account"
+          "id": "FaoPgWorkflow001",
+          "name": "FAO Postgres (fao_workflow)"
         }
       }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ============================================================================\n// Shadow Ledger Writer - Check Inserted\n// ----------------------------------------------------------------------------\n// FAO-GOV-001: fao_ledger_append_batch is all or none and raises on any bad\n// event, so a refused batch already fails Append Ledger Batch. This node\n// checks the success path: the stored count must equal the number of events\n// sent, else the Writer fails loudly. Output is the Writer's single item\n// {count, inserted[]}.\n// ============================================================================\n\nconst expected = $('Validate Batch').first().json.expected;\nconst r = (($input.first() || {}).json || {}).r || {};\nconst count = r.count;\n\nif (r.ok !== true || count !== expected) {\n  throw new Error(`FAO-GOV-001 writer: stored ${count} of ${expected}`);\n}\n\nreturn [{ json: { count: r.count, inserted: Array.isArray(r.inserted) ? r.inserted : [] } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        80
+      ],
+      "id": "1b80ee2a-4731-5b77-ab00-ee71dd69b31d",
+      "name": "Check Inserted"
+    },
+    {
+      "parameters": {
+        "content": "## Shadow Ledger Writer\n\n**Control:** FAO-GOV-001\n\nEvery workflow event row goes through this sub-workflow and the database function `fao_ledger_append_batch`. The Writer may append only STARTED, ASSET_RECONCILED and FAILED; every other event type is written by database functions.\n\n1. **Validate Batch**: reads all items, strips `_` keys, checks every event, and throws one named error listing every bad item (`item <i>: <reason>`, 0-based)\n2. **Append Ledger Batch**: one call, all or none; the database sets timestamps, ids and run context\n3. **Check Inserted**: the stored count must equal the events sent\n\nOutput: one item `{count, inserted[]}`.",
+        "height": 460,
+        "width": 620,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -256,
+        -420
+      ],
+      "id": "15fe5263-7269-528d-aba8-bade5642d982",
+      "name": "Writer Note"
     }
   ],
   "pinData": {},
@@ -335,18 +89,29 @@
       "main": [
         [
           {
-            "node": "Validate Payload",
+            "node": "Validate Batch",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Validate Payload": {
+    "Validate Batch": {
       "main": [
         [
           {
-            "node": "Insert Ledger Row",
+            "node": "Append Ledger Batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append Ledger Batch": {
+      "main": [
+        [
+          {
+            "node": "Check Inserted",
             "type": "main",
             "index": 0
           }
@@ -360,9 +125,8 @@
     "binaryMode": "separate",
     "availableInMCP": false
   },
-  "versionId": "b524cadf-17bf-4212-87e3-ad69786e5ee2",
+  "versionId": "b4f2a5c1-0e57-4d0e-8a6b-25a000000003",
   "meta": {
-    "templateCredsSetupCompleted": true,
     "instanceId": "d7e19fca9705d4d0c36e6fe71822071e2ec1e1c76f266658ed6763dfc41db437"
   },
   "id": "dQslIEVwF3WqMliT",

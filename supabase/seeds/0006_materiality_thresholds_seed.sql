@@ -21,9 +21,16 @@
 -- last_reviewed_by is initially NULL. Thresholds will be formally
 -- reviewed by the Controller in the first quarterly governance cycle.
 --
+-- Phase 2-5: the first statement sets fao.change_reason, which every change
+-- to materiality_thresholds now needs (FAO-GOV-002).
+--
 -- Author: Rizwan Ahmed, ACCA · Velocyt Consulting
 -- Date:   2026-04-20
 -- ============================================================================
+
+-- FAO-GOV-002: change reason for this session (required by the
+-- materiality_thresholds triggers).
+SELECT set_config('fao.change_reason', 'seed 0006', false);
 
 INSERT INTO public.materiality_thresholds
   (asset_symbol, scope, asset_class, materiality_usd,

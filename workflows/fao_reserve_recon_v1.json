@@ -2,131 +2,42 @@
   "name": "fao_reserve_recon_v1",
   "nodes": [
     {
-      "parameters": {},
-      "type": "n8n-nodes-base.manualTrigger",
-      "typeVersion": 1,
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "fao-recon-invoke",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
       "position": [
         0,
         320
       ],
-      "id": "aefc7ae3-ea5b-4f22-bcd3-e7e0d9e18e31",
-      "name": "Manual Trigger"
-    },
-    {
-      "parameters": {
-        "jsCode": "// ============================================================================\n// FAO Reserve Reconciliation Agent — Init Execution\n// ----------------------------------------------------------------------------\n// FAO-GOV-008: Generate correlation_id and execution_id at execution start.\n// Both are UUIDs threaded through every event for this run.\n//\n// FIXTURE DESIGN (calibrated against Kraken Dec 2025 PoR + control coverage):\n//   BTC, ETH, XRP — wallet/ledger calibrated to Kraken's published Dec 31, 2025\n//                   PoR ratios (1.003, 1.013, 1.006 respectively).\n//   USDC          — clean exact-match baseline.\n//   USDT          — synthetic anomaly: stablecoin USD-materiality breach\n//                   (FAO-REC-002).\n//   SOL           — synthetic anomaly: under-reservation floor violation\n//                   (FAO-REC-004).\n//   ADA           — synthetic anomaly: negative liability — krakendb 2014\n//                   precedent (FAO-REC-007).\n//\n// Source URL for real-anchored assets:\n//   https://blog.kraken.com/news/december-2025-proof-of-reserves\n//\n// In production, wallet_data comes from Fireblocks API and ledger_data from\n// NetSuite GL. Inline embedding here isolates policy logic from data-source\n// plumbing for the smoke test; file reads / API calls move in post-launch.\n// ============================================================================\n\n// UUID v4 generator — inline implementation to avoid n8n's sandbox restriction\n// on require('crypto'). Cryptographically adequate for correlation/execution\n// IDs (Math.random is sufficient here; we're not signing anything).\nconst randomUUID = () => {\n  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {\n    const r = Math.random() * 16 | 0;\n    const v = c === 'x' ? r : (r & 0x3 | 0x8);\n    return v.toString(16);\n  });\n};\n\nconst correlation_id = randomUUID();\nconst execution_id   = randomUUID();\nconst agent_id       = 'fao_reserve_recon_v1';\nconst risk_tier      = 'RED';\n\n// --- Fixture: simulated on-chain wallet holdings (Fireblocks proxy) -------\nconst wallet_data = {\n  BTC:  167690.25,        // anchored to Kraken Dec 2025 PoR (ratio 1.003)\n  ETH:  2884112,          // anchored to Kraken Dec 2025 PoR (ratio 1.013)\n  USDC: 891723456,        // synthetic clean exact-match baseline\n  USDT: 1234567890.50,    // synthetic stablecoin USD-materiality anomaly\n  SOL:  8740000,          // synthetic under-reservation anomaly (ratio 0.95)\n  XRP:  128265000,        // anchored to Kraken Dec 2025 PoR (ratio 1.006)\n  ADA:  47293847          // wallet positive; ledger intentionally negative\n};\n\n// --- Fixture: simulated internal client-liability ledger (NetSuite proxy) -\nconst ledger_data = {\n  BTC:  167188.68,\n  ETH:  2847100,\n  USDC: 891723456,\n  USDT: 1234500000,\n  SOL:  9200000,\n  XRP:  127500000,\n  ADA:  -150000           // FAO-REC-007 trigger, krakendb 2014 precedent\n};\n\n// --- Fixture provenance metadata (threaded into shadow_ledger evidence) ---\n// Self-identifying provenance per asset so every ledger row carries the\n// source of truth used. Auditor query:\n//   SELECT inputs->>'asset', inputs->'fixture_metadata'->>'source'\n//   FROM shadow_ledger;\nconst fixture_metadata = {\n  BTC:  { source: 'kraken_por_2025_q4_anchor',  reference_url: 'https://blog.kraken.com/news/december-2025-proof-of-reserves', notes: 'Wallet/ledger calibrated to published Dec 31 2025 ratio 100.3%' },\n  ETH:  { source: 'kraken_por_2025_q4_anchor',  reference_url: 'https://blog.kraken.com/news/december-2025-proof-of-reserves', notes: 'Wallet/ledger calibrated to published Dec 31 2025 ratio 101.3%' },\n  USDC: { source: 'synthetic_clean_baseline',   notes: 'Exact match — exercises the in-band ALLOW path with zero discrepancy' },\n  USDT: { source: 'synthetic_anomaly',          control: 'FAO-REC-002', notes: 'Stablecoin USD-materiality breach: ratio in band but absolute USD discrepancy exceeds threshold' },\n  SOL:  { source: 'synthetic_anomaly',          control: 'FAO-REC-004', notes: 'Under-reservation: ratio 0.95 below floor 1.00' },\n  XRP:  { source: 'kraken_por_2025_q4_anchor',  reference_url: 'https://blog.kraken.com/news/december-2025-proof-of-reserves', notes: 'Wallet/ledger calibrated to published Dec 31 2025 ratio 100.6%' },\n  ADA:  { source: 'synthetic_anomaly',          control: 'FAO-REC-007', notes: 'Negative liability — krakendb 2014 reference implementation precedent' }\n};\n\nconst asset_count = Object.keys(wallet_data).length;\n\nreturn [{\n  json: {\n    // --- Writer payload (17-field schema per Writer sub-workflow) -----------\n    correlation_id,\n    execution_id,\n    agent_id,\n    agent_invoker_email: 'aisha.okonkwo@finagent-os.demo',  // ADD THIS LINE — demo-hardcoded; production sourced from auth context\n    risk_tier,\n    inputs: {\n      event_type:        'STARTED',\n      asset_scope:       Object.keys(wallet_data),\n      asset_count:       asset_count,\n      wallet_source:     'fixture://wallet_data.json (Fireblocks proxy)',\n      ledger_source:     'fixture://ledger_data.json (NetSuite proxy)',\n      fixture_provenance: fixture_metadata\n    },\n    ai_prompt:           null,\n    ai_output:           null,\n    ai_confidence:       null,\n    fractional_cost_usd: null,\n    policy_outcome:      'ALLOW',\n    policy_sub_tier:     null,\n    policy_rationale:    `FAO-REC-001 ${agent_id} execution started. Reconciling ${asset_count} assets (${Object.keys(wallet_data).join(', ')}) against materiality thresholds. Risk tier: ${risk_tier}. Fixture mix: 3 Kraken Dec 2025 PoR anchors + 1 clean baseline + 3 synthetic control anomalies.`,\n    obligations:         [],\n    hitl_status:         'NOT_REQUIRED',\n    hitl_approver_id:    null,\n    status:              'SUCCESS',\n    error_details:       null,\n\n    // --- Internal context (underscore prefix; ignored by autoMapInputData) --\n    _wallet_data:      wallet_data,\n    _ledger_data:      ledger_data,\n    _fixture_metadata: fixture_metadata\n  }\n}];"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        240,
-        320
-      ],
-      "id": "36f0c057-e9d5-4133-a831-6c95bc928a39",
-      "name": "Init Execution"
-    },
-    {
-      "parameters": {
-        "workflowId": {
-          "__rl": true,
-          "value": "dQslIEVwF3WqMliT",
-          "mode": "list",
-          "cachedResultUrl": "/workflow/dQslIEVwF3WqMliT",
-          "cachedResultName": "Writer"
-        },
-        "workflowInputs": {
-          "mappingMode": "defineBelow",
-          "value": {},
-          "matchingColumns": [],
-          "schema": [],
-          "attemptToConvertTypes": false,
-          "convertFieldsToString": true
-        },
-        "options": {}
-      },
-      "type": "n8n-nodes-base.executeWorkflow",
-      "typeVersion": 1.3,
-      "position": [
-        480,
-        320
-      ],
-      "id": "97404cf0-9b95-42f6-be44-758bff952347",
-      "name": "Writer: STARTED"
-    },
-    {
-      "parameters": {
-        "operation": "executeQuery",
-        "query": "SELECT\n  asset_symbol,\n  asset_class::text AS asset_class,\n  ratio_floor::float AS ratio_floor,\n  ratio_band_lower::float AS ratio_band_lower,\n  ratio_band_upper::float AS ratio_band_upper,\n  materiality_usd::float AS materiality_usd\nFROM public.materiality_thresholds\nWHERE scope = 'Spot'\nORDER BY asset_symbol;",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
-      "position": [
-        720,
-        320
-      ],
-      "id": "99fdb4b6-2919-4c32-a0fe-7a4065d54b07",
-      "name": "Get Materiality Thresholds",
+      "id": "7d0fc170-1a34-517d-98c6-8cce01027e60",
+      "name": "Webhook: Invoke",
+      "webhookId": "8d0b6c4e-5f3a-4b7e-9c21-fa0f0c0e0001",
       "credentials": {
-        "postgres": {
-          "id": "Vh67T849XENVGttf",
-          "name": "Postgres account"
+        "httpHeaderAuth": {
+          "id": "FaoInvokeHdr0001",
+          "name": "FAO Invoke Header Auth"
         }
       }
     },
     {
       "parameters": {
-        "jsCode": "// ============================================================================\n// FAO Reserve Reconciliation Agent — Per-Asset Reconcile (observe + decide)\n// ----------------------------------------------------------------------------\n// Controls implemented:\n//   FAO-REC-002  Per-Asset Materiality Threshold Evaluation\n//   FAO-REC-004  Reserve Ratio Threshold Check\n//   FAO-REC-006  Expected-Ratio Band Evaluation\n//   FAO-REC-007  Negative Liability Detection (krakendb precedent)\n//\n// Design note: COMPARED and POLICY_DECIDED collapsed into a single\n// ASSET_RECONCILED event per asset. Reasons:\n//   1. shadow_ledger.policy_outcome is NOT NULL — a separate COMPARED row\n//      would force a placeholder policy_outcome which is misleading.\n//   2. Observation and decision happen atomically; no time gap an auditor\n//      cares about exists between them.\n//   3. One row per asset = complete story per asset = cleaner audit grain.\n//\n// Decision matrix (deterministic, evaluated top-down — first match wins):\n//   1. ledger < 0           → REQUIRE_HUMAN CRITICAL (FAO-REC-007)\n//   2. ledger == 0          → REQUIRE_HUMAN STANDARD (cannot compute ratio)\n//   3. ratio < floor        → REQUIRE_HUMAN CRITICAL (under-reserved)\n//   4. ratio > band_upper   → REQUIRE_HUMAN STANDARD (unexpected surplus)\n//   5. Stablecoin AND |discrepancy| > materiality_usd\n//                            → REQUIRE_HUMAN STANDARD (USD threshold breach)\n//   6. ratio < band_lower   → ALLOW_WITH_OBLIGATIONS (drift below band)\n//   7. otherwise            → ALLOW (in expected band)\n//\n// Note on USD materiality test: applied only to stablecoins because for\n// stablecoins, raw units == USD value (1 USDC = $1). For non-stablecoins,\n// applying USD materiality requires a price oracle which is out of scope\n// for tonight. Tomorrow's AI advisory wiring (Apr 25) can flag suspicious\n// non-stablecoin discrepancies advisorially.\n// ============================================================================\n\nconst ctx       = $('Init Execution').first().json;\nconst wallet    = ctx._wallet_data;\nconst ledger    = ctx._ledger_data;\nconst threshold_rows = $input.all().map(item => item.json);\n\n// Build asset_symbol → threshold lookup\nconst threshold_by_asset = {};\nfor (const t of threshold_rows) {\n  threshold_by_asset[t.asset_symbol] = t;\n}\n\nconst output_items = [];\n\nfor (const asset of Object.keys(wallet)) {\n  const w = wallet[asset];\n  const l = ledger[asset];\n  const t = threshold_by_asset[asset];\n\n  // Defensive: asset present in fixture but not in materiality_thresholds.\n  // Should not happen with current seed but worth guarding for robustness.\n  if (!t) {\n    output_items.push({ json: build_writer_payload(ctx, {\n      asset, wallet: w, ledger: l,\n      ratio: null, discrepancy: null, band_status: 'NO_THRESHOLD',\n      threshold: null,\n      policy_outcome:   'BLOCKED',\n      policy_sub_tier:  null,\n      policy_rationale: `FAO-REC-002 ${asset}: no materiality threshold configured for scope=Spot. Asset BLOCKED pending Controller setup. Cannot evaluate.`,\n      hitl_status:      'NOT_REQUIRED',\n      obligations:      [],\n      status:           'FAILURE',\n      error_details:    `Asset ${asset} not present in materiality_thresholds (scope=Spot)`\n    }) });\n    continue;\n  }\n\n  const discrepancy = w - l;\n\n  // ----- Decision matrix --------------------------------------------------\n  let outcome, sub_tier, rationale, hitl_status, obligations = [];\n  let ratio = null;\n  let band_status;\n\n  if (l < 0) {\n    // (1) Negative liability — FAO-REC-007 (krakendb precedent)\n    band_status      = 'NEGATIVE_LEDGER';\n    outcome          = 'REQUIRE_HUMAN';\n    sub_tier         = 'CRITICAL';\n    hitl_status      = 'PENDING';\n    rationale        = `FAO-REC-007 ${asset} negative liability detected (ledger=${l}). Cannot compute meaningful ratio. Routed to CRITICAL HITL — Controller + CFO review required (RED tier, 2 approvers). Pattern flagged in krakendb 2014 reference implementation as operational concern.`;\n  } else if (l === 0) {\n    // (2) Zero ledger — division undefined\n    band_status      = 'ZERO_LEDGER';\n    outcome          = 'REQUIRE_HUMAN';\n    sub_tier         = 'STANDARD';\n    hitl_status      = 'PENDING';\n    rationale        = `FAO-REC-006 ${asset} zero ledger balance with non-zero wallet (${w}). Cannot compute reserve ratio. Manual review required.`;\n  } else {\n    ratio = w / l;\n\n    if (ratio < t.ratio_floor) {\n      // (3) Under-reserved — the worst case\n      band_status   = 'BELOW_FLOOR';\n      outcome       = 'REQUIRE_HUMAN';\n      sub_tier      = 'CRITICAL';\n      hitl_status   = 'PENDING';\n      rationale     = `FAO-REC-004 ${asset} ratio ${ratio.toFixed(6)} below floor ${t.ratio_floor.toFixed(4)}. UNDER-RESERVED — wallet holdings insufficient to cover ledger liabilities. Routed to CRITICAL HITL (RED tier, 2 approvers).`;\n    } else if (ratio > t.ratio_band_upper) {\n      // (4) Unexpected surplus — investigate ledger\n      band_status   = 'ABOVE_BAND_UPPER';\n      outcome       = 'REQUIRE_HUMAN';\n      sub_tier      = 'STANDARD';\n      hitl_status   = 'PENDING';\n      rationale     = `FAO-REC-006 ${asset} ratio ${ratio.toFixed(6)} above expected band upper ${t.ratio_band_upper.toFixed(4)}. Unexpected surplus — possible ledger under-recording. Investigate liability side.`;\n    } else if (t.asset_class === 'Stablecoin' && Math.abs(discrepancy) > t.materiality_usd) {\n      // (5) Stablecoin USD materiality breach (units == USD for stablecoins)\n      band_status   = 'IN_BAND_USD_MATERIAL';\n      outcome       = 'REQUIRE_HUMAN';\n      sub_tier      = 'STANDARD';\n      hitl_status   = 'PENDING';\n      rationale     = `FAO-REC-002 ${asset} stablecoin: ratio ${ratio.toFixed(6)} within band [${t.ratio_band_lower.toFixed(4)}, ${t.ratio_band_upper.toFixed(4)}], BUT absolute discrepancy $${Math.abs(discrepancy).toFixed(2)} exceeds materiality threshold $${t.materiality_usd.toFixed(2)}. Stablecoin units are 1:1 USD; small ratio deviations on large pools are still material.`;\n    } else if (ratio < t.ratio_band_lower) {\n      // (6) Drift below expected band — not under-reserved (above floor)\n      //     but reserve ratio is lower than expected over-reservation posture\n      band_status   = 'BELOW_BAND_LOWER';\n      outcome       = 'ALLOW_WITH_OBLIGATIONS';\n      sub_tier      = null;\n      hitl_status   = 'NOT_REQUIRED';\n      obligations   = ['weekly_review_required', 'flag_drift_pattern_to_controller'];\n      rationale     = `FAO-REC-006 ${asset} ratio ${ratio.toFixed(6)} below expected band lower ${t.ratio_band_lower.toFixed(4)} but above floor ${t.ratio_floor.toFixed(4)}. Reserves cover liabilities but over-reservation posture has drifted. Allowed with weekly-review obligation.`;\n    } else {\n      // (7) In expected band — clean\n      band_status   = 'IN_BAND';\n      outcome       = 'ALLOW';\n      sub_tier      = null;\n      hitl_status   = 'NOT_REQUIRED';\n      rationale     = `FAO-REC-006 ${asset} ratio ${ratio.toFixed(6)} within expected band [${t.ratio_band_lower.toFixed(4)}, ${t.ratio_band_upper.toFixed(4)}]. Reserved as expected.`;\n    }\n  }\n\n  output_items.push({ json: build_writer_payload(ctx, {\n    asset, wallet: w, ledger: l,\n    ratio, discrepancy, band_status,\n    threshold: {\n      asset_class:      t.asset_class,\n      ratio_floor:      t.ratio_floor,\n      ratio_band_lower: t.ratio_band_lower,\n      ratio_band_upper: t.ratio_band_upper,\n      materiality_usd:  t.materiality_usd\n    },\n    policy_outcome:   outcome,\n    policy_sub_tier:  sub_tier,\n    policy_rationale: rationale,\n    hitl_status:      hitl_status,\n    obligations:      obligations,\n    status:           'SUCCESS',\n    error_details:    null\n  }) });\n}\n\nreturn output_items;\n\n// ----- Helper: build writer payload from context + per-asset facts ----------\nfunction build_writer_payload(ctx, facts) {\n  return {\n    correlation_id:      ctx.correlation_id,\n    execution_id:        ctx.execution_id,\n    agent_id:            ctx.agent_id,\n    risk_tier:           ctx.risk_tier,\n    inputs: {\n      event_type:  'ASSET_RECONCILED',\n      asset:       facts.asset,\n      wallet:      facts.wallet,\n      ledger:      facts.ledger,\n      ratio:       facts.ratio,\n      discrepancy: facts.discrepancy,\n      band_status: facts.band_status,\n      threshold:   facts.threshold\n    },\n    ai_prompt:           null,\n    ai_output:           null,\n    ai_confidence:       null,\n    fractional_cost_usd: null,\n    policy_outcome:      facts.policy_outcome,\n    policy_sub_tier:     facts.policy_sub_tier,\n    policy_rationale:    facts.policy_rationale,\n    obligations:         facts.obligations || [],\n    hitl_status:         facts.hitl_status,\n    hitl_approver_id:    null,\n    status:              facts.status,\n    error_details:       facts.error_details\n  };\n}"
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ============================================================================\n// FAO Reserve Recon - Validate Invoke Body\n// ----------------------------------------------------------------------------\n// FAO-GOV-007 / FAO-GOV-008: the invoke webhook accepts exactly one field,\n// body.run_token, a single-use token issued by fao_run_start to a signed-in\n// human. The token is the real gate: fao_run_claim refuses unknown, expired\n// and already used tokens. This node only checks its shape.\n//\n// Every other body field, every query parameter and every header is ignored.\n// Identity, agent and tier never come from the request; they come from the\n// database through Claim Run.\n// ============================================================================\n\nconst TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;\n\nconst first = $input.first();\nconst payload = first && first.json ? first.json : {};\nconst body = payload.body;\n\nlet candidate;\nif (body !== null && typeof body === 'object' && !Array.isArray(body)) {\n  candidate = body.run_token;\n}\n\nconst valid = typeof candidate === 'string' && TOKEN_PATTERN.test(candidate);\n\nreturn [{\n  json: {\n    valid,\n    run_token: valid ? candidate : null,\n    n8n_execution_id: $execution.id\n  }\n}];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        960,
+        220,
         320
       ],
-      "id": "86a36772-e2ea-407d-a4fa-d2dbc50899ed",
-      "name": "Per-Asset Reconcile"
-    },
-    {
-      "parameters": {
-        "workflowId": {
-          "__rl": true,
-          "value": "dQslIEVwF3WqMliT",
-          "mode": "list",
-          "cachedResultUrl": "/workflow/dQslIEVwF3WqMliT",
-          "cachedResultName": "Writer"
-        },
-        "workflowInputs": {
-          "mappingMode": "defineBelow",
-          "value": {},
-          "matchingColumns": [],
-          "schema": [],
-          "attemptToConvertTypes": false,
-          "convertFieldsToString": true
-        },
-        "options": {}
-      },
-      "type": "n8n-nodes-base.executeWorkflow",
-      "typeVersion": 1.3,
-      "position": [
-        1200,
-        320
-      ],
-      "id": "033a94f1-2a99-4e49-ae8b-5c8ba93df7c8",
-      "name": "Writer: ASSET_RECONCILED"
-    },
-    {
-      "parameters": {
-        "jsCode": "// ============================================================================\n// FAO Reserve Reconciliation Agent — Aggregate Rollup\n// ----------------------------------------------------------------------------\n// Reaches back to Per-Asset Reconcile to read the 7 per-asset decisions\n// (the items flowing IN to this node are the inserted shadow_ledger rows\n// returned by Writer, not the original decisions). Computes the execution-\n// level rollup outcome using \"worst per-asset outcome wins\":\n//\n//   - any REQUIRE_HUMAN → execution = REQUIRE_HUMAN\n//   - any DENY/BLOCKED  → execution = matching outcome\n//   - any ALLOW_WITH_OBLIGATIONS (and no worse) → execution = ALLOW_WITH_OBLIGATIONS\n//   - otherwise → ALLOW\n//\n// Outputs a single item formatted as a Writer payload for the COMMITTED\n// event. The IF node downstream gates whether this gets written: COMMITTED\n// is only logged when the execution completes without HITL routing. For\n// REQUIRE_HUMAN outcomes, the chain ends at the per-asset rows tonight; the\n// HITL Gateway sub-workflow (Apr 25) will extend the chain through approval\n// to a final COMMITTED event then.\n// ============================================================================\n\nconst ctx        = $('Init Execution').first().json;\nconst per_asset_items = $('Per-Asset Reconcile').all();\nconst per_asset = per_asset_items.map(it => it.json);\n\n// Outcome ranking — higher number = worse outcome\nconst rank = {\n  'ALLOW':                  0,\n  'ALLOW_WITH_OBLIGATIONS': 1,\n  'REQUIRE_HUMAN':          2,\n  'DENY':                   3,\n  'BLOCKED':                4\n};\n\nlet rollup_outcome      = 'ALLOW';\nlet rollup_sub_tier     = null;\nlet worst_rank          = 0;\nlet aggregated_obligations = new Set();\n\nconst per_asset_summary = per_asset.map(row => {\n  const r = rank[row.policy_outcome] ?? 0;\n  if (r > worst_rank) {\n    worst_rank      = r;\n    rollup_outcome  = row.policy_outcome;\n    rollup_sub_tier = row.policy_sub_tier;\n  } else if (r === worst_rank && row.policy_sub_tier === 'CRITICAL') {\n    // Within same outcome rank, CRITICAL escalates STANDARD\n    rollup_sub_tier = 'CRITICAL';\n  }\n  for (const o of (row.obligations || [])) aggregated_obligations.add(o);\n  return {\n    asset:           row.inputs.asset,\n    band_status:     row.inputs.band_status,\n    ratio:           row.inputs.ratio,\n    policy_outcome:  row.policy_outcome,\n    policy_sub_tier: row.policy_sub_tier\n  };\n});\n\nconst counts = {\n  ALLOW:                  per_asset.filter(r => r.policy_outcome === 'ALLOW').length,\n  ALLOW_WITH_OBLIGATIONS: per_asset.filter(r => r.policy_outcome === 'ALLOW_WITH_OBLIGATIONS').length,\n  REQUIRE_HUMAN:          per_asset.filter(r => r.policy_outcome === 'REQUIRE_HUMAN').length,\n  DENY:                   per_asset.filter(r => r.policy_outcome === 'DENY').length,\n  BLOCKED:                per_asset.filter(r => r.policy_outcome === 'BLOCKED').length\n};\n\nconst rationale_parts = [\n  `FAO-REC-001 execution rollup over ${per_asset.length} assets.`,\n  `Outcomes: ${counts.ALLOW} ALLOW, ${counts.ALLOW_WITH_OBLIGATIONS} ALLOW_WITH_OBLIGATIONS, ${counts.REQUIRE_HUMAN} REQUIRE_HUMAN${counts.DENY ? ', ' + counts.DENY + ' DENY' : ''}${counts.BLOCKED ? ', ' + counts.BLOCKED + ' BLOCKED' : ''}.`,\n  `Worst-asset rule applied: execution outcome = ${rollup_outcome}${rollup_sub_tier ? ' (' + rollup_sub_tier + ')' : ''}.`\n];\n\nconst escalated_assets = per_asset.filter(r => rank[r.policy_outcome] >= 2);\nif (escalated_assets.length > 0) {\n  rationale_parts.push(\n    `Escalated assets: ${escalated_assets.map(r => r.inputs.asset + ' (' + r.policy_outcome + (r.policy_sub_tier ? '/' + r.policy_sub_tier : '') + ')').join(', ')}.`\n  );\n}\n\n// HITL routing: if execution requires human, the COMMITTED event is held\n// until HITL resolves. Tonight the chain ends here for REQUIRE_HUMAN\n// (HITL Gateway sub-workflow lands Apr 25).\nconst hitl_status = (rollup_outcome === 'REQUIRE_HUMAN') ? 'PENDING' : 'NOT_REQUIRED';\nconst status      = (rollup_outcome === 'BLOCKED' || rollup_outcome === 'DENY') ? 'FAILURE' : 'SUCCESS';\n\nreturn [{\n  json: {\n    correlation_id:      ctx.correlation_id,\n    execution_id:        ctx.execution_id,\n    agent_id:            ctx.agent_id,\n    risk_tier:           ctx.risk_tier,\n    inputs: {\n      event_type:        'COMMITTED',\n      per_asset_summary: per_asset_summary,\n      counts:            counts,\n      escalated_assets:  escalated_assets.map(r => r.inputs.asset)\n    },\n    ai_prompt:           null,\n    ai_output:           null,\n    ai_confidence:       null,\n    fractional_cost_usd: null,\n    policy_outcome:      rollup_outcome,\n    policy_sub_tier:     rollup_sub_tier,\n    policy_rationale:    rationale_parts.join(' '),\n    obligations:         Array.from(aggregated_obligations),\n    hitl_status:         hitl_status,\n    hitl_approver_id:    null,\n    status:              status,\n    error_details:       null,\n\n    // Internal field for IF node — not a shadow_ledger column\n    _rollup_outcome:     rollup_outcome\n  }\n}];"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1440,
-        320
-      ],
-      "id": "b17014a2-ec5b-41dd-ac2a-e189e6e2e3d6",
-      "name": "Aggregate Rollup"
+      "id": "bcc04168-5bc1-582f-a02c-5d6bcf551ae8",
+      "name": "Validate Invoke Body"
     },
     {
       "parameters": {
@@ -139,13 +50,13 @@
           },
           "conditions": [
             {
-              "id": "20000000-0000-0000-0000-000000000001",
-              "leftValue": "={{ $json._rollup_outcome }}",
-              "rightValue": "REQUIRE_HUMAN",
+              "id": "753c00f1-47bc-55cf-88e2-151feb55b3bb",
+              "leftValue": "={{ $json.valid === true }}",
+              "rightValue": "",
               "operator": {
-                "type": "string",
-                "operation": "notEquals",
-                "name": "filter.operator.notEquals"
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
               }
             }
           ],
@@ -156,14 +67,161 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        1680,
+        440,
         320
       ],
-      "id": "4e664094-8d60-4699-b53c-c0125d2bbfb6",
-      "name": "Any HITL Required?"
+      "id": "23fcf110-a43b-5ebc-9c5e-6935ca8b74f4",
+      "name": "Body Valid?"
     },
     {
       "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"accepted\": false, \"code\": \"INVALID_INPUT\"}",
+        "options": {
+          "responseCode": 400,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Cache-Control",
+                "value": "no-store"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        540
+      ],
+      "id": "397922c7-c738-5ce3-a310-91ad89e85c66",
+      "name": "Respond 400"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT public.fao_run_claim($1, $2) AS r;",
+        "options": {
+          "queryReplacement": "={{ [ $json.run_token, $json.n8n_execution_id ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        660,
+        320
+      ],
+      "id": "4aa87fcf-715b-5c41-8066-21fdf5e58799",
+      "name": "Claim Run",
+      "credentials": {
+        "postgres": {
+          "id": "FaoPgWorkflow001",
+          "name": "FAO Postgres (fao_workflow)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "59c893f8-48e6-5770-8b37-5b763c614dc5",
+              "leftValue": "={{ $json.r.ok === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        320
+      ],
+      "id": "772b3dbc-9ce3-5a1c-ad94-f3c7eb676f97",
+      "name": "Claim OK?"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ accepted: false, code: $json.r.code }) }}",
+        "options": {
+          "responseCode": "={{ $json.r.http_status }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Cache-Control",
+                "value": "no-store"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1100,
+        540
+      ],
+      "id": "add30ee3-3293-5ef6-a5c5-b99f0b821367",
+      "name": "Respond Claim Refused"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ accepted: true, correlation_id: $json.r.correlation_id }) }}",
+        "options": {
+          "responseCode": 202,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Cache-Control",
+                "value": "no-store"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1100,
+        320
+      ],
+      "id": "9b1931c3-8727-5d94-becd-b5e875f9f886",
+      "name": "Respond 202"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ============================================================================\n// FAO Reserve Reconciliation Agent - Init Execution\n// ----------------------------------------------------------------------------\n// FAO-GOV-008: correlation_id, execution_id, agent_id and risk_tier come from\n// the database, read from the Claim Run result (fao_run_claim). The workflow\n// never generates run identifiers and never names the invoker; the database\n// recorded the invoker from the caller's own session at run start and adds\n// it to the STARTED event itself.\n// FAO-REC-001: emits the STARTED event in the Writer input shape (one event,\n// no hitl_approver_id, no event_timestamp). The asset scope is the sorted\n// union of wallet and ledger keys, the same set Per-Asset Reconcile walks.\n//\n// FIXTURE DESIGN (calibrated against Kraken Dec 2025 PoR + control coverage):\n//   BTC, ETH, XRP - wallet/ledger calibrated to Kraken's published Dec 31,\n//                   2025 PoR ratios (1.003, 1.013, 1.006 respectively).\n//   USDC          - clean exact-match baseline.\n//   USDT          - synthetic anomaly: stablecoin USD-materiality breach\n//                   (FAO-REC-002).\n//   SOL           - synthetic anomaly: under-reservation floor violation\n//                   (FAO-REC-004).\n//   ADA           - synthetic anomaly: negative liability, krakendb 2014\n//                   precedent (FAO-REC-007).\n//\n// Source URL for real-anchored assets:\n//   https://blog.kraken.com/news/december-2025-proof-of-reserves\n//\n// In production, wallet_data comes from Fireblocks API and ledger_data from\n// NetSuite GL. Inline embedding here isolates policy logic from data-source\n// plumbing; file reads and API calls move in post-launch.\n//\n// _wallet_data, _ledger_data and _fixture_metadata are internal fields for\n// Per-Asset Reconcile; the Writer's Validate Batch strips every key that\n// starts with an underscore.\n// ============================================================================\n\nconst UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;\nconst AGENT_PATTERN = /^[a-z0-9_]{1,64}$/;\nconst SYMBOL_PATTERN = /^[A-Z0-9]{1,12}$/;\nconst TIERS = ['GREEN', 'AMBER', 'RED'];\n\nconst claim = (($('Claim Run').first() || {}).json || {}).r;\nif (!claim || typeof claim !== 'object' || claim.ok !== true) {\n  throw new Error('FAO-GOV-008 recon: claim result is missing or not ok');\n}\nif (typeof claim.correlation_id !== 'string' || !UUID_PATTERN.test(claim.correlation_id)) {\n  throw new Error('FAO-GOV-008 recon: claim result has no valid correlation_id');\n}\nif (typeof claim.execution_id !== 'string' || !UUID_PATTERN.test(claim.execution_id)) {\n  throw new Error('FAO-GOV-008 recon: claim result has no valid execution_id');\n}\nif (typeof claim.agent_id !== 'string' || !AGENT_PATTERN.test(claim.agent_id)) {\n  throw new Error('FAO-GOV-008 recon: claim result has no valid agent_id');\n}\nif (!TIERS.includes(claim.risk_tier)) {\n  throw new Error('FAO-GOV-008 recon: claim result has no valid risk_tier');\n}\n\nconst correlation_id = claim.correlation_id;\nconst execution_id   = claim.execution_id;\nconst agent_id       = claim.agent_id;\nconst risk_tier      = claim.risk_tier;\n\n// --- Fixture: simulated on-chain wallet holdings (Fireblocks proxy) -------\nconst wallet_data = {\n  BTC:  167690.25,        // anchored to Kraken Dec 2025 PoR (ratio 1.003)\n  ETH:  2884112,          // anchored to Kraken Dec 2025 PoR (ratio 1.013)\n  USDC: 891723456,        // synthetic clean exact-match baseline\n  USDT: 1234567890.50,    // synthetic stablecoin USD-materiality anomaly\n  SOL:  8740000,          // synthetic under-reservation anomaly (ratio 0.95)\n  XRP:  128265000,        // anchored to Kraken Dec 2025 PoR (ratio 1.006)\n  ADA:  47293847          // wallet positive; ledger intentionally negative\n};\n\n// --- Fixture: simulated internal client-liability ledger (NetSuite proxy) -\nconst ledger_data = {\n  BTC:  167188.68,\n  ETH:  2847100,\n  USDC: 891723456,\n  USDT: 1234500000,\n  SOL:  9200000,\n  XRP:  127500000,\n  ADA:  -150000           // FAO-REC-007 trigger, krakendb 2014 precedent\n};\n\n// --- Fixture provenance metadata (threaded into shadow_ledger evidence) ---\n// Recorded once per run on the STARTED row under inputs.fixture_provenance.\nconst fixture_metadata = {\n  BTC:  { source: 'kraken_por_2025_q4_anchor',  reference_url: 'https://blog.kraken.com/news/december-2025-proof-of-reserves', notes: 'Wallet/ledger calibrated to published Dec 31 2025 ratio 100.3%' },\n  ETH:  { source: 'kraken_por_2025_q4_anchor',  reference_url: 'https://blog.kraken.com/news/december-2025-proof-of-reserves', notes: 'Wallet/ledger calibrated to published Dec 31 2025 ratio 101.3%' },\n  USDC: { source: 'synthetic_clean_baseline',   notes: 'Exact match; exercises the in-band ALLOW path with zero discrepancy' },\n  USDT: { source: 'synthetic_anomaly',          control: 'FAO-REC-002', notes: 'Stablecoin USD-materiality breach: ratio in band but absolute USD discrepancy exceeds threshold' },\n  SOL:  { source: 'synthetic_anomaly',          control: 'FAO-REC-004', notes: 'Under-reservation: ratio 0.95 below floor 1.00' },\n  XRP:  { source: 'kraken_por_2025_q4_anchor',  reference_url: 'https://blog.kraken.com/news/december-2025-proof-of-reserves', notes: 'Wallet/ledger calibrated to published Dec 31 2025 ratio 100.6%' },\n  ADA:  { source: 'synthetic_anomaly',          control: 'FAO-REC-007', notes: 'Negative liability; krakendb 2014 reference implementation precedent' }\n};\n\n// Asset scope: sorted union of both sides, so an asset present on one side\n// only is still in scope and is recorded (BLOCKED) by Per-Asset Reconcile.\nconst asset_scope = Array.from(\n  new Set([...Object.keys(wallet_data), ...Object.keys(ledger_data)])\n).sort();\n\nif (asset_scope.length < 1 || asset_scope.length > 50) {\n  throw new Error(`FAO-REC-001 recon: asset scope must hold 1 to 50 assets, found ${asset_scope.length}`);\n}\nfor (const sym of asset_scope) {\n  if (!SYMBOL_PATTERN.test(sym)) {\n    throw new Error('FAO-REC-001 recon: fixture asset symbol is not a valid symbol');\n  }\n}\n\nconst asset_count = asset_scope.length;\n\nreturn [{\n  json: {\n    // --- Writer event (Writer input shape) ---------------------------------\n    correlation_id,\n    event_type:          'STARTED',\n    execution_id,\n    agent_id,\n    risk_tier,\n    inputs: {\n      event_type:         'STARTED',\n      asset_scope:        asset_scope,\n      asset_count:        asset_count,\n      wallet_source:      'fixture://wallet_data.json (Fireblocks proxy)',\n      ledger_source:      'fixture://ledger_data.json (NetSuite proxy)',\n      fixture_provenance: fixture_metadata\n    },\n    ai_prompt:           null,\n    ai_output:           null,\n    ai_confidence:       null,\n    fractional_cost_usd: null,\n    policy_outcome:      'ALLOW',\n    policy_sub_tier:     null,\n    policy_rationale:    `FAO-REC-001 ${agent_id} execution started. Reconciling ${asset_count} assets (${asset_scope.join(', ')}) against materiality thresholds. Risk tier: ${risk_tier}. Fixture mix: 3 Kraken Dec 2025 PoR anchors + 1 clean baseline + 3 synthetic control anomalies.`,\n    obligations:         [],\n    hitl_status:         'NOT_REQUIRED',\n    status:              'SUCCESS',\n    error_details:       null,\n\n    // --- Internal context (underscore prefix; stripped by Validate Batch) --\n    _wallet_data:      wallet_data,\n    _ledger_data:      ledger_data,\n    _fixture_metadata: fixture_metadata\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        320
+      ],
+      "id": "36f0c057-e9d5-4133-a831-6c95bc928a39",
+      "name": "Init Execution"
+    },
+    {
+      "parameters": {
+        "mode": "once",
         "workflowId": {
           "__rl": true,
           "value": "dQslIEVwF3WqMliT",
@@ -175,171 +233,7 @@
           "mappingMode": "defineBelow",
           "value": {},
           "matchingColumns": [],
-          "schema": [
-            {
-              "id": "correlation_id",
-              "displayName": "correlation_id",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "execution_id",
-              "displayName": "execution_id",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "agent_id",
-              "displayName": "agent_id",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "risk_tier",
-              "displayName": "risk_tier",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "inputs",
-              "displayName": "inputs",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "object",
-              "removed": false
-            },
-            {
-              "id": "ai_prompt",
-              "displayName": "ai_prompt",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "removed": false
-            },
-            {
-              "id": "ai_output",
-              "displayName": "ai_output",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "removed": false
-            },
-            {
-              "id": "ai_confidence",
-              "displayName": "ai_confidence",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "removed": false
-            },
-            {
-              "id": "fractional_cost_usd",
-              "displayName": "fractional_cost_usd",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "removed": false
-            },
-            {
-              "id": "policy_outcome",
-              "displayName": "policy_outcome",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "policy_sub_tier",
-              "displayName": "policy_sub_tier",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "removed": false
-            },
-            {
-              "id": "policy_rationale",
-              "displayName": "policy_rationale",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "obligations",
-              "displayName": "obligations",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "array",
-              "removed": false
-            },
-            {
-              "id": "hitl_status",
-              "displayName": "hitl_status",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "hitl_approver_id",
-              "displayName": "hitl_approver_id",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "removed": false
-            },
-            {
-              "id": "status",
-              "displayName": "status",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "error_details",
-              "displayName": "error_details",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "removed": false
-            }
-          ],
+          "schema": [],
           "attemptToConvertTypes": false,
           "convertFieldsToString": true
         },
@@ -348,43 +242,192 @@
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.3,
       "position": [
-        1920,
-        208
+        1540,
+        320
       ],
-      "id": "a0dd8075-dd59-4ef2-95cf-817b68b11872",
-      "name": "Writer: COMMITTED"
+      "id": "97404cf0-9b95-42f6-be44-758bff952347",
+      "name": "Writer: STARTED"
     },
     {
       "parameters": {
-        "content": "## FAO Reserve Reconciliation Agent v1\n\n**Risk Tier:** RED (2 approvers required for HITL)\n**Process Owner:** Sarah Chen (Controller)\n**Controls implemented:** FAO-REC-001, FAO-REC-002, FAO-REC-004, FAO-REC-006, FAO-REC-007, FAO-GOV-001 (via Writer), FAO-GOV-008, FAO-GOV-013\n\n### Event flow per execution\n\n1. **STARTED** (1 row) — execution metadata, asset scope\n2. **ASSET_RECONCILED** (7 rows, one per asset) — observation + deterministic policy decision atomically\n3. **COMMITTED** (1 row, gated) — execution rollup; only written when no asset routes to HITL\n4. HITL extension active. REQUIRE_HUMAN executions route through HITL Gateway → Slack notification → human resolution → delayed COMMITTED. Audit chain extends to 11 rows for HITL-gated runs",
-        "height": 504,
-        "width": 480,
-        "color": 4
+        "operation": "executeQuery",
+        "query": "SELECT asset_symbol, asset_class::text AS asset_class, ratio_floor::float AS ratio_floor, ratio_band_lower::float AS ratio_band_lower, ratio_band_upper::float AS ratio_band_upper, materiality_usd::float AS materiality_usd FROM public.materiality_thresholds WHERE scope = $1::public.attestation_scope ORDER BY asset_symbol;",
+        "options": {
+          "queryReplacement": "={{ [ 'Spot' ] }}"
+        }
       },
-      "type": "n8n-nodes-base.stickyNote",
-      "typeVersion": 1,
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
       "position": [
-        0,
-        -224
+        1760,
+        320
       ],
-      "id": "8afc07bf-781a-4ae5-a46e-99422053aceb",
-      "name": "Architecture Note"
+      "id": "99fdb4b6-2919-4c32-a0fe-7a4065d54b07",
+      "name": "Get Materiality Thresholds",
+      "credentials": {
+        "postgres": {
+          "id": "FaoPgWorkflow001",
+          "name": "FAO Postgres (fao_workflow)"
+        }
+      },
+      "alwaysOutputData": true
     },
     {
       "parameters": {
-        "jsCode": "// ============================================================================\n// FAO Reserve Recon — Compose HITL Gateway Payload\n// ----------------------------------------------------------------------------\n// Wired to the False branch of \"Any HITL Required?\" — fires only when\n// _rollup_outcome === 'REQUIRE_HUMAN'. Transforms Aggregate Rollup's\n// shadow_ledger-shaped output into the gateway's expected payload shape.\n//\n// The gateway validates required fields (correlation_id, execution_id,\n// agent_id, agent_invoker_email, risk_tier, policy_sub_tier,\n// policy_rationale) and threads escalated_assets / execution_summary\n// through to the Slack message and HITL_REQUESTED event.\n//\n// agent_invoker_email is sourced from Init Execution (single source of\n// truth). escalated_assets comes from the rollup's inputs object.\n// ============================================================================\n\nconst init   = $('Init Execution').first().json;\nconst rollup = $input.first().json;\n\n// Defensive — Aggregate Rollup must already have routed REQUIRE_HUMAN to us\nif (rollup._rollup_outcome !== 'REQUIRE_HUMAN') {\n  throw new Error(\n    `Compose HITL Gateway Payload: expected _rollup_outcome=REQUIRE_HUMAN but got '${rollup._rollup_outcome}'. ` +\n    `Check 'Any HITL Required?' If node — false branch should only fire for REQUIRE_HUMAN.`\n  );\n}\n\nif (!init.agent_invoker_email) {\n  throw new Error(\n    `Compose HITL Gateway Payload: agent_invoker_email is missing from Init Execution. ` +\n    `Add 'agent_invoker_email' to Init Execution's returned object.`\n  );\n}\n\n// Per-asset summary — for the gateway's Slack message body / future use\nconst per_asset_summary = (rollup.inputs && rollup.inputs.per_asset_summary) || [];\n\nreturn [{ json: {\n  correlation_id:      rollup.correlation_id,\n  execution_id:        rollup.execution_id,\n  agent_id:            rollup.agent_id,\n  agent_invoker_email: init.agent_invoker_email,\n  risk_tier:           rollup.risk_tier,\n  policy_sub_tier:     rollup.policy_sub_tier,\n  policy_rationale:    rollup.policy_rationale,\n  escalated_assets:    (rollup.inputs && rollup.inputs.escalated_assets) || [],\n  execution_summary:   {\n    counts:            (rollup.inputs && rollup.inputs.counts) || null,\n    per_asset_summary: per_asset_summary,\n    obligations:       rollup.obligations || []\n  }\n}}];"
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ============================================================================\n// FAO Reserve Recon - Check Thresholds\n// ----------------------------------------------------------------------------\n// FAO-REC-002: zero threshold rows are a hard error, not a silent stop.\n// Get Materiality Thresholds runs with alwaysOutputData, so an empty result\n// arrives here as one empty item. Unless at least one item carries a string\n// asset_symbol, the run fails at this node and the error workflow records it.\n// Items pass through unchanged.\n// ============================================================================\n\nconst items = $input.all();\n\nconst usable = items.filter(it => it && it.json && typeof it.json.asset_symbol === 'string');\nif (usable.length === 0) {\n  throw new Error('FAO-REC-002 recon: no materiality thresholds for scope=Spot');\n}\n\nreturn items;"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1920,
-        432
+        1980,
+        320
       ],
-      "id": "de20d590-3f8b-488f-9d8f-d4d70a9ca7ab",
-      "name": "Compose HITL Gateway Payload"
+      "id": "919206ab-d9df-5add-90db-7003f79bfb19",
+      "name": "Check Thresholds"
     },
     {
       "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ============================================================================\n// FAO Reserve Reconciliation Agent - Per-Asset Reconcile (observe + decide)\n// ----------------------------------------------------------------------------\n// Controls implemented:\n//   FAO-REC-001  Wallet-Ledger Balance Comparison (completeness, input checks)\n//   FAO-REC-002  Per-Asset Materiality Threshold Evaluation\n//   FAO-REC-004  Reserve Ratio Threshold Check\n//   FAO-REC-006  Policy Outcome Engine (expected-ratio band evaluation)\n//   FAO-REC-007  Negative-Balance Anomaly Detection (krakendb precedent)\n//\n// Design note: observation and decision are one ASSET_RECONCILED event per\n// asset (one row per asset is the audit grain).\n//\n// Fail-closed input rules (evaluated before the matrix):\n//   a. asset present on one side only    -> BLOCKED, band_status ONE_SIDED\n//   b. a balance that is not a finite\n//      number (undefined, null, empty,\n//      non_numeric, nan, infinite)        -> BLOCKED, band_status INVALID_INPUT\n//   c. no usable threshold for the asset  -> BLOCKED, band_status NO_THRESHOLD\n// Every BLOCKED item carries hitl_status PENDING and ratio null: BLOCKED\n// routes the run to human review (the database rollup decides that).\n//\n// Decision matrix (deterministic, evaluated top-down, first match wins):\n//   1. ledger < 0           -> REQUIRE_HUMAN CRITICAL (FAO-REC-007)\n//   2. ledger == 0          -> REQUIRE_HUMAN STANDARD (cannot compute ratio)\n//   3. ratio < floor        -> REQUIRE_HUMAN CRITICAL (under-reserved)\n//   4. ratio > band_upper   -> REQUIRE_HUMAN STANDARD (unexpected surplus)\n//   5. Stablecoin AND |discrepancy| > materiality_usd\n//                           -> REQUIRE_HUMAN STANDARD (USD threshold breach)\n//   6. ratio < band_lower   -> ALLOW_WITH_OBLIGATIONS (drift below band)\n//   7. otherwise            -> ALLOW (in expected band)\n//\n// Note on USD materiality test: applied only to stablecoins because for\n// stablecoins, raw units == USD value (1 USDC = $1). For non-stablecoins,\n// applying USD materiality requires a price oracle, which is out of scope.\n//\n// Assets are walked in the sorted union of wallet and ledger keys, the same\n// order and set as the STARTED asset_scope. Each output item is one Writer\n// event (no hitl_approver_id, no event_timestamp).\n// ============================================================================\n\nconst ctx    = $('Init Execution').first().json;\nconst wallet = ctx._wallet_data || {};\nconst ledger = ctx._ledger_data || {};\nconst has    = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);\n\n// Threshold lookup; rows without a string asset_symbol (the empty item that\n// alwaysOutputData produces) are ignored.\nconst threshold_by_asset = {};\nfor (const item of $input.all()) {\n  const t = item && item.json;\n  if (t && typeof t.asset_symbol === 'string') threshold_by_asset[t.asset_symbol] = t;\n}\n\n// num(v): a finite number, or a string that parses to one. Anything else is\n// classified so the input problem can be named without echoing the value.\nconst DECIMAL = /^[+-]?(\\d+(\\.\\d*)?|\\.\\d+)([eE][+-]?\\d+)?$/;\nfunction num(v) {\n  if (v === undefined) return { ok: false, cls: 'undefined' };\n  if (v === null) return { ok: false, cls: 'null' };\n  if (typeof v === 'number') {\n    if (Number.isNaN(v)) return { ok: false, cls: 'nan' };\n    if (!Number.isFinite(v)) return { ok: false, cls: 'infinite' };\n    return { ok: true, value: v };\n  }\n  if (typeof v === 'string') {\n    const s = v.trim();\n    if (s === '') return { ok: false, cls: 'empty' };\n    if (/^nan$/i.test(s)) return { ok: false, cls: 'nan' };\n    if (/^[+-]?infinity$/i.test(s)) return { ok: false, cls: 'infinite' };\n    if (!DECIMAL.test(s)) return { ok: false, cls: 'non_numeric' };\n    const n = Number(s);\n    if (Number.isNaN(n)) return { ok: false, cls: 'nan' };\n    if (!Number.isFinite(n)) return { ok: false, cls: 'infinite' };\n    return { ok: true, value: n };\n  }\n  return { ok: false, cls: 'non_numeric' };\n}\n\nconst finite = (v) => typeof v === 'number' && Number.isFinite(v);\nfunction usable_threshold(t) {\n  return !!t\n    && finite(t.ratio_floor) && finite(t.ratio_band_lower)\n    && finite(t.ratio_band_upper) && finite(t.materiality_usd)\n    && typeof t.asset_class === 'string';\n}\n\nconst assets = Array.from(new Set([...Object.keys(wallet), ...Object.keys(ledger)])).sort();\nconst output_items = [];\n\nfor (const asset of assets) {\n  const in_wallet = has(wallet, asset);\n  const in_ledger = has(ledger, asset);\n\n  // (a) One-sided: the asset is missing from one side entirely.\n  if (!in_wallet || !in_ledger) {\n    const missing = in_wallet ? 'ledger' : 'wallet';\n    const present = in_wallet ? num(wallet[asset]) : num(ledger[asset]);\n    output_items.push({ json: blocked(asset, {\n      wallet: in_wallet && present.ok ? present.value : null,\n      ledger: in_ledger && present.ok ? present.value : null,\n      band_status: 'ONE_SIDED',\n      input_problem: `${missing} balance missing`,\n      threshold: threshold_facts(threshold_by_asset[asset]),\n      rationale: `FAO-REC-001 ${asset}: ${missing} balance missing; the asset is present on one side only. Asset BLOCKED and routed to human review.`,\n      error_details: `Asset ${asset} has no ${missing} balance`\n    }) });\n    continue;\n  }\n\n  // (b) Invalid balance on either side.\n  const wv = num(wallet[asset]);\n  const lv = num(ledger[asset]);\n  if (!wv.ok || !lv.ok) {\n    const problems = [];\n    if (!wv.ok) problems.push(`wallet value is ${wv.cls}`);\n    if (!lv.ok) problems.push(`ledger value is ${lv.cls}`);\n    const problem = problems.join('; ');\n    output_items.push({ json: blocked(asset, {\n      wallet: wv.ok ? wv.value : null,\n      ledger: lv.ok ? lv.value : null,\n      band_status: 'INVALID_INPUT',\n      input_problem: problem,\n      threshold: threshold_facts(threshold_by_asset[asset]),\n      rationale: `FAO-REC-001 ${asset}: ${problem}; the balance is not a finite number. Asset BLOCKED and routed to human review.`,\n      error_details: `Asset ${asset} input problem: ${problem}`\n    }) });\n    continue;\n  }\n\n  const w = wv.value;\n  const l = lv.value;\n  const t = threshold_by_asset[asset];\n\n  // (c) No usable threshold.\n  if (!usable_threshold(t)) {\n    output_items.push({ json: blocked(asset, {\n      wallet: w, ledger: l,\n      band_status: 'NO_THRESHOLD',\n      input_problem: null,\n      threshold: null,\n      rationale: `FAO-REC-002 ${asset}: no materiality threshold configured for scope=Spot. Asset BLOCKED pending Controller setup. Cannot evaluate.`,\n      error_details: `Asset ${asset} not present in materiality_thresholds (scope=Spot)`\n    }) });\n    continue;\n  }\n\n  const discrepancy = w - l;\n\n  // ----- Decision matrix --------------------------------------------------\n  let outcome, sub_tier, rationale, hitl_status, obligations = [];\n  let ratio = null;\n  let band_status;\n\n  if (l < 0) {\n    // (1) Negative liability - FAO-REC-007 (krakendb precedent)\n    band_status      = 'NEGATIVE_LEDGER';\n    outcome          = 'REQUIRE_HUMAN';\n    sub_tier         = 'CRITICAL';\n    hitl_status      = 'PENDING';\n    rationale        = `FAO-REC-007 ${asset} negative liability detected (ledger=${l}). Cannot compute meaningful ratio. Routed to CRITICAL HITL; Controller + CFO review required (RED tier, 2 approvers). Pattern flagged in krakendb 2014 reference implementation as operational concern.`;\n  } else if (l === 0) {\n    // (2) Zero ledger - division undefined\n    band_status      = 'ZERO_LEDGER';\n    outcome          = 'REQUIRE_HUMAN';\n    sub_tier         = 'STANDARD';\n    hitl_status      = 'PENDING';\n    rationale        = `FAO-REC-006 ${asset} zero ledger balance with non-zero wallet (${w}). Cannot compute reserve ratio. Manual review required.`;\n  } else {\n    ratio = w / l;\n\n    if (ratio < t.ratio_floor) {\n      // (3) Under-reserved - the worst case\n      band_status   = 'BELOW_FLOOR';\n      outcome       = 'REQUIRE_HUMAN';\n      sub_tier      = 'CRITICAL';\n      hitl_status   = 'PENDING';\n      rationale     = `FAO-REC-004 ${asset} ratio ${ratio.toFixed(6)} below floor ${t.ratio_floor.toFixed(4)}. UNDER-RESERVED; wallet holdings insufficient to cover ledger liabilities. Routed to CRITICAL HITL (RED tier, 2 approvers).`;\n    } else if (ratio > t.ratio_band_upper) {\n      // (4) Unexpected surplus - investigate ledger\n      band_status   = 'ABOVE_BAND_UPPER';\n      outcome       = 'REQUIRE_HUMAN';\n      sub_tier      = 'STANDARD';\n      hitl_status   = 'PENDING';\n      rationale     = `FAO-REC-006 ${asset} ratio ${ratio.toFixed(6)} above expected band upper ${t.ratio_band_upper.toFixed(4)}. Unexpected surplus; possible ledger under-recording. Investigate liability side.`;\n    } else if (t.asset_class === 'Stablecoin' && Math.abs(discrepancy) > t.materiality_usd) {\n      // (5) Stablecoin USD materiality breach (units == USD for stablecoins)\n      band_status   = 'IN_BAND_USD_MATERIAL';\n      outcome       = 'REQUIRE_HUMAN';\n      sub_tier      = 'STANDARD';\n      hitl_status   = 'PENDING';\n      rationale     = `FAO-REC-002 ${asset} stablecoin: ratio ${ratio.toFixed(6)} within band [${t.ratio_band_lower.toFixed(4)}, ${t.ratio_band_upper.toFixed(4)}], BUT absolute discrepancy $${Math.abs(discrepancy).toFixed(2)} exceeds materiality threshold $${t.materiality_usd.toFixed(2)}. Stablecoin units are 1:1 USD; small ratio deviations on large pools are still material.`;\n    } else if (ratio < t.ratio_band_lower) {\n      // (6) Drift below expected band - not under-reserved (above floor)\n      band_status   = 'BELOW_BAND_LOWER';\n      outcome       = 'ALLOW_WITH_OBLIGATIONS';\n      sub_tier      = null;\n      hitl_status   = 'NOT_REQUIRED';\n      obligations   = ['weekly_review_required', 'flag_drift_pattern_to_controller'];\n      rationale     = `FAO-REC-006 ${asset} ratio ${ratio.toFixed(6)} below expected band lower ${t.ratio_band_lower.toFixed(4)} but above floor ${t.ratio_floor.toFixed(4)}. Reserves cover liabilities but over-reservation posture has drifted. Allowed with weekly-review obligation.`;\n    } else {\n      // (7) In expected band - clean\n      band_status   = 'IN_BAND';\n      outcome       = 'ALLOW';\n      sub_tier      = null;\n      hitl_status   = 'NOT_REQUIRED';\n      rationale     = `FAO-REC-006 ${asset} ratio ${ratio.toFixed(6)} within expected band [${t.ratio_band_lower.toFixed(4)}, ${t.ratio_band_upper.toFixed(4)}]. Reserved as expected.`;\n    }\n  }\n\n  output_items.push({ json: build_writer_event(ctx, {\n    asset, wallet: w, ledger: l,\n    ratio, discrepancy, band_status,\n    threshold: threshold_facts(t),\n    input_problem:    null,\n    policy_outcome:   outcome,\n    policy_sub_tier:  sub_tier,\n    policy_rationale: rationale,\n    hitl_status:      hitl_status,\n    obligations:      obligations,\n    status:           'SUCCESS',\n    error_details:    null\n  }) });\n}\n\nreturn output_items;\n\n// ----- Helpers --------------------------------------------------------------\nfunction threshold_facts(t) {\n  if (!usable_threshold(t)) return null;\n  return {\n    asset_class:      t.asset_class,\n    ratio_floor:      t.ratio_floor,\n    ratio_band_lower: t.ratio_band_lower,\n    ratio_band_upper: t.ratio_band_upper,\n    materiality_usd:  t.materiality_usd\n  };\n}\n\n// BLOCKED items: fail closed, routed to review, no ratio.\nfunction blocked(asset, f) {\n  return build_writer_event(ctx, {\n    asset, wallet: f.wallet, ledger: f.ledger,\n    ratio: null, discrepancy: null, band_status: f.band_status,\n    threshold: f.threshold,\n    input_problem:    f.input_problem,\n    policy_outcome:   'BLOCKED',\n    policy_sub_tier:  null,\n    policy_rationale: f.rationale,\n    hitl_status:      'PENDING',\n    obligations:      [],\n    status:           'FAILURE',\n    error_details:    f.error_details\n  });\n}\n\nfunction build_writer_event(c, facts) {\n  return {\n    correlation_id:      c.correlation_id,\n    event_type:          'ASSET_RECONCILED',\n    execution_id:        c.execution_id,\n    agent_id:            c.agent_id,\n    risk_tier:           c.risk_tier,\n    inputs: {\n      event_type:    'ASSET_RECONCILED',\n      asset:         facts.asset,\n      wallet:        facts.wallet,\n      ledger:        facts.ledger,\n      ratio:         facts.ratio,\n      discrepancy:   facts.discrepancy,\n      band_status:   facts.band_status,\n      threshold:     facts.threshold,\n      input_problem: facts.input_problem\n    },\n    ai_prompt:           null,\n    ai_output:           null,\n    ai_confidence:       null,\n    fractional_cost_usd: null,\n    policy_outcome:      facts.policy_outcome,\n    policy_sub_tier:     facts.policy_sub_tier,\n    policy_rationale:    facts.policy_rationale,\n    obligations:         facts.obligations || [],\n    hitl_status:         facts.hitl_status,\n    status:              facts.status,\n    error_details:       facts.error_details\n  };\n}"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        320
+      ],
+      "id": "86a36772-e2ea-407d-a4fa-d2dbc50899ed",
+      "name": "Per-Asset Reconcile"
+    },
+    {
+      "parameters": {
+        "mode": "once",
+        "workflowId": {
+          "__rl": true,
+          "value": "dQslIEVwF3WqMliT",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/dQslIEVwF3WqMliT",
+          "cachedResultName": "Writer"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        2420,
+        320
+      ],
+      "id": "033a94f1-2a99-4e49-ae8b-5c8ba93df7c8",
+      "name": "Writer: ASSET_RECONCILED"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ============================================================================\n// FAO Reserve Recon - Check Writer Count\n// ----------------------------------------------------------------------------\n// FAO-GOV-001 / FAO-REC-001: every asset decision must be stored. The Writer\n// returns one item {count, inserted[]}; the run fails here unless count\n// equals the number of items Per-Asset Reconcile produced. The database also\n// refuses an incomplete chain at finalize (COMMIT_BLOCKED); this check makes\n// a short write fail loudly at the point it happens.\n// ============================================================================\n\nconst expected = $('Per-Asset Reconcile').all().length;\nconst first = $input.first();\nconst count = first && first.json ? first.json.count : undefined;\n\nif (count !== expected) {\n  throw new Error(`FAO-GOV-001 recon: writer stored ${count} of ${expected} asset events`);\n}\n\nreturn [{ json: { count, expected } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        320
+      ],
+      "id": "9cb5abc9-3464-59eb-8dc0-c7369a58cd0e",
+      "name": "Check Writer Count"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT public.fao_run_finalize($1::uuid) AS r;",
+        "options": {
+          "queryReplacement": "={{ [ $('Claim Run').first().json.r.correlation_id ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2860,
+        320
+      ],
+      "id": "16c290c8-062f-5c02-8073-b9ddf080e99e",
+      "name": "Finalize Run",
+      "credentials": {
+        "postgres": {
+          "id": "FaoPgWorkflow001",
+          "name": "FAO Postgres (fao_workflow)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "20a3ea1e-9fc0-59c0-a2b0-5d06923c4952",
+              "leftValue": "={{ $json.r.hitl_required === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3080,
+        320
+      ],
+      "id": "134e7a20-6dd4-5b3b-aae8-f07d510f98ba",
+      "name": "Human Review Required?"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        3300,
+        540
+      ],
+      "id": "455eab57-8f9f-58b9-abcb-cfe969e1ac26",
+      "name": "Run Complete"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ============================================================================\n// FAO Reserve Recon - Notify Input\n// ----------------------------------------------------------------------------\n// FAO-GOV-004 / FAO-GOV-007: fao_run_finalize has already created the request\n// and written HITL_REQUESTED in the same transaction as the move to\n// AWAITING_HITL. The notifier only notifies, and reads exactly\n// {hitl_id, kind, level}; everything it posts comes from the database.\n// ============================================================================\n\nconst r = (($input.first() || {}).json || {}).r || {};\nconst hitl_id = r.hitl_id;\n\nif (!Number.isSafeInteger(hitl_id) || hitl_id < 1) {\n  throw new Error('FAO-GOV-007 recon: finalize result has no valid hitl_id');\n}\n\nreturn [{ json: { hitl_id, kind: 'REQUESTED', level: 0 } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3300,
+        320
+      ],
+      "id": "185d10ce-ae1f-52be-ac7e-523188188b1b",
+      "name": "Notify Input"
+    },
+    {
+      "parameters": {
+        "mode": "once",
         "workflowId": {
           "__rl": true,
           "value": "mUAC9qIMkVzlV5qw",
@@ -396,97 +439,7 @@
           "mappingMode": "defineBelow",
           "value": {},
           "matchingColumns": [],
-          "schema": [
-            {
-              "id": "correlation_id",
-              "displayName": "correlation_id",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "execution_id",
-              "displayName": "execution_id",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "agent_id",
-              "displayName": "agent_id",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "agent_invoker_email",
-              "displayName": "agent_invoker_email",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "risk_tier",
-              "displayName": "risk_tier",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "policy_sub_tier",
-              "displayName": "policy_sub_tier",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "policy_rationale",
-              "displayName": "policy_rationale",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "escalated_assets",
-              "displayName": "escalated_assets",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "array",
-              "removed": false
-            },
-            {
-              "id": "execution_summary",
-              "displayName": "execution_summary",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "removed": false
-            }
-          ],
+          "schema": [],
           "attemptToConvertTypes": false,
           "convertFieldsToString": true
         },
@@ -495,16 +448,101 @@
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.3,
       "position": [
-        2176,
-        432
+        3520,
+        320
       ],
       "id": "a176d377-c050-4c3a-9505-5f69e419e383",
       "name": "HITL Gateway"
+    },
+    {
+      "parameters": {
+        "content": "## FAO Reserve Reconciliation Agent v1\n\n**Risk tier:** RED (registry approval threshold 2; one approval enforced today)\n**Process owner:** Sarah Chen (Controller)\n**Controls:** FAO-REC-001, FAO-REC-002, FAO-REC-004, FAO-REC-006, FAO-REC-007, FAO-GOV-001, FAO-GOV-004, FAO-GOV-007, FAO-GOV-008, FAO-GOV-013\n\n### How a run starts\n\nA signed-in human calls `fao_run_start` with their own session. The database records the invoker, checks the registry, tier and rate limit, and returns a single-use run token. The caller posts only `{run_token}` to this webhook (header auth). **Claim Run** (`fao_run_claim`) consumes the token and returns the run's ids, agent and tier from the database. Nothing in the request names a person.\n\n### Flow\n\n1. Webhook: Invoke, Validate Invoke Body, Claim Run; refusals answer 400, 401, 409 or 410; a claimed run answers 202 and continues\n2. **STARTED** through the Writer (one batch call)\n3. Thresholds, then **Check Thresholds** (no rows is a hard error)\n4. **Per-Asset Reconcile**: fail-closed input checks, then the 7-rule matrix; one **ASSET_RECONCILED** per asset, all sent in one Writer call and counted\n5. **Finalize Run** (`fao_run_finalize`): the database rolls up the stored events, then either writes COMMITTED, or creates the request plus HITL_REQUESTED in one transaction, or writes COMMIT_BLOCKED\n6. When review is needed, the notifier is called with `{hitl_id, kind, level}`\n\nDecisions happen on the approval page through `fao_hitl_decide`, never in n8n. A failed execution reaches `fao_error_handler_v1`, which records FAILED through `fao_run_fail`.",
+        "height": 640,
+        "width": 620,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -360
+      ],
+      "id": "8afc07bf-781a-4ae5-a46e-99422053aceb",
+      "name": "Architecture Note"
     }
   ],
   "pinData": {},
   "connections": {
-    "Manual Trigger": {
+    "Webhook: Invoke": {
+      "main": [
+        [
+          {
+            "node": "Validate Invoke Body",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Invoke Body": {
+      "main": [
+        [
+          {
+            "node": "Body Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Body Valid?": {
+      "main": [
+        [
+          {
+            "node": "Claim Run",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 400",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Run": {
+      "main": [
+        [
+          {
+            "node": "Claim OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim OK?": {
+      "main": [
+        [
+          {
+            "node": "Respond 202",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Claim Refused",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond 202": {
       "main": [
         [
           {
@@ -541,6 +579,17 @@
       "main": [
         [
           {
+            "node": "Check Thresholds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Thresholds": {
+      "main": [
+        [
+          {
             "node": "Per-Asset Reconcile",
             "type": "main",
             "index": 0
@@ -563,43 +612,54 @@
       "main": [
         [
           {
-            "node": "Aggregate Rollup",
+            "node": "Check Writer Count",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Aggregate Rollup": {
+    "Check Writer Count": {
       "main": [
         [
           {
-            "node": "Any HITL Required?",
+            "node": "Finalize Run",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Any HITL Required?": {
+    "Finalize Run": {
       "main": [
         [
           {
-            "node": "Writer: COMMITTED",
+            "node": "Human Review Required?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Human Review Required?": {
+      "main": [
+        [
+          {
+            "node": "Notify Input",
             "type": "main",
             "index": 0
           }
         ],
         [
           {
-            "node": "Compose HITL Gateway Payload",
+            "node": "Run Complete",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Compose HITL Gateway Payload": {
+    "Notify Input": {
       "main": [
         [
           {
@@ -615,9 +675,10 @@
   "settings": {
     "executionOrder": "v1",
     "binaryMode": "separate",
-    "availableInMCP": false
+    "availableInMCP": false,
+    "errorWorkflow": "FaoErrHandlerV01"
   },
-  "versionId": "79037ef4-5469-445c-b313-d021a04e4677",
+  "versionId": "b4f2a5c1-0e57-4d0e-8a6b-25a000000001",
   "meta": {
     "instanceId": "d7e19fca9705d4d0c36e6fe71822071e2ec1e1c76f266658ed6763dfc41db437"
   },

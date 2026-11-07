@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>FinAgent OS approval</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="config.js"></script>
+  <script src="vendor/supabase.js"></script>
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <main class="page">
+    <header class="page-header">
+      <h1>FinAgent OS approval</h1>
+      <p class="muted">Human review of a governed agent run (FAO-GOV-004).</p>
+    </header>
+
+    <p id="status" class="status" role="status" aria-live="polite">Loading.</p>
+    <p id="reference" class="reference muted" hidden></p>
+
+    <section id="signin" class="card" hidden>
+      <h2>Sign in</h2>
+      <form id="signin-form" novalidate>
+        <label for="signin-email">Email</label>
+        <input id="signin-email" name="email" type="email" autocomplete="username" required maxlength="320">
+        <label for="signin-password">Password</label>
+        <input id="signin-password" name="password" type="password" autocomplete="current-password" required maxlength="200">
+        <button id="signin-submit" type="submit">Sign in</button>
+      </form>
+    </section>
+
+    <section id="request" class="card" hidden>
+      <h2 id="request-title">Request</h2>
+      <dl id="request-fields" class="fields"></dl>
+      <h3>Escalated assets</h3>
+      <ul id="request-assets" class="assets"></ul>
+      <p id="request-note" class="note" hidden></p>
+    </section>
+
+    <section id="decide" class="card" hidden>
+      <h2>Decision</h2>
+      <form id="decide-form" novalidate>
+        <label for="decide-notes">Notes (optional, up to 2000 characters)</label>
+        <textarea id="decide-notes" name="notes" rows="4" maxlength="2000"></textarea>
+        <div class="actions">
+          <button id="approve" type="button" class="approve">Approve</button>
+          <button id="reject" type="button" class="reject">Reject</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="result" class="card" hidden>
+      <h2>Result</h2>
+      <dl id="result-fields" class="fields"></dl>
+    </section>
+
+    <footer class="page-footer">
+      <p id="signed-in" class="muted" hidden></p>
+      <button id="signout" type="button" class="link" hidden>Sign out</button>
+    </footer>
+  </main>
+</body>
+</html>

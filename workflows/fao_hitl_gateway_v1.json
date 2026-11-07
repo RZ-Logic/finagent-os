@@ -4,7 +4,7 @@
     {
       "parameters": {
         "inputSource": "jsonExample",
-        "jsonExample": "{\n  \"correlation_id\": \"11111111-1111-1111-1111-111111111111\",\n  \"execution_id\": \"22222222-2222-2222-2222-222222222222\",\n  \"agent_id\": \"fao_reserve_recon_v1\",\n  \"agent_invoker_email\": \"aisha.okonkwo@finagent-os.demo\",\n  \"risk_tier\": \"RED\",\n  \"policy_sub_tier\": \"CRITICAL\",\n  \"policy_rationale\": \"FAO-REC-001 execution rollup over 7 assets. Outcomes: 3 ALLOW, 1 ALLOW_WITH_OBLIGATIONS, 3 REQUIRE_HUMAN. Worst-asset rule applied: execution outcome = REQUIRE_HUMAN (CRITICAL). Escalated assets: USDT (REQUIRE_HUMAN/STANDARD), SOL (REQUIRE_HUMAN/CRITICAL), ADA (REQUIRE_HUMAN/CRITICAL).\",\n  \"escalated_assets\": [\"USDT\", \"SOL\", \"ADA\"],\n  \"execution_summary\": null\n}"
+        "jsonExample": "{\n  \"hitl_id\": 1,\n  \"kind\": \"REQUESTED\",\n  \"level\": 0\n}"
       },
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.1,
@@ -17,12 +17,13 @@
     },
     {
       "parameters": {
-        "jsCode": "// ============================================================================\n// FAO HITL Gateway v1 — Payload Validation\n// ----------------------------------------------------------------------------\n// FAO-GOV-004: Validates payload before inserting into hitl_queue.\n// Mirrors the Writer's pattern: structural correctness only, not semantic\n// quality. Rationale quality is the policy engine's responsibility.\n//\n// Required NOT NULL fields per hitl_queue (Migration 0005):\n//   correlation_id, agent_id, agent_invoker_email, risk_tier,\n//   policy_sub_tier, policy_rationale\n//\n// Threaded through (used by Slack message + Writer event, not validated):\n//   execution_id, escalated_assets, execution_summary\n//\n// ai_human_brief is intentionally absent — wired when Claude advisory\n// lands (Apr 25 mid-day). SQL hardcodes NULL until then.\n// ============================================================================\n\nconst input = $input.first().json;\n\nconst required = [\n  'correlation_id',\n  'execution_id',\n  'agent_id',\n  'agent_invoker_email',\n  'risk_tier',\n  'policy_sub_tier',\n  'policy_rationale'\n];\n\nconst missing = required.filter(f => input[f] === undefined || input[f] === null || input[f] === '');\nif (missing.length > 0) {\n  throw new Error(`FAO-GOV-004 hitl_gateway: missing required field(s): ${missing.join(', ')}`);\n}\n\n// risk_tier — same enum as shadow_ledger\nconst validRiskTiers = ['GREEN', 'AMBER', 'RED'];\nif (!validRiskTiers.includes(input.risk_tier)) {\n  throw new Error(`FAO-GOV-004 hitl_gateway: invalid risk_tier '${input.risk_tier}'. Must be one of: ${validRiskTiers.join(', ')}`);\n}\n\n// policy_sub_tier — required for HITL (only STANDARD/CRITICAL valid here;\n// nullable in shadow_ledger but NOT NULL in hitl_queue with default STANDARD)\nconst validSubTiers = ['STANDARD', 'CRITICAL'];\nif (!validSubTiers.includes(input.policy_sub_tier)) {\n  throw new Error(`FAO-GOV-004 hitl_gateway: invalid policy_sub_tier '${input.policy_sub_tier}'. Must be one of: ${validSubTiers.join(', ')}`);\n}\n\n// UUID format\nconst uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;\nif (!uuidPattern.test(input.correlation_id)) {\n  throw new Error(`FAO-GOV-004 hitl_gateway: correlation_id is not a valid UUID: '${input.correlation_id}'`);\n}\nif (!uuidPattern.test(input.execution_id)) {\n  throw new Error(`FAO-GOV-004 hitl_gateway: execution_id is not a valid UUID: '${input.execution_id}'`);\n}\n\n// Email format — defensive check before SQL\nconst emailPattern = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;\nif (!emailPattern.test(input.agent_invoker_email)) {\n  throw new Error(`FAO-GOV-004 hitl_gateway: agent_invoker_email is not a valid email: '${input.agent_invoker_email}'`);\n}\n\n// agent_id format — alphanumeric + underscore only (matches all seeded agents)\nif (!/^[a-z0-9_]+$/i.test(input.agent_id)) {\n  throw new Error(`FAO-GOV-004 hitl_gateway: agent_id contains unexpected characters: '${input.agent_id}'`);\n}\n\n// Defensive sanitization of policy_rationale: prevent breakout from\n// dollar-quoted SQL string. We use $rationale$...$rationale$ delimiters\n// downstream; reject any rationale that contains the closing delimiter.\n// Belt-and-suspenders — policy engine doesn't produce these strings.\nif (typeof input.policy_rationale !== 'string' || input.policy_rationale.includes('$rationale$')) {\n  throw new Error(`FAO-GOV-004 hitl_gateway: policy_rationale contains reserved sequence or is not a string`);\n}\n\nreturn [{ json: {\n  correlation_id:       input.correlation_id,\n  execution_id:         input.execution_id,\n  agent_id:             input.agent_id,\n  agent_invoker_email:  input.agent_invoker_email,\n  risk_tier:            input.risk_tier,\n  policy_sub_tier:      input.policy_sub_tier,\n  policy_rationale:     input.policy_rationale,\n  escalated_assets:     Array.isArray(input.escalated_assets) ? input.escalated_assets : [],\n  execution_summary:    input.execution_summary ?? null\n}}];"
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ============================================================================\n// FAO HITL Notifier (fao_hitl_gateway_v1) - Validate Payload\n// ----------------------------------------------------------------------------\n// FAO-GOV-007: the notifier input is exactly {hitl_id, kind, level}:\n//   kind REQUESTED with level 0 (first notice of a new request), or\n//   kind ESCALATED with level 1 (escalation to the process owner's target).\n// Nothing else is read. Request content, approver names, the approval link\n// and the Slack settings all come from fao_notification_context, so a caller\n// cannot change what is posted or where it links.\n// ============================================================================\n\nconst items = $input.all();\nif (items.length !== 1) {\n  throw new Error('FAO-GOV-007 notifier: payload invalid (expected exactly one item)');\n}\n\nconst input = (items[0] && items[0].json) || {};\nconst hitl_id = input.hitl_id;\nconst kind = input.kind;\nconst level = input.level;\n\nif (!Number.isSafeInteger(hitl_id) || hitl_id < 1) {\n  throw new Error('FAO-GOV-007 notifier: hitl_id invalid');\n}\nif (kind !== 'REQUESTED' && kind !== 'ESCALATED') {\n  throw new Error('FAO-GOV-007 notifier: kind invalid');\n}\nconst expected_level = kind === 'REQUESTED' ? 0 : 1;\nif (level !== expected_level) {\n  throw new Error('FAO-GOV-007 notifier: level invalid');\n}\n\nreturn [{ json: { hitl_id, kind, level } }];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        224,
+        220,
         640
       ],
       "id": "e374d10b-01b6-44ed-a5bd-331196a275ad",
@@ -31,276 +32,162 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "-- ============================================================================\n-- FAO HITL Gateway v1 — Insert HITL Queue Row (via fao_hitl_create function)\n-- ----------------------------------------------------------------------------\n-- Calls Migration 0007's stored function. The function RAISEs a named\n-- FAO-GOV-004 exception if agent_invoker_email is not in process_owners\n-- or agent_id is not in agent_registry. Database-layer enforcement\n-- replaces the original application-layer throw, which had a silent-\n-- failure mode (n8n skips downstream nodes when Postgres returns zero\n-- items, so the downstream throw never executed).\n--\n-- ai_human_brief is hardcoded NULL today. Wired when Claude advisory\n-- lands (Apr 25 mid-day) — wiring will pass the brief as the 7th arg.\n-- ============================================================================\n\nSELECT *\nFROM public.fao_hitl_create(\n  '{{ $json.correlation_id }}'::uuid,\n  '{{ $json.agent_id }}',\n  '{{ $json.agent_invoker_email }}',\n  '{{ $json.risk_tier }}'::public.risk_tier,\n  '{{ $json.policy_sub_tier }}'::public.policy_sub_tier,\n  $rationale${{ $json.policy_rationale }}$rationale$,\n  NULL  -- ai_human_brief: wired when Claude advisory lands (Apr 25)\n);",
-        "options": {}
+        "query": "SELECT public.fao_notification_context($1::bigint, $2, $3::int) AS r;",
+        "options": {
+          "queryReplacement": "={{ [ $json.hitl_id, $json.kind, $json.level ] }}"
+        }
       },
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.6,
       "position": [
-        448,
+        440,
         640
       ],
-      "id": "0b45e8bd-e6b6-44a4-8569-510aa64b4f9c",
-      "name": "Insert HITL Row",
+      "id": "f8a88f3d-91fb-5acc-b356-0d60cada42cf",
+      "name": "Get Notification Context",
       "credentials": {
         "postgres": {
-          "id": "Vh67T849XENVGttf",
-          "name": "Postgres account"
+          "id": "FaoPgWorkflow001",
+          "name": "FAO Postgres (fao_workflow)"
         }
       }
     },
     {
       "parameters": {
-        "jsCode": "// ============================================================================\n// FAO HITL Gateway v1 — Validate Insert + Compose Notification Context\n// ----------------------------------------------------------------------------\n// (UPDATED Apr 25 v3 — APPROVAL_BASE_URL now points at /fao-hitl-confirm\n//  per Approval Handler v2's GET/POST split. GET is now read-only\n//  confirmation page; the form on that page POSTs to /fao-hitl-resolve.)\n//\n// Empirical motivation: Slack's link-expander GETs every URL in a posted\n// message within ~2-3 seconds. v1's GET endpoint mutated state, so the\n// expander auto-resolved every HITL. Apr 25 evening flagship run produced\n// 6 approval_handler executions within 3 seconds of the Slack message —\n// before the human approver could see the message, let alone click.\n//\n// HTTP semantics restored: GET is safe (shows confirmation page),\n// POST is the mutating action (form submission only).\n// ============================================================================\n\nconst APPROVAL_BASE_URL = 'https://n8n.velocyt.ca/webhook/fao-hitl-confirm';\n\nconst approvers = [\n  { email: 'sarah.chen@finagent-os.demo',     name: 'Sarah Chen',     role: 'Controller' },\n  { email: 'marcus.patel@finagent-os.demo',   name: 'Marcus Patel',   role: 'CFO' },\n  { email: 'aisha.okonkwo@finagent-os.demo',  name: 'Aisha Okonkwo',  role: 'FP&A Lead' }\n];\n\nconst inserted = $input.all();\n\nif (inserted.length === 0 || !inserted[0].json || !inserted[0].json.hitl_id) {\n  const ctx = $('Validate Payload').first().json;\n  throw new Error(\n    `FAO-GOV-004 hitl_gateway: Insert HITL Row returned zero rows unexpectedly. ` +\n    `fao_hitl_create() should have raised before reaching this node. ` +\n    `Inputs: agent_invoker_email='${ctx.agent_invoker_email}', agent_id='${ctx.agent_id}'.`\n  );\n}\n\nconst ctx = $('Validate Payload').first().json;\nconst row = inserted[0].json;\n\nconst approver_links = approvers.map(a => {\n  const approve_url = `${APPROVAL_BASE_URL}?hitl_id=${row.hitl_id}&decision=APPROVED&approver_email=${encodeURIComponent(a.email)}`;\n  const reject_url  = `${APPROVAL_BASE_URL}?hitl_id=${row.hitl_id}&decision=REJECTED&approver_email=${encodeURIComponent(a.email)}`;\n  return { ...a, approve_url, reject_url };\n});\n\nconst tier_emoji = ctx.policy_sub_tier === 'CRITICAL' ? ':rotating_light:' : ':warning:';\nconst escalated_summary = (ctx.escalated_assets && ctx.escalated_assets.length > 0)\n  ? ctx.escalated_assets.join(', ')\n  : '(none — review rationale)';\n\nconst approve_lines = approver_links.map(a =>\n  `:white_check_mark: <${a.approve_url}|*Approve as ${a.name}*> _(${a.role})_`\n).join('\\n');\n\nconst reject_lines = approver_links.map(a =>\n  `:x: <${a.reject_url}|*Reject as ${a.name}*> _(${a.role})_`\n).join('\\n');\n\nconst slack_text = [\n  `${tier_emoji} *HITL Approval Required — ${ctx.agent_id}* (${ctx.policy_sub_tier})`,\n  ``,\n  `*Correlation ID:* \\`${ctx.correlation_id}\\``,\n  `*Execution ID:* \\`${ctx.execution_id}\\``,\n  `*Risk Tier:* ${ctx.risk_tier}`,\n  `*Invoker:* ${ctx.agent_invoker_email}`,\n  `*HITL ID:* ${row.hitl_id}`,\n  `*SLA timeout:* ${new Date(row.timeout_at).toISOString()}`,\n  ``,\n  `*Rationale:*`,\n  `> ${ctx.policy_rationale}`,\n  ``,\n  `*Escalated assets:* ${escalated_summary}`,\n  ``,\n  `*Approve:*`,\n  approve_lines,\n  ``,\n  `*Reject:*`,\n  reject_lines,\n  ``,\n  `_Each link opens a confirmation page. The decision is recorded only when you click *Confirm* on that page (form POST). Slack's link-expander cannot trigger resolution._`,\n  `_FAO-GOV-004: An approver cannot resolve their own invocation. Self-approval attempts raise a loud database exception at the hitl_queue_sod_guard trigger._`\n].join('\\n');\n\nreturn [{ json: {\n  ...ctx,\n  hitl_id:           row.hitl_id,\n  agent_invoker_id:  row.agent_invoker_id,\n  timeout_at:        row.timeout_at,\n  created_at:        row.created_at,\n  approver_links,\n  slack_text\n}}];"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        672,
-        640
-      ],
-      "id": "3eafd0e1-4658-4540-93bd-8929d9cb5b35",
-      "name": "Validate Insert + Compose"
-    },
-    {
-      "parameters": {
-        "select": "channel",
-        "channelId": {
-          "__rl": true,
-          "value": "C0AUUAXS6G7",
-          "mode": "id"
-        },
-        "text": "={{ $json.slack_text }}",
-        "otherOptions": {
-          "mrkdwn": true
-        }
-      },
-      "type": "n8n-nodes-base.slack",
-      "typeVersion": 2.3,
-      "position": [
-        896,
-        640
-      ],
-      "id": "88be8947-ff64-45ca-84cb-ea8140011642",
-      "name": "Slack: HITL Notification",
-      "webhookId": "94f9a3c0-f02a-4db3-ad24-329351c7b94a",
-      "credentials": {
-        "slackApi": {
-          "id": "WeYKyjpXbhfKviDK",
-          "name": "Slack account"
-        }
-      }
-    },
-    {
-      "parameters": {
-        "jsCode": "// ============================================================================\n// FAO HITL Gateway v1 — Compose HITL_REQUESTED Writer Payload\n// ----------------------------------------------------------------------------\n// Threads the same correlation_id and execution_id used by the parent\n// agent's STARTED/ASSET_RECONCILED rows. The shadow_ledger HITL_REQUESTED\n// row is the audit-trail record that the gateway successfully created\n// the hitl_queue request and notified the approver.\n//\n// policy_outcome stays REQUIRE_HUMAN — we are logging the fact of the\n// request, not changing the upstream decision. status is SUCCESS because\n// the gateway operation itself succeeded (request created + notified).\n//\n// hitl_status is PENDING — this row records that approval is awaited.\n// The matching HITL_RESOLVED row will be written by the Approval Handler\n// workflow when the approver decides.\n// ============================================================================\n\nconst ctx = $('Validate Insert + Compose').first().json;\n\nreturn [{ json: {\n  correlation_id:      ctx.correlation_id,\n  execution_id:        ctx.execution_id,\n  agent_id:            ctx.agent_id,\n  risk_tier:           ctx.risk_tier,\n  inputs: {\n    event_type:           'HITL_REQUESTED',\n    hitl_id:              ctx.hitl_id,\n    agent_invoker_id:     ctx.agent_invoker_id,\n    agent_invoker_email:  ctx.agent_invoker_email,\n    timeout_at:           ctx.timeout_at,\n    sub_tier:             ctx.policy_sub_tier,\n    notification_channel: 'slack',\n    approve_url:          ctx.approve_url,\n    reject_url:           ctx.reject_url,\n    escalated_assets:     ctx.escalated_assets\n  },\n  ai_prompt:           null,\n  ai_output:           null,\n  ai_confidence:       null,\n  fractional_cost_usd: null,\n  policy_outcome:      'REQUIRE_HUMAN',\n  policy_sub_tier:     ctx.policy_sub_tier,\n  policy_rationale:    `FAO-GOV-004 HITL request created (hitl_id=${ctx.hitl_id}, sub_tier=${ctx.policy_sub_tier}). Awaiting approval. Notification dispatched to Slack #fao-approvals. SLA timeout: ${ctx.timeout_at}. Underlying execution rationale: ${ctx.policy_rationale}`,\n  obligations:         [],\n  hitl_status:         'PENDING',\n  hitl_approver_id:    null,\n  status:              'SUCCESS',\n  error_details:       null\n}}];"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1120,
-        640
-      ],
-      "id": "b4d1ae70-e3cf-4ec2-b900-7dd58ae8f789",
-      "name": "Compose Writer Payload"
-    },
-    {
-      "parameters": {
-        "workflowId": {
-          "__rl": true,
-          "value": "dQslIEVwF3WqMliT",
-          "mode": "list",
-          "cachedResultUrl": "/workflow/dQslIEVwF3WqMliT",
-          "cachedResultName": "Writer"
-        },
-        "workflowInputs": {
-          "mappingMode": "defineBelow",
-          "value": {},
-          "matchingColumns": [],
-          "schema": [
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
             {
-              "id": "correlation_id",
-              "displayName": "correlation_id",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "execution_id",
-              "displayName": "execution_id",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "agent_id",
-              "displayName": "agent_id",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "risk_tier",
-              "displayName": "risk_tier",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "inputs",
-              "displayName": "inputs",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "object",
-              "removed": false
-            },
-            {
-              "id": "ai_prompt",
-              "displayName": "ai_prompt",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "removed": false
-            },
-            {
-              "id": "ai_output",
-              "displayName": "ai_output",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "removed": false
-            },
-            {
-              "id": "ai_confidence",
-              "displayName": "ai_confidence",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "removed": false
-            },
-            {
-              "id": "fractional_cost_usd",
-              "displayName": "fractional_cost_usd",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "removed": false
-            },
-            {
-              "id": "policy_outcome",
-              "displayName": "policy_outcome",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "policy_sub_tier",
-              "displayName": "policy_sub_tier",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "removed": false
-            },
-            {
-              "id": "policy_rationale",
-              "displayName": "policy_rationale",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "obligations",
-              "displayName": "obligations",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "array",
-              "removed": false
-            },
-            {
-              "id": "hitl_status",
-              "displayName": "hitl_status",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "hitl_approver_id",
-              "displayName": "hitl_approver_id",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "removed": false
-            },
-            {
-              "id": "status",
-              "displayName": "status",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "type": "string",
-              "removed": false
-            },
-            {
-              "id": "error_details",
-              "displayName": "error_details",
-              "required": false,
-              "defaultMatch": false,
-              "display": true,
-              "canBeUsedToMatch": true,
-              "removed": false
+              "id": "2cea46ec-78e8-5083-8088-c1f4b7957a6a",
+              "leftValue": "={{ $json.r.ok === true && $json.r.send === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
             }
           ],
-          "attemptToConvertTypes": false,
-          "convertFieldsToString": true
+          "combinator": "and"
         },
         "options": {}
       },
-      "type": "n8n-nodes-base.executeWorkflow",
-      "typeVersion": 1.3,
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
       "position": [
-        1344,
+        660,
         640
       ],
-      "id": "e0e43f85-c325-4eaa-bd6b-57de57ed08e3",
-      "name": "Writer: HITL_REQUESTED"
+      "id": "e5331754-2172-53da-9b45-7a99de714098",
+      "name": "Should Send?"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        880,
+        860
+      ],
+      "id": "65299985-2d66-5141-af53-eb9a7baace6e",
+      "name": "Nothing To Send"
     },
     {
       "parameters": {
-        "content": "## FAO HITL Gateway v1\n\n**Control:** FAO-GOV-004 (request side)\n**Risk Tier:** inherited from caller\n**Process Owner:** caller's owner; approver enforced via DB trigger\n\n### Flow\n\n1. **Validate** — required fields, enum + UUID + email format, $rationale$ delimiter sanitization\n2. **Insert HITL Row** — single SQL: resolves invoker email -> UUID, joins agent_registry for SLA, computes timeout_at, RETURNING hitl_id\n3. **Validate Insert + Compose** — throws loudly if zero rows (silent insert is the failure mode), builds Slack message + approval URLs\n4. **Slack: HITL Notification** — posts to #fao-reconciliation\n5. **Writer: HITL_REQUESTED** — shadow_ledger audit row\n\n### Pre-import setup\n\n- **Slack node**: replace `channelId` and `slackApi` credential ID with your real values\n- **APPROVAL_BASE_URL** (in `Validate Insert + Compose`): replace placeholder once Approval Handler ships\n- **Writer workflowId**: should already be correct (`dQslIEVwF3WqMliT`); verify after import\n\n### What this does NOT do\n\n- Does not handle approval/rejection (separate workflow: HITL Approval Handler)\n- Does not write a delayed COMMITTED on approval (that lives in the Approval Handler)\n- Does not re-notify on SLA expiry (escalation is a future enhancement)",
-        "height": 560,
-        "width": 460,
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ============================================================================\n// FAO HITL Notifier - Compose Slack Message\n// ----------------------------------------------------------------------------\n// FAO-GOV-004 / FAO-GOV-007: builds the Slack chat.postMessage request from\n// the fao_notification_context result only.\n//   - One link: r.approval_url, the approval page for this request. The page\n//     signs the approver in and records the decision through fao_hitl_decide\n//     with the approver's own session; the link carries no identity and no\n//     decision.\n//   - REQUESTED names the eligible approvers from r.approver_candidates (the\n//     database excludes the invoker). ESCALATED names r.target_name.\n//   - Every dynamic value passes slackEscape() so stored text cannot form\n//     Slack markup, mentions or extra links.\n//   - The API URL is r.slack_api_base_url + '/chat.postMessage', so the same\n//     export posts to Slack live and to a local mock in tests.\n// ============================================================================\n\nconst r = (($input.first() || {}).json || {}).r;\nif (!r || typeof r !== 'object' || r.ok !== true || r.send !== true) {\n  throw new Error('FAO-GOV-007 notifier: notification context is not sendable');\n}\n\nfunction slackEscape(value) {\n  if (value === null || value === undefined) return '';\n  return String(value)\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;');\n}\n\nconst HTTP_URL = /^https?:\\/\\/[^\\s<>|]+$/;\nif (typeof r.approval_url !== 'string' || !HTTP_URL.test(r.approval_url)) {\n  throw new Error('FAO-GOV-007 notifier: approval_url invalid');\n}\nif (typeof r.slack_api_base_url !== 'string' || !HTTP_URL.test(r.slack_api_base_url)) {\n  throw new Error('FAO-GOV-007 notifier: slack_api_base_url invalid');\n}\nif (typeof r.slack_channel_id !== 'string' || r.slack_channel_id === '') {\n  throw new Error('FAO-GOV-007 notifier: slack_channel_id invalid');\n}\nif (r.kind !== 'REQUESTED' && r.kind !== 'ESCALATED') {\n  throw new Error('FAO-GOV-007 notifier: kind invalid');\n}\n\nconst kind = r.kind;\nconst level = r.level;\nconst hitl_id = r.hitl_id;\n\n// Escalated assets: objects {asset, policy_outcome, policy_sub_tier,\n// band_status} from the rollup, or plain symbols.\nconst assets = Array.isArray(r.escalated_assets) ? r.escalated_assets : [];\nconst asset_text = assets.length === 0\n  ? '(none listed)'\n  : assets.map(a => {\n      if (a !== null && typeof a === 'object') {\n        const parts = [a.policy_outcome, a.policy_sub_tier]\n          .filter(p => p !== null && p !== undefined && p !== '');\n        return slackEscape(a.asset) + (parts.length ? ' (' + parts.map(slackEscape).join('/') + ')' : '');\n      }\n      return slackEscape(a);\n    }).join(', ');\n\nconst candidates = Array.isArray(r.approver_candidates) ? r.approver_candidates : [];\nconst candidate_text = candidates.length === 0\n  ? '(no eligible approver found)'\n  : candidates.map(c => slackEscape(c && typeof c === 'object' ? c.name : c)).join(', ');\n\nconst agent_label = slackEscape(r.agent_name || r.agent_id);\nconst header = kind === 'ESCALATED'\n  ? `*Escalation: approval request ${slackEscape(hitl_id)} for ${agent_label} needs attention*`\n  : `*Approval required: request ${slackEscape(hitl_id)} for ${agent_label}*`;\n\nconst lines = [\n  header,\n  '',\n  `*Agent:* ${slackEscape(r.agent_id)}`,\n  `*Risk tier:* ${slackEscape(r.risk_tier)}`,\n  `*Review sub-tier:* ${slackEscape(r.sub_tier)}`,\n  `*Decide by:* ${slackEscape(r.timeout_at)}`,\n  `*Escalated assets:* ${asset_text}`\n];\n\nif (kind === 'ESCALATED') {\n  lines.push(`*Escalation target:* ${slackEscape(r.target_name)}`);\n} else {\n  lines.push(`*Eligible approvers:* ${candidate_text}`);\n}\n\nlines.push(\n  '',\n  `<${slackEscape(r.approval_url)}|Open the approval page>`,\n  '',\n  '_Sign in on the approval page to approve or reject. The person who started the run cannot decide it._'\n);\n\nconst text = lines.join('\\n');\nconst url = r.slack_api_base_url.replace(/\\/+$/, '') + '/chat.postMessage';\n\nreturn [{\n  json: {\n    hitl_id,\n    kind,\n    level,\n    url,\n    body: { channel: r.slack_channel_id, text, mrkdwn: true }\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        640
+      ],
+      "id": "3eafd0e1-4658-4540-93bd-8929d9cb5b35",
+      "name": "Compose Slack Message"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "slackApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body }}",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": false
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        640
+      ],
+      "id": "b9915f98-58c8-5c95-8534-25577bf261d7",
+      "name": "Slack: Post Message",
+      "credentials": {
+        "slackApi": {
+          "id": "FaoSlackBot00001",
+          "name": "FAO Slack Bot"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ============================================================================\n// FAO HITL Notifier - Classify Slack Result\n// ----------------------------------------------------------------------------\n// FAO-GOV-007: both outputs of Slack: Post Message (success and error) feed\n// this node. The attempt counts as SENT only when Slack answered HTTP 200\n// with body.ok === true; anything else (HTTP error, timeout, ok:false) is\n// FAILED, recorded by Record Notification, and retried by the sweep.\n// The ids come from Validate Payload, never from the HTTP response.\n// ============================================================================\n\nconst ids = $('Validate Payload').first().json;\nconst res = (($input.first() || {}).json) || {};\n\nconst clean = (s) => String(s).replace(/[\\u0000-\\u001f\\u007f]/g, ' ').slice(0, 300);\n\nlet outcome = 'FAILED';\nlet external_ref = null;\nlet error = null;\n\nif (res.error !== undefined && res.error !== null && res.statusCode === undefined) {\n  // Error output of the HTTP Request node (network error, timeout, 4xx, 5xx).\n  const e = res.error;\n  let msg;\n  if (typeof e === 'string') msg = e;\n  else if (e && typeof e === 'object') msg = e.message || e.description || e.code || 'request failed';\n  else msg = 'request failed';\n  const code = e && typeof e === 'object' ? (e.httpCode || e.status || e.statusCode) : undefined;\n  error = code !== undefined ? `http error ${code}: ${msg}` : `http error: ${msg}`;\n} else if (res.statusCode !== undefined || res.body !== undefined) {\n  let body = res.body;\n  if (typeof body === 'string') {\n    try { body = JSON.parse(body); } catch (err) { body = null; }\n  }\n  const status = res.statusCode;\n  if (status === 200 && body !== null && typeof body === 'object' && body.ok === true) {\n    outcome = 'SENT';\n    external_ref = typeof body.ts === 'string' ? body.ts : null;\n  } else {\n    const slack_error = body !== null && typeof body === 'object' && typeof body.error === 'string'\n      ? body.error : 'not ok';\n    error = `slack status ${status}: ${slack_error}`;\n  }\n} else {\n  error = 'no response from Slack';\n}\n\nreturn [{\n  json: {\n    hitl_id: ids.hitl_id,\n    kind: ids.kind,\n    level: ids.level,\n    outcome,\n    external_ref: external_ref === null ? null : clean(external_ref).slice(0, 200),\n    error: error === null ? null : clean(error)\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        640
+      ],
+      "id": "4d6f73fb-1170-5a8d-92a8-3c87c08e759d",
+      "name": "Classify Slack Result"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT public.fao_notification_record($1::bigint, $2, $3::int, $4, 'slack', $5, $6) AS r;",
+        "options": {
+          "queryReplacement": "={{ [ $json.hitl_id, $json.kind, $json.level, $json.outcome, $json.external_ref, $json.error ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1540,
+        640
+      ],
+      "id": "7693d993-3199-5aff-963c-0fb294faa209",
+      "name": "Record Notification",
+      "credentials": {
+        "postgres": {
+          "id": "FaoPgWorkflow001",
+          "name": "FAO Postgres (fao_workflow)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## FAO HITL Notifier (fao_hitl_gateway_v1)\n\n**Controls:** FAO-GOV-004 (approvers named from roles, never the invoker), FAO-GOV-007 (notification attempts recorded)\n\nThe request already exists when this workflow runs: `fao_run_finalize` created it and wrote HITL_REQUESTED. This workflow only notifies.\n\n### Input\n\nExactly `{hitl_id, kind, level}`: REQUESTED with level 0 (from the flagship and the sweeper's re-notify list) or ESCALATED with level 1 (from the sweeper). Nothing else is read.\n\n### Flow\n\n1. **Validate Payload**: shape of the three fields\n2. **Get Notification Context** (`fao_notification_context`): request facts, the approval link, eligible approvers or the escalation target, Slack settings; `send:false` when the request is no longer pending or was already sent\n3. **Compose Slack Message**: one link (the approval page), every dynamic value escaped\n4. **Slack: Post Message**: HTTP chat.postMessage with the `FAO Slack Bot` credential; errors go to the error output\n5. **Classify Slack Result**: SENT only for HTTP 200 with `ok: true`\n6. **Record Notification** (`fao_notification_record`): notification row plus NOTIFICATION_SENT or NOTIFICATION_FAILED in the ledger\n\nA FAILED attempt is retried by the sweeper up to `notify_max_attempts`, then escalated.",
+        "height": 600,
+        "width": 620,
         "color": 4
       },
       "type": "n8n-nodes-base.stickyNote",
@@ -330,51 +217,76 @@
       "main": [
         [
           {
-            "node": "Insert HITL Row",
+            "node": "Get Notification Context",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Insert HITL Row": {
+    "Get Notification Context": {
       "main": [
         [
           {
-            "node": "Validate Insert + Compose",
+            "node": "Should Send?",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Validate Insert + Compose": {
+    "Should Send?": {
       "main": [
         [
           {
-            "node": "Slack: HITL Notification",
+            "node": "Compose Slack Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Nothing To Send",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Slack: HITL Notification": {
+    "Compose Slack Message": {
       "main": [
         [
           {
-            "node": "Compose Writer Payload",
+            "node": "Slack: Post Message",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Compose Writer Payload": {
+    "Slack: Post Message": {
       "main": [
         [
           {
-            "node": "Writer: HITL_REQUESTED",
+            "node": "Classify Slack Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Classify Slack Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Slack Result": {
+      "main": [
+        [
+          {
+            "node": "Record Notification",
             "type": "main",
             "index": 0
           }
@@ -382,15 +294,14 @@
       ]
     }
   },
-  "active": true,
+  "active": false,
   "settings": {
     "executionOrder": "v1",
     "binaryMode": "separate",
     "availableInMCP": false
   },
-  "versionId": "2fa8a8e6-36b2-4899-8ead-cf38b90de73a",
+  "versionId": "b4f2a5c1-0e57-4d0e-8a6b-25a000000002",
   "meta": {
-    "templateCredsSetupCompleted": true,
     "instanceId": "d7e19fca9705d4d0c36e6fe71822071e2ec1e1c76f266658ed6763dfc41db437"
   },
   "id": "mUAC9qIMkVzlV5qw",

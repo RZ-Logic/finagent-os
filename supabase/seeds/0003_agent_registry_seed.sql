@@ -36,21 +36,23 @@
 --   - approval_threshold follows risk tier: GREEN/AMBER = 1 approver,
 --     RED = 2 approvers.
 --   - Not idempotent. Re-running will fail on PRIMARY KEY (agent_id).
---     TRUNCATE agent_registry first if re-seeding.
---   - WARNING: agent_registry is referenced by shadow_ledger and
---     hitl_queue, so a bare TRUNCATE fails and only TRUNCATE ... CASCADE
---     succeeds. CASCADE also empties shadow_ledger and hitl_queue, which
---     erases audit evidence. Re-seed only a fresh database; never re-seed
---     one that holds evidence.
---   - The flagship rollback_procedure text below describes a correcting
---     row with status CORRECTED_BY. That correction procedure is planned
---     for v1.1 and is not supported today: the execution_status enum
---     (migration 0001) allows only SUCCESS, FAILURE, PARTIAL and
---     ROLLED_BACK, so such a row cannot be written.
+--     Re-seed only a fresh database; never re-seed one that holds
+--     evidence. TRUNCATE is refused on agent_registry and on every table
+--     that references it (FAO-GOV-001, phase 2-5 migration 0013).
+--   - Phase 2-5: the first statement sets fao.change_reason, which every
+--     change to agent_registry now needs (FAO-GOV-002).
+--   - The flagship rollback_procedure text below describes the correction
+--     procedure: an erroneous ledger row is corrected by a CORRECTION event
+--     that references the original ledger_id (fao_ledger_correct, phase
+--     2-5). The original row is never changed.
 --
 -- Author: Rizwan Ahmed, ACCA · Velocyt Consulting
 -- Date:   2026-04-24
 -- ============================================================================
+
+-- FAO-GOV-002: change reason for this session (required by the
+-- agent_registry triggers).
+SELECT set_config('fao.change_reason', 'seed 0003', false);
 
 -- --- 1. Flagship: Reserve Reconciliation Agent -----------------------------
 
@@ -90,9 +92,10 @@ SELECT
     'FAO-REC-007'   -- Negative balance detection
   ]::TEXT[],
   FALSE,  -- AI advisory off by default; FAO_AI_ASSIST_ENABLED switch planned for v1.1, not read in v1
-  -- rollback_procedure: the CORRECTED_BY correction described in this text is
-  -- planned for v1.1 and not supported by the current execution_status enum.
-  'On failed commit: rollback is a no-op because the flagship writes only to the append-only Shadow Ledger — there is no destructive target system to reverse. If a ledger write is discovered to be erroneous, the correcting entry is a new row with status CORRECTED_BY and a reference to the original ledger_id. The original row is never deleted or updated (FAO-GOV-001).',
+  -- rollback_procedure: corrections are CORRECTION events written by
+  -- fao_ledger_correct (phase 2-5); the live text is reworded to match in
+  -- cutover runbook step 8.
+  'On failed commit: rollback is a no-op because the flagship writes only to the append-only Shadow Ledger; there is no destructive target system to reverse. If a ledger write is discovered to be erroneous, the correcting entry is a CORRECTION event that references the original ledger_id. The original row is never deleted or updated (FAO-GOV-001).',
   '{
     "wallet_balances": "fixtures/wallet_data.json (mock Fireblocks REST snapshot)",
     "ledger_balances": "fixtures/ledger_data.json (mock NetSuite GL saved search)",

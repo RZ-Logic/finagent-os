@@ -1,176 +1,169 @@
-# `workflows/` — n8n Workflow Index
+# `workflows/`: n8n workflow index
 
-> **For navigation only.** This directory contains exported n8n workflow JSON files. They are machine-generated artifacts (node positions, internal UUIDs, wire references) and are not intended to be read top-to-bottom. This index points you at the parts that contain real engineering — typically the `jsCode` blocks inside `code` nodes — and away from the n8n plumbing.
+This directory holds the exported n8n workflow JSON files. They are machine-generated artifacts (node positions, internal ids, wiring), so this index points at the parts worth reading: the `jsCode` blocks inside `code` nodes and the SQL calls inside `postgres` nodes. Every Code node starts with a comment block naming its control IDs. The JSON is the only copy of that code; the Node unit tests extract it from these files at test time, so what is tested is what is imported.
 
-If you're scanning code, the policy logic lives in the `code` nodes. The deterministic decision matrices, payload validators, and audit-row composers are all written in commented JavaScript inside those nodes. Open the JSON, search for `"jsCode"`, and the interesting work is there.
-
-For the platform-level architecture and the SOX control mapping, see [`../SOX-MAPPING.md`](../SOX-MAPPING.md). For build-decision context (why these workflows are shaped this way), see the *Build Decisions & Lessons Learned* section in the [root README](../README.md).
+For the SOX control mapping, see [`../SOX-MAPPING.md`](../SOX-MAPPING.md).
 
 ---
 
-## Production workflows
+## Design in one paragraph
 
-| File | Workflow Name | Role | Trigger | Where the interesting code lives |
-|---|---|---|---|---|
-| [`fao_reserve_recon_v1.json`](./fao_reserve_recon_v1.json) | `fao_reserve_recon_v1` | **Flagship.** Reserve Reconciliation Agent. RED-tier. | Manual Trigger (the committed export has no webhook trigger) | `Per-Asset Reconcile` node: the deterministic policy decision matrix |
-| [`fao_hitl_gateway_v1.json`](./fao_hitl_gateway_v1.json) | `fao_hitl_gateway_v1` | HITL gate. Inserts queue rows; sends Slack notification. | `executeWorkflowTrigger` (called by flagship) | `Validate Payload` node — required-field contract |
-| [`fao_hitl_approval_handler_v2.json`](./fao_hitl_approval_handler_v2.json) | `fao_hitl_approval_handler_v2` | Slack-link approval endpoint. **GET shows form, POST mutates.** Demo only: unauthenticated and not hardened for production. | Two webhooks: GET `/webhook/fao-hitl-confirm`, POST `/webhook/fao-hitl-resolve` | `Compose Confirmation HTML` (GET) + `Call fao_hitl_resolve` (POST) |
-| [`writer.json`](./writer.json) | `Writer` (Shadow Ledger Writer) | Plumbing. Validates and inserts `shadow_ledger` rows. Known issue: the committed export processes only the first item of a batch. | `executeWorkflowTrigger` (called by every other workflow) | `Validate Payload` node: 7 required fields, 17-field normalized payload |
+n8n never supplies identity and never decides. A run starts when a signed-in human calls the database function `fao_run_start` with their own Supabase session; the database records the invoker and returns a single-use run token. The caller posts only that token to the flagship's invoke webhook. The flagship claims the run (`fao_run_claim`), reconciles, appends its events through the Writer (`fao_ledger_append_batch`), and asks the database to finalize (`fao_run_finalize`), which rolls the run up in SQL and either commits it or opens an approval request in one transaction. Approvers decide on the approval page (`approval-app/`) through `fao_hitl_decide` with their own session; n8n is not in the decision path. n8n only notifies, sweeps on a schedule and records failures.
 
-## Test harnesses
+## Workflows
 
-| File | Purpose |
-|---|---|
-| [`test_writer_harness_multi_item.json`](./test_writer_harness_multi_item.json) | Sends a two-item batch to the Writer. Used during writer development. The committed Writer export processes only the first item, so a run currently inserts one row. Its comment says item 1 omits `policy_rationale`, but both items include it, so it is not a negative test. |
-| [`test_hitl_gateway_harness.json`](./test_hitl_gateway_harness.json) | Drives the HITL Gateway with a synthetic payload. Used to validate gateway behaviour without invoking the full flagship chain. |
+| File | Workflow name (id) | Role | Trigger |
+|---|---|---|---|
+| [`fao_reserve_recon_v1.json`](./fao_reserve_recon_v1.json) | `fao_reserve_recon_v1` (`uhB2KjEaJDuviM4D`) | **Flagship.** Reserve Reconciliation Agent, RED tier | Webhook `POST /webhook/fao-recon-invoke`, header auth |
+| [`writer.json`](./writer.json) | `Writer` (`dQslIEVwF3WqMliT`) | Validates a batch of events and appends it through `fao_ledger_append_batch`, all or none | Execute Workflow Trigger |
+| [`fao_hitl_gateway_v1.json`](./fao_hitl_gateway_v1.json) | `fao_hitl_gateway_v1` (`mUAC9qIMkVzlV5qw`) | **Notifier.** Posts one Slack message for a request and records the attempt | Execute Workflow Trigger |
+| [`fao_hitl_sweeper_v1.json`](./fao_hitl_sweeper_v1.json) | `fao_hitl_sweeper_v1` (`FaoSweeperV1x001`) | Runs `fao_maintenance_sweep` and sends the notifications it lists | Schedule, every 5 minutes |
+| [`fao_error_handler_v1.json`](./fao_error_handler_v1.json) | `fao_error_handler_v1` (`FaoErrHandlerV01`) | Records a failed flagship execution through `fao_run_fail` | Error Trigger (set as `errorWorkflow` on the flagship only) |
+| [`test_writer_harness_multi_item.json`](./test_writer_harness_multi_item.json) | `Test Writer Harness (Multi-Item)` (`OV7ukqcVKYfNXKHa`) | Writer positive and negative batch | Manual, test instances only |
+| [`test_hitl_gateway_harness.json`](./test_hitl_gateway_harness.json) | `Test HITL Gateway Harness` (`V87nEh6HALqINIDz`) | Starts a real run through the invoke webhook | Manual, test instances only |
 
-These are not part of the production execution path. They exist to verify sub-workflows work standalone. They are not isolated: they call the same Writer and HITL Gateway workflows as the flagship, so a run writes persistent `shadow_ledger` and `hitl_queue` rows and the Gateway harness posts to Slack. Point them at a test environment.
-
----
-
-## Per-workflow notes
-
-### `fao_reserve_recon_v1` — the flagship (12 nodes)
-
-```
-Manual Trigger
-  └─ Init Execution                  [code: correlation_id, fixtures, agent metadata]
-       └─ Writer: STARTED            [executeWorkflow → Writer]
-            └─ Get Materiality Thresholds   [postgres → materiality_thresholds]
-                 └─ Per-Asset Reconcile     [code: THE POLICY ENGINE]
-                      └─ Writer: ASSET_RECONCILED   [executeWorkflow → Writer, 7 items sent; committed Writer export persists only the first]
-                           └─ Aggregate Rollup     [code: worst-asset-wins]
-                                └─ Any HITL Required?   [if branch]
-                                     ├─ true (rollup not REQUIRE_HUMAN, including BLOCKED/DENY) → Writer: COMMITTED
-                                     └─ false (REQUIRE_HUMAN)
-                                          └─ Compose HITL Gateway Payload
-                                               └─ HITL Gateway  [executeWorkflow]
-```
-
-**Where to look first if you're reviewing the engineering quality:**
-
-- `Per-Asset Reconcile` node, `jsCode` block. ~190 lines. This is the deterministic decision matrix: 7 rules evaluated top-down, first match wins, after a pre-check that marks an asset with no configured threshold BLOCKED. Each rule's rationale string names its FAO-REC control ID. No LLM in the policy path.
-- `Init Execution` node, `jsCode` block. The fixture data is embedded inline with provenance metadata per asset (3 Kraken Dec 2025 PoR anchors + 1 clean baseline + 3 synthetic anomalies). The provenance is recorded once per run, on the STARTED row under `inputs.fixture_provenance`; ASSET_RECONCILED rows do not carry it.
-- `Aggregate Rollup` node. Implements the worst-asset-wins rollup rule and the rationale string composition.
-- `Architecture Note` sticky note. Renders inside n8n with a one-paragraph summary; safe to ignore in the JSON view.
-
-**Controls implemented:** FAO-REC-001, 002, 004 (per-asset floor only), 006, 007 + FAO-GOV-001 (via Writer), FAO-GOV-008, FAO-GOV-013 (via the `agent_registry` foreign key on `shadow_ledger.agent_id`). Not implemented in this workflow: an aggregate reserve ratio or aggregate floor (FAO-REC-003/004) and a dedicated evidence package node (FAO-REC-008).
+**Retired:** `fao_hitl_approval_handler_v2` is deleted from this directory. Its jobs moved: the decision and its ledger events to the database function `fao_hitl_decide`, the page to `approval-app/`, follow-up notifications to the sweeper. The live copy is archived at cutover and kept in the backup export.
 
 ---
 
-### `fao_hitl_gateway_v1` — the HITL gate (8 nodes)
+## Run flow
 
-Sub-workflow. Called by the flagship when the rollup outcome is `REQUIRE_HUMAN`. Validates the gateway payload, inserts a row into `hitl_queue`, sends a Slack notification with the approval link, and records the `HITL_REQUESTED` event in `shadow_ledger`.
+### 1. Run start (outside n8n)
+
+The MCP invoke tool signs the human in with their own credentials and calls `fao_run_start` (agent, reason, idempotency key). The database checks the owner row, the invoker role, registry status, tier and the hourly rate limit, records `invoker_id = auth.uid()`, and returns `correlation_id` and a 43-character run token valid for 10 minutes (stored hashed). The caller then posts:
 
 ```
-executeWorkflowTrigger
-  └─ Validate Payload                [code: required-field check]
-       └─ Insert HITL Row            [postgres → hitl_queue (calls fao_hitl_create function)]
-            └─ Validate Insert + Compose      [code: defensive zero-row check]
-                 └─ Slack: HITL Notification  [slack node]
-                      └─ Compose Writer Payload   [code]
-                           └─ Writer: HITL_REQUESTED   [executeWorkflow → Writer]
+POST /webhook/fao-recon-invoke
+X-FAO-Invoke-Key: <shared key>
+{"run_token": "<43 characters>"}
 ```
 
-**Why the validation pattern:** the original implementation used inline `INSERT...SELECT` against `process_owners` for invoker resolution. When the email lookup found no match, it silently inserted zero rows and the workflow continued as if nothing was wrong. Migration 0007 introduced the `fao_hitl_create` Postgres function which raises a named exception on lookup failure. The `Validate Insert + Compose` node is the in-workflow defensive layer that complements the database-layer enforcement.
+**Runs start only through this webhook.** The flagship has no Manual Trigger: an editor click has no authenticated invoker, and n8n does not run error workflows for manual executions. Test runs use the same webhook as a seeded test user.
 
-**Controls implemented:** FAO-GOV-004 (HITL gate), FAO-GOV-008 (correlation threading).
+### 2. Flagship: `fao_reserve_recon_v1`
+
+```
+Webhook: Invoke                       [header auth: FAO Invoke Header Auth]
+  -> Validate Invoke Body             [code: reads body.run_token only]
+  -> Body Valid?  -- no -->  Respond 400 {accepted:false, code:INVALID_INPUT}
+  -> Claim Run                        [postgres: fao_run_claim($1, $2)]
+  -> Claim OK?    -- no -->  Respond Claim Refused (401, 409 or 410, {accepted:false, code})
+  -> Respond 202 {accepted:true, correlation_id}   (the run continues)
+  -> Init Execution                   [code: ids and tier from the claim; STARTED event]
+  -> Writer: STARTED                  [execute workflow: Writer, once]
+  -> Get Materiality Thresholds       [postgres: scope = $1]
+  -> Check Thresholds                 [code: no rows is a hard error]
+  -> Per-Asset Reconcile              [code: THE POLICY ENGINE]
+  -> Writer: ASSET_RECONCILED         [execute workflow: Writer, once, all assets in one batch]
+  -> Check Writer Count               [code: stored count must equal asset count]
+  -> Finalize Run                     [postgres: fao_run_finalize($1::uuid)]
+  -> Human Review Required?  -- no -->  Run Complete (COMMITTED or COMMIT_BLOCKED already written)
+  -> Notify Input                     [code: exactly {hitl_id, kind:'REQUESTED', level:0}]
+  -> HITL Gateway                     [execute workflow: notifier, once]
+```
+
+Where to look first:
+
+- **Per-Asset Reconcile.** Fail-closed input rules, then the deterministic 7-rule matrix (first match wins). An asset present on one side only is BLOCKED with `band_status: ONE_SIDED`; a balance that is undefined, null, empty, non-numeric, NaN or infinite is BLOCKED with `band_status: INVALID_INPUT` and an `input_problem` naming the side and the value class; an asset with no usable threshold is BLOCKED with `NO_THRESHOLD`. Every BLOCKED item carries `hitl_status: PENDING` and `ratio: null`, so it routes the run to human review. Each rule's rationale names its FAO-REC control. No LLM in the policy path.
+- **Init Execution.** `correlation_id`, `execution_id`, `agent_id` and `risk_tier` come from the claim result. The asset scope is the sorted union of wallet and ledger keys. Inline fixtures (3 Kraken Dec 2025 PoR anchors, 1 clean baseline, 3 synthetic anomalies) with per-asset provenance on the STARTED row.
+- **Finalize Run.** The rollup (worst-asset rule, counts, escalated assets, review sub-tier) and the request are computed in SQL from the stored events, not by n8n. A run is never AWAITING_HITL without its request and its HITL_REQUESTED event.
+
+**Controls:** FAO-REC-001, 002, 004 (per-asset floor), 006, 007; FAO-GOV-001 (through the Writer), FAO-GOV-004, FAO-GOV-007, FAO-GOV-008, FAO-GOV-013.
+
+### 3. Writer
+
+```
+Trigger input schema         [one Writer event per item]
+  -> Validate Batch          [code: all items, strip _ keys, collect every problem]
+  -> Append Ledger Batch     [postgres: fao_ledger_append_batch($1::jsonb)]
+  -> Check Inserted          [code: stored count must equal events sent]
+```
+
+Input: one n8n item per event, `{correlation_id, event_type, inputs, policy_outcome, policy_sub_tier?, policy_rationale, obligations?, status, error_details?, ai_prompt?, ai_output?, ai_confidence?, fractional_cost_usd?, hitl_status?, execution_id?, agent_id?, risk_tier?}`. The Writer may append only STARTED, ASSET_RECONCILED and FAILED; HITL, notification, COMMITTED, COMMIT_BLOCKED, RUN_REFUSED and CORRECTION events are written only by database functions. `event_timestamp`, `hitl_approver_id`, `ledger_id` and `corrects_ledger_id` must be absent; the database sets them. `hitl_status` is NOT_REQUIRED, or PENDING only on an ASSET_RECONCILED whose outcome is REQUIRE_HUMAN, DENY or BLOCKED.
+
+Validate Batch throws one named error listing every bad item, `FAO-GOV-001 writer: item <i>: <reason>; ...` with 0-based item numbers (the same numbering the database uses), so nothing is silently dropped. The database then checks run state, asset scope and duplicates and stores the whole batch or nothing. Output: one item `{count, inserted[]}`.
+
+### 4. Notifier: `fao_hitl_gateway_v1`
+
+```
+Trigger input schema           [exactly {hitl_id, kind, level}]
+  -> Validate Payload          [code: REQUESTED/0 or ESCALATED/1]
+  -> Get Notification Context  [postgres: fao_notification_context($1::bigint, $2, $3::int)]
+  -> Should Send?  -- no -->  Nothing To Send (not pending, or already sent)
+  -> Compose Slack Message     [code: one link, every dynamic value escaped]
+  -> Slack: Post Message       [HTTP chat.postMessage, FAO Slack Bot, 10 s timeout, error output]
+  -> Classify Slack Result     [code: SENT only for HTTP 200 with ok:true]
+  -> Record Notification       [postgres: fao_notification_record(...)]
+```
+
+Everything posted comes from the database: the approval link (`<approval_app_base_url>/?hitl_id=<id>`), the eligible approvers (holders of the approver role, never the invoker) or the escalation target, and the Slack API base URL and channel from `fao_settings`. The same export posts to Slack live and to a local mock in tests. Every attempt is recorded with a NOTIFICATION_SENT or NOTIFICATION_FAILED ledger event; a duplicate SENT is refused by the database.
+
+### 5. Sweeper: `fao_hitl_sweeper_v1`
+
+```
+Schedule Trigger (every 5 minutes)
+  -> Run Sweep                 [postgres: fao_maintenance_sweep()]
+       -> Expand Notifications [code: one notifier input per escalation and re-notify entry]
+            -> HITL Gateway    [execute workflow: notifier, each item, continue on error]
+       -> Check Sweep Errors   [code: fails the execution when item_errors is not empty]
+```
+
+The sweep (in SQL) expires unclaimed tokens, fails stale runs, expires overdue requests and writes their final COMMITTED (status FAILURE), escalates once, and lists failed notifications for retry up to `notify_max_attempts`. Deadlines do not depend on the schedule: `fao_hitl_decide` refuses a decision at or after the deadline on its own.
+
+### 6. Error handler: `fao_error_handler_v1`
+
+```
+Error Trigger
+  -> Extract Failure           [code: execution id, last node, message cleaned and cut to 500]
+  -> Record Run Failure        [postgres: fao_run_fail($1, $2, $3)]
+```
+
+Set as `errorWorkflow` on the flagship only. A failing Writer or notifier call fails the flagship's Execute Workflow node, so the error workflow receives the flagship's execution id, which `fao_run_claim` recorded on the run. The database writes FAILED and moves the run to FAILED; after a request exists, the request stands and the sweep handles it. An execution that matches no run returns `UNKNOWN_EXECUTION` and nothing is written.
 
 ---
 
-### `fao_hitl_approval_handler_v2` — the Slack approval endpoint (18 nodes)
+## Rules every export follows
 
-The HTTP server that handles approval link clicks. Demo only: unauthenticated and not hardened for production. Identity binding of approver and invoker is a known gap planned for a later release. **Two webhooks, deliberately separated:**
+- Every Postgres node uses `executeQuery` with a constant SQL string and `$1..$n` placeholders; values go in `options.queryReplacement` as one array expression. No `{{` appears inside any query.
+- Every Code node sets `mode` explicitly and starts with a comment block naming its control IDs.
+- Every Execute Workflow node sets `mode` (`once` or `each`) and targets an exported workflow id.
+- Only the flagship sets `errorWorkflow`.
+- No secrets and no URLs beyond the public ones already in the fixtures.
 
-- `GET /webhook/fao-hitl-confirm`: renders an HTML confirmation page. Read-only; no state mutation. This is what Slack's link-unfurling bot hits when previewing the message.
-- `POST /webhook/fao-hitl-resolve`: records the decision. Calls the `fao_hitl_resolve` Postgres function (Migration 0008), which checks that the approver email exists in `process_owners` and that the decision is APPROVED or REJECTED, then updates `hitl_queue.decision` from PENDING; the `hitl_queue_sod_guard` trigger fires on that UPDATE and aborts it if the approver matches the recorded invoker. The function does not write to `shadow_ledger`. The `HITL_RESOLVED` and `COMMITTED` events are written afterwards by two separate Writer calls, so the decision and its ledger events are not atomic: a failure after the function returns can leave a decided queue row without one or both events.
+`npm run check:exports` checks these rules; `npm run test:node` runs the Code-node unit tests.
 
-The split exists because of an empirical observation: a single GET endpoint that mutated state was being walked by Slack's link previewer the moment the message was posted, auto-resolving every queued HITL within seconds. The fix is HTTP semantics: GET reads, POST mutates. The split stops link previewers and prefetchers from resolving requests; it does not authorize the POST. CSRF tokens are not implemented; the handler's own architecture note lists this as a production gap. See *Build Decisions § 1* in the root README for the full story.
+## Credentials
 
-```
-GET branch:
-  Webhook (GET) Confirm
-    └─ Validate Query Params
-         └─ Lookup HITL Context [postgres]
-              └─ Compose Confirmation HTML
-                   └─ Respond Confirmation [HTML form]
+The exports reference three credentials by name, with fixed placeholder ids. Nothing else may be referenced.
 
-POST branch:
-  Webhook (POST) Resolve
-    └─ Validate Body Params
-         └─ Call fao_hitl_resolve [postgres function: queue UPDATE, SoD trigger fires]
-              ├─ success → Read Shadow Ledger Events
-              │              └─ Compose HITL_RESOLVED Payload
-              │                   └─ Writer: HITL_RESOLVED
-              │                        └─ Compose COMMITTED Payload
-              │                             └─ Writer: COMMITTED
-              │                                  └─ Respond Success [HTML]
-              └─ error → Compose Error HTML → Respond Error
-```
-
-**Controls implemented:** FAO-GOV-004 (SoD trigger fires on the resolve function's UPDATE; identity binding is the known gap noted above), FAO-GOV-007 (approval-webhook progression from PENDING to a terminal decision), FAO-GOV-008 (correlation threading).
-
----
-
-### `Writer` — the Shadow Ledger Writer (3 nodes)
-
-Sub-workflow. Every workflow that writes to `shadow_ledger` routes through this one — the flagship, the HITL Gateway, the Approval Handler. There is no other path to insert ledger rows from n8n.
-
-```
-executeWorkflowTrigger
-  └─ Validate Payload      [code: 7 required fields, 17-field normalized payload]
-       └─ Insert Ledger Row [postgres → shadow_ledger]
-```
-
-**The 17-field payload** (normalized by `Validate Payload`; 7 fields required):
-
-```
-correlation_id · execution_id · agent_id · risk_tier · inputs · ai_prompt
-ai_output · ai_confidence · fractional_cost_usd · policy_outcome
-policy_sub_tier · policy_rationale · obligations · hitl_status
-hitl_approver_id · status · error_details
-```
-
-The 7 required fields are `correlation_id`, `execution_id`, `agent_id`, `risk_tier`, `policy_outcome`, `policy_rationale` and `status`; a missing one throws a named error. `risk_tier`, `policy_outcome` and `status` are checked against their enums, and the two IDs against a UUID pattern. The other 10 fields are optional and default to `null`, `{}`, `[]` or `NOT_REQUIRED`. The Writer does not interpret values; that's the caller's job.
-
-**Known issue in the committed export:** `Validate Payload` reads only `$input.first()` and returns one item, so the flagship's 7-item ASSET_RECONCILED batch persists only the first row (BTC). The evidence screenshot `docs/evidence/FAO-REC-001_flagship_full_execution_audit_trail.png` shows all 7 rows, so this export differs from the version that produced that evidence.
-
-**Why this is plumbing, not an agent:** The Writer makes no policy decisions; it persists them. Putting it in the agent registry would be miscategorization. Centralizing the insert path means n8n writes ledger rows only by INSERT through one validated node, and at the database boundary the `shadow_ledger_append_only_guard` trigger rejects row-level UPDATE and DELETE (FAO-GOV-001). Defense in depth at different layers: see *Build Decisions § 4* in the root README.
-
-**Controls implemented:** FAO-GOV-001 (single n8n insert path with structural checks; append-only is enforced by the database trigger).
-
----
+| Name | Type | Placeholder id | Used by |
+|---|---|---|---|
+| `FAO Postgres (fao_workflow)` | `postgres` | `FaoPgWorkflow001` | every Postgres node; connects as the `fao_workflow` role, which can only execute the workflow functions and read thresholds |
+| `FAO Invoke Header Auth` | `httpHeaderAuth` | `FaoInvokeHdr0001` | the flagship webhook; header name `X-FAO-Invoke-Key` |
+| `FAO Slack Bot` | `slackApi` | `FaoSlackBot00001` | Slack: Post Message |
 
 ## How to import
 
-These JSON files were exported from n8n's *Workflow → Download* option. To import:
+1. Create the three credentials above in n8n with exactly these names (the Postgres one connects as `fao_workflow`; the header auth one uses header name `X-FAO-Invoke-Key` and a new random value; the Slack one holds the bot token).
+2. Import every export, keeping ids: `n8n import:workflow --separate --input=<directory with these files>` (or *Workflows, Import from File* for each). Import order when importing one at a time: `writer.json`, `fao_hitl_gateway_v1.json`, `fao_error_handler_v1.json`, `fao_hitl_sweeper_v1.json`, `fao_reserve_recon_v1.json`.
+3. Open each Postgres, webhook and Slack node and select the credential by name (the placeholder ids do not exist on a new instance).
+4. Check the flagship's settings show `fao_error_handler_v1` as its error workflow.
+5. Activate the flagship (webhook) and the sweeper (schedule). The Writer, notifier and error handler run only when called.
+6. Do not import the harnesses on a shared instance.
 
-1. Open n8n.
-2. Click *Workflows → Import from File*.
-3. Select the JSON.
-4. Reconnect the Postgres and Slack credentials (n8n redacts credential references on export).
-5. Activate the workflow if it has a webhook or scheduled trigger.
+## Test harnesses
 
-**Import order matters** if you want a working chain end-to-end:
+Both harnesses start with **Assert Test Environment**, which throws unless the n8n environment variable `FAO_ENV` is `test` (the test container also sets `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` so Code nodes can read it). On any other instance they stop before making a request, so they cannot write to a shared ledger. They read their URLs, public key and test user from `FAO_TEST_*` variables and contain no credentials.
 
-1. `writer.json` first (every other workflow calls into it).
-2. `fao_hitl_gateway_v1.json` (calls Writer).
-3. `fao_hitl_approval_handler_v2.json` (calls Writer).
-4. `fao_reserve_recon_v1.json` (calls both Writer and HITL Gateway).
+- **Writer harness**: signs in as the test invoker, starts a run (`p_invoked_via: 'test'`), claims it as n8n would, sends STARTED plus 7 ASSET_RECONCILED (must store 8 events, 7 asset rows), sends a batch whose item 2 has no `policy_rationale` (must fail with the named Writer error), then closes the run through `fao_run_fail`.
+- **Notifier harness**: signs in, starts a run, posts the token to the invoke webhook with the header key, and asserts HTTP 202.
 
-The test harnesses call the Writer and the HITL Gateway, so import them after those two and point them at a test environment.
+In wave 1 the harnesses are kept valid but are not run; the workflows are checked offline (export rules and Code-node unit tests) and every database call they make is tested directly.
 
 ---
 
 ## Conventions
 
-- **Naming:** Production workflows use `fao_<area>_<purpose>_v<N>` slugs. The `Writer` is exported as `writer.json` historically; its workflow name inside n8n is `Writer`. Future versions will rename the file to `fao_shadow_ledger_writer_v1.json` for consistency.
-- **Architecture Notes:** every production workflow except the Writer has a sticky note named `Architecture Note` summarizing the workflow's role and control IDs. Renders only inside n8n.
-- **Sub-workflow triggers:** all sub-workflows start with `executeWorkflowTrigger` — they cannot be run standalone.
-- **Code commenting:** the policy, validation and payload-composition `code` nodes have a top comment describing the node's role, the controls they implement and design notes; the approval handler's response and payload composers have a title banner only, and the Writer's `Validate Payload` has none. Read the comments first.
-
----
-
-For the SOX control mapping, see [`../SOX-MAPPING.md`](../SOX-MAPPING.md).
-For the per-control evidence and the Apr 25, 2026 self-audit, see [`../docs/evidence/`](../docs/evidence/).
-For the architectural rationale behind these workflow shapes, see *Build Decisions & Lessons Learned* in the [root README](../README.md).
+- **Naming:** production workflows use `fao_<area>_<purpose>_v<N>`. The Writer is exported as `writer.json`; its name inside n8n is `Writer`.
+- **Notes:** each workflow has a sticky note (`Architecture Note`, `Writer Note` or `Harness Note`) summarizing its role and control IDs. They render only inside n8n.
+- **Sub-workflow triggers:** the Writer and the notifier start with an Execute Workflow Trigger whose input schema is a JSON example; fields outside the schema are dropped before the first node runs.

@@ -1,0 +1,134 @@
+# FinAgent OS CI: offline checks, MCP tests and the local database suite.
+# No secrets are used; every URL is localhost. Actions are pinned to full
+# commit SHAs (tag in the trailing comment).
+#
+# Control evidence: pgTAP and API tests exercise FAO-GOV-001 (append-only
+# ledger and journal), FAO-GOV-002 (registry, settings, change reasons),
+# FAO-GOV-004 (segregation of duties, decisions), FAO-GOV-007
+# (notifications) and FAO-GOV-008 (runs) against a local Supabase stack.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_COLOR: "0"
+
+jobs:
+  static:
+    name: static (exports and Node unit tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Guard, local URLs only
+        run: |
+          node -e '
+            const bad = [];
+            for (const [k, v] of Object.entries(process.env)) {
+              if (!v) continue;
+              if (k === "SUPABASE_URL" || k.startsWith("N8N_") || /^FAO_.*_URL$/.test(k)) {
+                let host = null;
+                try { host = new URL(v).hostname; } catch { host = null; }
+                if (!["127.0.0.1", "localhost", "[::1]", "::1"].includes(host)) bad.push(k);
+              }
+            }
+            if (bad.length) { console.error("Non-localhost value in: " + bad.join(", ")); process.exit(1); }
+            console.log("environment holds no non-local FinAgent URL");
+          '
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run check:exports
+      - run: npm run test:node
+
+  mcp:
+    name: mcp (pytest, offline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Guard, local URLs only
+        run: |
+          node -e '
+            const bad = [];
+            for (const [k, v] of Object.entries(process.env)) {
+              if (!v) continue;
+              if (k === "SUPABASE_URL" || k.startsWith("N8N_") || /^FAO_.*_URL$/.test(k)) {
+                let host = null;
+                try { host = new URL(v).hostname; } catch { host = null; }
+                if (!["127.0.0.1", "localhost", "[::1]", "::1"].includes(host)) bad.push(k);
+              }
+            }
+            if (bad.length) { console.error("Non-localhost value in: " + bad.join(", ")); process.exit(1); }
+            console.log("environment holds no non-local FinAgent URL");
+          '
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r mcp/requirements.txt -r mcp/requirements-dev.txt
+      - run: npm run test:py
+
+  db:
+    name: db (pgTAP and API tests on local Supabase)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Guard, local URLs only
+        run: |
+          node -e '
+            const bad = [];
+            for (const [k, v] of Object.entries(process.env)) {
+              if (!v) continue;
+              if (k === "SUPABASE_URL" || k.startsWith("N8N_") || /^FAO_.*_URL$/.test(k)) {
+                let host = null;
+                try { host = new URL(v).hostname; } catch { host = null; }
+                if (!["127.0.0.1", "localhost", "[::1]", "::1"].includes(host)) bad.push(k);
+              }
+            }
+            if (bad.length) { console.error("Non-localhost value in: " + bad.join(", ")); process.exit(1); }
+            console.log("environment holds no non-local FinAgent URL");
+          '
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run stage
+      - run: npm run sb:start
+      - run: npm run db:reset
+      - name: pgTAP
+        run: |
+          mkdir -p .local/reports
+          npm run test:db 2>&1 | tee .local/reports/pgtap.log
+      - name: API tests
+        run: |
+          mkdir -p .local/reports
+          npm run test:api 2>&1 | tee .local/reports/api.log
+      - name: Upload reports
+        if: failure()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: db-reports
+          path: .local/reports/
+          if-no-files-found: ignore
+          retention-days: 7

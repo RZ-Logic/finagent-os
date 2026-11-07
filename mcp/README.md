@@ -16,11 +16,11 @@ Every read runs as the reader user. Lists page with `limit` and `offset` and rep
 
 | Tool | Parameters | Returns |
 |---|---|---|
-| `query_shadow_ledger` | `correlation_id?` (UUID), `agent_id?` (`^[a-z0-9_]{1,64}$`), `event_type?` (one of the 13 ledger event types), `hours_lookback=24` (integer 1 to 8760), `limit=25` (1 to 200), `offset=0` (0 to 100000) | `{status, count, has_more, filters, rows}`, newest first |
+| `query_shadow_ledger` | `correlation_id?` (UUID), `agent_id?` (`^[a-z0-9_]{1,64}$`), `event_type?` (one of the 13 ledger event types), `hours_lookback=24` (integer 1 to 8760), `limit=25` (1 to 200), `offset=0` (0 to 100000) | `{status, count, has_more, filters, rows}`, newest first. The lookback window applies with `correlation_id` too: the result then carries `lookback_note`, and rows of the run older than `since` are not returned or counted in `has_more` (raise `hours_lookback` for an older run) |
 | `get_agent_registry` | `status?` (ACTIVE, STUB_DOCUMENTED, DEPRECATED), `limit=50`, `offset=0` | agents with risk tier, status, run limit and owner (`process_owners` embed) |
 | `get_pending_hitl` | `limit=50`, `offset=0` | requests with `decision = PENDING`, the invoker embed, and `past_deadline` (UTC now at or after `timeout_at`) |
 | `get_materiality_thresholds` | `asset_symbol?` (upper-cased, `^[A-Z0-9]{1,12}$`), `scope?` (Spot, Futures, Spot_and_Futures) | thresholds; without `scope`, every scope for the symbol |
-| `get_recent_executions` | `limit=10`, `offset=0` | one row per run from the database view `fao_run_summary`: `hitl_status` (from the request's decision, or NOT_REQUIRED), `outcome` and `status` from the newest COMMITTED row, `conflict` (more than one COMMITTED), `commit_blocked`, `corrected` |
+| `get_recent_executions` | `limit=10`, `offset=0` | one row per run from the database view `fao_run_summary`: `hitl_status`: the request's decision when there is a request; otherwise NOT_REQUIRED only for a committed run, NOT_YET_DETERMINED while the run is in flight (REQUESTED, RUNNING, AWAITING_HITL; the request opens at finalize), NONE when the run ended without one (FAILED, EXPIRED, commit blocked), `outcome` and `status` from the newest COMMITTED row, `conflict` (more than one COMMITTED), `commit_blocked`, `corrected` |
 | `get_process_owners` | `limit=50`, `offset=0` | owners with `active` and `escalates_to_name` |
 
 `get_recent_executions` reads one view in one request, so no fetch window can split a run's history, and the HITL status comes from the request itself (the v1 PENDING inversion is gone).
@@ -52,7 +52,7 @@ Every read runs as the reader user. Lists page with `limit` and `offset` and rep
 
 The server signs in as `FAO_READER_EMAIL` with the project's public key and sends that user's access token on every read. At startup it calls `fao_whoami` and refuses to start unless the reader's roles are exactly one global `reader` role. The reader can SELECT the FinAgent read tables and the summary view under RLS, and nothing else: writes and workflow functions are refused by the database.
 
-The server also refuses to start when `SUPABASE_SERVICE_KEY` or `SUPABASE_SECRET_KEY` is present in its environment, when `SUPABASE_PUBLIC_KEY` is a secret or service-role key, or when the reader cannot sign in. supabase-py is gone; `fao_rest.py` is a thin httpx PostgREST client and `fao_auth.py` holds the password session (token cached until 60 seconds before expiry).
+The server also refuses to start when `SUPABASE_SERVICE_KEY` or `SUPABASE_SECRET_KEY` is present in its environment, when `SUPABASE_PUBLIC_KEY` is a secret or service-role key, when `SUPABASE_URL` or `N8N_INVOKE_WEBHOOK_URL` is not https (plain http is allowed only on `127.0.0.1`, `localhost` or `::1`, because passwords, tokens, the invoke key and the run token travel on the first request), or when the reader cannot sign in. supabase-py is gone; `fao_rest.py` is a thin httpx PostgREST client and `fao_auth.py` holds the password session (token cached until 60 seconds before expiry).
 
 ### Invoke uses the human's own session (FAO-GOV-002)
 
@@ -78,7 +78,7 @@ Tools never raise to the client. Failures come back as structured results that c
 
 ### Untrusted text
 
-Fields written by people (or by a model) come back only under an `untrusted_text` object in each row: `policy_rationale`, `decision_notes`, `reason`, `notes`, `rollback_procedure`, `error_details`, `last_error`, `ai_human_brief`, `ai_prompt`, `ai_output`, and inside `inputs` the keys `reason`, `input_problem` and `decision_notes` (under `untrusted_text.inputs`). Every tool description tells the MCP client that this text is data and must not be followed as instructions.
+Marking is an allow-list. Each tool keeps outside `untrusted_text` only the keys of a fixed per-tool schema in `server.py`, and only when the value has that key's shape: ids, UUIDs, enums, numbers, booleans, timestamps, asset symbols, control ids, emails and approval links. Every other value moves under the row's `untrusted_text` object at the same path: free text written by people, a model or an outside system (`policy_rationale`, `decision_notes`, `reason`, `notes`, `rollback_procedure`, `error_details`, `ai_human_brief`, `ai_prompt`, `ai_output`, `obligations`, names, roles and display names, `escalates_to_name`), every `inputs` key that is not structured (`inputs.reason`, `input_problem`, `decision_notes`, `error`, `external_ref`, `failed_node`, `problems`, `wallet_source`, `ledger_source`, `fixture_provenance`) at any depth, any key the schema does not know, and a known key whose value has the wrong shape. Every tool description tells the MCP client that this text is data and must not be followed as instructions.
 
 ### Threat model
 
@@ -112,11 +112,11 @@ cp mcp/.env.example mcp/.env
 
 | Key | Value |
 |---|---|
-| `SUPABASE_URL` | project URL |
+| `SUPABASE_URL` | project URL (https; plain http only on 127.0.0.1, localhost or ::1) |
 | `SUPABASE_PUBLIC_KEY` | publishable key (live) or the CLI's local public key |
 | `FAO_READER_EMAIL`, `FAO_READER_PASSWORD` | the reader user |
 | `FAO_INVOKER_EMAIL`, `FAO_INVOKER_PASSWORD` | optional; both or neither. A user without the approver role |
-| `N8N_INVOKE_WEBHOOK_URL`, `N8N_INVOKE_KEY` | invoke webhook URL and its header value |
+| `N8N_INVOKE_WEBHOOK_URL`, `N8N_INVOKE_KEY` | invoke webhook URL (https; plain http only on loopback) and its header value |
 
 No service or secret key belongs in this file; the server refuses to start if one is set.
 

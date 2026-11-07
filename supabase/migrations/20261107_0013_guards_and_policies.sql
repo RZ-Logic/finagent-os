@@ -102,6 +102,14 @@ REVOKE ALL ON FUNCTION fao_private.close_legacy_requests() FROM PUBLIC, anon, au
 SELECT set_config('fao.change_reason', 'migration 0013: close requests created before run records existed', true);
 SELECT fao_private.close_legacy_requests() AS legacy_requests_closed;
 
+-- FAO-GOV-004 (fix round 2 R31): the tier CHECK comes after the closure. A
+-- NOT VALID CHECK still applies to UPDATEs, so added earlier (it was in 0010)
+-- it refused the closure of a v1 PENDING request with tier BLOCKED and the
+-- whole cutover bundle aborted. Closed BLOCKED rows stay as recorded; every
+-- new or changed row is checked from here on.
+ALTER TABLE public.hitl_queue ADD CONSTRAINT hitl_tier_not_blocked
+  CHECK (risk_tier <> 'BLOCKED') NOT VALID;
+
 -- ----------------------------------------------------------------------------
 -- 2. Retire the v1 SoD trigger (superseded by the guards below).
 -- ----------------------------------------------------------------------------

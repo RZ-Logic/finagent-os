@@ -12,7 +12,7 @@
 --     do not count toward it; every other refusal stays capped.
 -- ============================================================================
 BEGIN;
-SELECT plan(49);
+SELECT plan(50);
 
 CREATE TEMP TABLE v (k text PRIMARY KEY, j jsonb);
 CREATE FUNCTION pg_temp.g(p_k text) RETURNS jsonb LANGUAGE sql AS $$ SELECT j FROM v WHERE k = p_k $$;
@@ -97,6 +97,9 @@ SELECT ok((pg_temp.g('active')->>'ok')::boolean, 'A1: an ACTIVE agent still star
 -- Earlier checks still come first: a bad input is INVALID_INPUT, not RATE_LIMITED
 INSERT INTO v VALUES ('bad', tests.start_raw('aisha.okonkwo@finagent-os.demo', 'fao_close_orchestrator_v1', 'pgtap 140', 'short'));
 SELECT is(pg_temp.g('bad')->>'code', 'INVALID_INPUT', 'A1: input checks still run before the bound');
+SELECT ok(pg_temp.g('bad')->>'ref' IS NOT NULL
+          AND NOT (tests.journal_row((pg_temp.g('bad')->>'ref')::bigint)->'attempted' ? 'invalid_body'),
+  'A1 (IC-18): the bad key is refused by its field rule, not by the body check');
 
 -- The window is one hour on the FinAgent clock
 SELECT tests.set_clock(3601);

@@ -66,3 +66,45 @@ test('Check Sweep Errors passes on an empty list', async () => {
   await assert.doesNotReject(runCodeNode(WF, 'Check Sweep Errors', { items: [{ r }], upstream: { 'Run Sweep': [{ r }] } }));
   await assert.doesNotReject(runCodeNode(WF, 'Check Sweep Errors', { items: [], upstream: { 'Run Sweep': [{ r: sweepResult() }] } }));
 });
+
+// --- Check Notifier Results (FAO-GOV-007) -------------------------------------
+
+const EXPANDED = [
+  { hitl_id: 1, kind: 'ESCALATED', level: 1 },
+  { hitl_id: 3, kind: 'REQUESTED', level: 0 },
+  { hitl_id: 4, kind: 'REQUESTED', level: 0 },
+];
+const okResult = { r: { ok: true, code: 'OK', attempt: 1, notification_id: 9 } };
+
+test('Check Notifier Results throws after all items when any notifier call failed, naming each', async () => {
+  // HITL Gateway output, item i paired with Expand Notifications item i:
+  // call 0 and 2 failed (continueRegularOutput gives {error}), call 1 recorded.
+  const items = [
+    { error: 'Workflow is not active and cannot be executed.' },
+    okResult,
+    { error: 'invalid input syntax for type bigint' },
+  ];
+  await assert.rejects(
+    runCodeNode(WF, 'Check Notifier Results', { items, upstream: { 'Expand Notifications': EXPANDED } }),
+    (err) => {
+      assert.match(err.message, /^FAO-GOV-007 sweep: 2 notifier failures: /);
+      assert.ok(err.message.includes('1:ESCALATED:1 (Workflow is not active'), err.message);
+      assert.ok(err.message.includes('4:REQUESTED:0 (invalid input syntax'), err.message);
+      assert.ok(!err.message.includes('3:REQUESTED:0'), 'the recorded call is not listed');
+      return true;
+    },
+  );
+});
+
+test('Check Notifier Results passes when every call returned a result, including send:false', async () => {
+  const items = [okResult, { r: { ok: true, send: false, code: 'NOT_PENDING' } }, okResult];
+  const out = await runCodeNode(WF, 'Check Notifier Results', { items, upstream: { 'Expand Notifications': EXPANDED } });
+  assert.deepEqual(out, [{ notifier_calls: 3, notifier_failures: 0 }]);
+});
+
+test('Check Notifier Results still counts a failure it cannot pair', async () => {
+  await assert.rejects(
+    runCodeNode(WF, 'Check Notifier Results', { items: [{ error: { message: 'boom' } }], upstream: { 'Expand Notifications': [] } }),
+    /FAO-GOV-007 sweep: 1 notifier failures: unknown \(boom\)$/,
+  );
+});

@@ -2,7 +2,9 @@
 // FinAgent OS API tests: input classes in every argument of every client RPC
 // Controls: FAO-GOV-001 (refusals journaled; no database error text ever
 // returned), FAO-GOV-004 and FAO-GOV-008 (fixed validation before any
-// authorization or lookup).
+// authorization or lookup). IC-18: a JSON \u0000 escape, numbers, booleans,
+// objects and arrays are refused in every key by the body rules, journaled
+// with attempted.invalid_body; field-rule refusals carry no invalid_body.
 // ============================================================================
 
 import { test, after } from 'node:test';
@@ -38,6 +40,22 @@ const CLASSES = {
   status: { wrong_json_type: OBJ, enum_like: 'active', big: BIG, control: 'ACTIVE\u0001', sql: SQLISH, json: JSONISH },
 };
 
+// IC-18: classes refused by the body rules (fao_private.client_args) in every
+// argument kind, free text included, with the reason the journal row must
+// carry in attempted.invalid_body. The NUL is a JavaScript string, so
+// JSON.stringify sends it as the JSON escape \u0000. Every other class is a
+// field-rule refusal and its journal row must carry no invalid_body.
+const BODY_CLASSES = {
+  wrong_json_type: [OBJ, 'not_string'],
+  nul: ['a\u0000b', 'undecodable'],
+  number: [7, 'not_string'],
+  boolean: [true, 'not_string'],
+  array: [['x'], 'not_string'],
+};
+for (const kind of Object.keys(CLASSES)) {
+  for (const [cls, [value]] of Object.entries(BODY_CLASSES)) CLASSES[kind][cls] = value;
+}
+
 // Each RPC with a base call whose inputs are valid, and the kind of each argument.
 const RPCS = [
   ['fao_run_start', { p_agent_id: ['agent_id', FLAGSHIP], p_reason: ['reason', 'r'], p_idempotency_key: ['key', 'abcdefgh12'], p_invoked_via: ['via', 'test'] }],
@@ -72,6 +90,8 @@ for (const [fn, argSpec] of RPCS) {
         assert.equal(rows[0].code, 'INVALID_INPUT', label);
         assert.equal(rows[0].entry_point, `rpc:${fn}`, label);
         assert.equal(Number(rows[0].refusal_id), Number(r.body.ref), label);
+        const reason = BODY_CLASSES[cls] ? BODY_CLASSES[cls][1] : undefined;
+        assert.equal(rows[0].attempted.invalid_body, reason, `${label}: attempted.invalid_body is ${reason || 'absent'}`);
         cases += 1;
       }
     }

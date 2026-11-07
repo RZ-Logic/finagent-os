@@ -87,9 +87,9 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SELECT public.fao_run_claim($1, $2) AS r;",
+        "query": "SELECT public.fao_run_claim($1, $2, $3) AS r;",
         "options": {
-          "queryReplacement": "={{ [ $json.run_token, $execution.id ] }}"
+          "queryReplacement": "={{ [ $json.run_token, $execution.id, 'fao_reserve_recon_v1' ] }}"
         }
       },
       "type": "n8n-nodes-base.postgres",

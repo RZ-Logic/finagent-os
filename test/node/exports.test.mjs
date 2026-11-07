@@ -5,9 +5,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { checkExports, RULES, WORKFLOWS_DIR } from '../../scripts/check-exports.mjs';
+import { tmpdir } from 'node:os';
+import { checkExports, checkPublishDocs, RULES, WORKFLOWS_DIR, PUBLISH_ORDER, NODE_VERSIONS_N8N } from '../../scripts/check-exports.mjs';
 
 test('check-exports reports zero violations', () => {
   const report = checkExports();
@@ -180,4 +181,103 @@ test('execute_workflow_inputs flags pass-through, null refill, literals, wrong t
   assert.ok(run((wi) => { wi.attemptToConvertTypes = true; }).some((v) => /attemptToConvertTypes is not false/.test(v)));
   assert.ok(run((wi, p) => { delete p.workflowInputs; }).some((v) => /workflowInputs is missing/.test(v)));
   assert.ok(run((wi) => { wi.mappingMode = 'autoMapInputData'; }).some((v) => /mappingMode is autoMapInputData/.test(v)));
+});
+
+// ----------------------------------------------------------------------------
+// FAO-GOV-001 / FAO-GOV-007: node typeVersions are pinned to the ones the
+// mapping model above and the e2e layer were run against (n8n 2.46.6).
+// ----------------------------------------------------------------------------
+
+test('node_type_versions refuses a re-added node at another typeVersion and an unpinned type', () => {
+  const rule = RULES.find((r) => r.id === 'node_type_versions');
+  assert.ok(rule, 'rule exists');
+  const all = loadAll();
+  for (const { file, wf } of all) assert.deepEqual(rule.run({ file, wf }), [], `${file} passes as exported`);
+  const flagship = all.find((w) => w.file === 'fao_reserve_recon_v1.json').wf;
+  const bump = (name, v) => {
+    const wf = structuredClone(flagship);
+    wf.nodes.find((n) => n.name === name).typeVersion = v;
+    return rule.run({ file: 'fao_reserve_recon_v1.json', wf });
+  };
+  assert.ok(bump('Writer: STARTED', 1.4).some((v) => /Writer: STARTED.*executeWorkflow typeVersion 1\.4, pinned 1\.3/.test(v)));
+  assert.ok(bump('Claim Run', 2.8).some((v) => /postgres typeVersion 2\.8, pinned 2\.6/.test(v)));
+  assert.ok(bump('Init Execution', 1).some((v) => /code typeVersion 1, pinned 2/.test(v)));
+  const odd = structuredClone(flagship);
+  odd.nodes.push({ name: 'Set Fields', type: 'n8n-nodes-base.set', typeVersion: 3.4, parameters: {} });
+  assert.ok(rule.run({ file: 'fao_reserve_recon_v1.json', wf: odd }).some((v) => /n8n-nodes-base\.set has no pinned typeVersion/.test(v)));
+});
+
+test('every Execute Workflow and Trigger node is at the version the mapping model assumes', () => {
+  for (const { file, wf } of loadAll()) {
+    for (const n of wf.nodes) {
+      if (n.type === 'n8n-nodes-base.executeWorkflow') assert.equal(n.typeVersion, 1.3, `${file} ${n.name}`);
+      if (n.type === 'n8n-nodes-base.executeWorkflowTrigger') assert.equal(n.typeVersion, 1.1, `${file} ${n.name}`);
+    }
+  }
+});
+
+test('check-exports fails when every Execute Workflow node is bumped (the R26 probe) and when versions.json moves', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fao-exports-'));
+  try {
+    const wfDir = join(dir, 'wf');
+    mkdirSync(wfDir);
+    for (const { file, wf } of loadAll()) {
+      const copy = structuredClone(wf);
+      for (const n of copy.nodes) {
+        if (n.type === 'n8n-nodes-base.executeWorkflow' || n.type === 'n8n-nodes-base.executeWorkflowTrigger') n.typeVersion = 9.9;
+      }
+      writeFileSync(join(wfDir, file), JSON.stringify(copy, null, 2));
+    }
+    const bumped = checkExports({ workflowsDir: wfDir });
+    assert.ok(bumped.failed >= 5, `failed ${bumped.failed}`);
+    assert.ok(bumped.violations.some((v) => /\[node_type_versions\].*typeVersion 9\.9, pinned 1\.3/.test(v)));
+    assert.ok(bumped.violations.some((v) => /\[node_type_versions\].*typeVersion 9\.9, pinned 1\.1/.test(v)));
+    const vf = join(dir, 'versions.json');
+    writeFileSync(vf, JSON.stringify({ n8n: '2.47.0' }));
+    const moved = checkExports({ versionsFile: vf });
+    assert.deepEqual(moved.violations.filter((v) => !/\[node_versions_n8n\]/.test(v)), []);
+    assert.ok(moved.violations.some((v) => /\[node_versions_n8n\].*"2\.47\.0".*2\.46\.6/.test(v)), moved.violations.join('; '));
+    assert.equal(NODE_VERSIONS_N8N, JSON.parse(readFileSync(join(WORKFLOWS_DIR, '..', 'test', 'env', 'versions.json'), 'utf8')).n8n);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ----------------------------------------------------------------------------
+// FAO-GOV-007 / FAO-GOV-008: n8n 2.x publish order (Writer, notifier, error
+// handler, sweeper, flagship), enforced on the exports and the README.
+// ----------------------------------------------------------------------------
+
+test('PUBLISH_ORDER puts every sub-workflow and the error workflow before their callers', () => {
+  assert.deepEqual(PUBLISH_ORDER, ['writer.json', 'fao_hitl_gateway_v1.json', 'fao_error_handler_v1.json', 'fao_hitl_sweeper_v1.json', 'fao_reserve_recon_v1.json']);
+  const rule = RULES.find((r) => r.id === 'publish_order');
+  assert.ok(rule, 'rule exists');
+  const all = loadAll();
+  const exportedById = new Map(all.map(({ wf }) => [wf.id, wf]));
+  for (const { file, wf } of all) assert.deepEqual(rule.run({ file, wf, exportedById }), [], `${file} passes as exported`);
+  // The Writer calling the flagship would need the flagship published first.
+  const writer = structuredClone(all.find((w) => w.file === 'writer.json').wf);
+  writer.nodes.push({ name: 'Call Flagship', type: 'n8n-nodes-base.executeWorkflow', typeVersion: 1.3, parameters: { mode: 'once', workflowId: { __rl: true, value: 'uhB2KjEaJDuviM4D', mode: 'list' } } });
+  assert.ok(rule.run({ file: 'writer.json', wf: writer, exportedById }).some((v) => /Call Flagship.*not published before writer\.json/.test(v)));
+  // The notifier naming the sweeper as its error workflow.
+  const gw = structuredClone(all.find((w) => w.file === 'fao_hitl_gateway_v1.json').wf);
+  gw.settings.errorWorkflow = 'FaoSweeperV1x001';
+  assert.ok(rule.run({ file: 'fao_hitl_gateway_v1.json', wf: gw, exportedById }).some((v) => /settings\.errorWorkflow.*not published before/.test(v)));
+  // A sticky note that no longer states its step.
+  const flag = structuredClone(all.find((w) => w.file === 'fao_reserve_recon_v1.json').wf);
+  for (const n of flag.nodes) if (n.type === 'n8n-nodes-base.stickyNote') n.parameters.content = 'no step';
+  assert.ok(rule.run({ file: 'fao_reserve_recon_v1.json', wf: flag, exportedById }).some((v) => /step 5 of 5/.test(v)));
+});
+
+test('publish_docs: the README publishes the five production ids in PUBLISH_ORDER and no harness', () => {
+  const readme = readFileSync(join(WORKFLOWS_DIR, 'README.md'), 'utf8');
+  assert.deepEqual(checkPublishDocs(readme), []);
+  const ids = ['dQslIEVwF3WqMliT', 'mUAC9qIMkVzlV5qw', 'FaoErrHandlerV01', 'FaoSweeperV1x001', 'uhB2KjEaJDuviM4D'];
+  const doc = (list) => list.map((id) => `n8n publish:workflow --id=${id}`).join('\n');
+  assert.deepEqual(checkPublishDocs(doc(ids)), []);
+  assert.equal(checkPublishDocs(doc([ids[0], ids[4], ids[1], ids[2], ids[3]])).length, 1, 'flagship before the notifier');
+  assert.equal(checkPublishDocs(doc(ids.slice(1))).length, 1, 'Writer missing');
+  assert.equal(checkPublishDocs(doc([...ids, 'OV7ukqcVKYfNXKHa'])).length, 1, 'a harness published');
+  assert.equal(checkPublishDocs(`${doc(ids)}\nThe Writer, notifier and error handler run only when called.`).length, 1, 'n8n 1.x wording');
+  for (const id of ['OV7ukqcVKYfNXKHa', 'V87nEh6HALqINIDz']) assert.ok(!readme.includes(`--id=${id}`), `README never publishes harness ${id}`);
 });

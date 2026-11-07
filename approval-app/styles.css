@@ -19,8 +19,8 @@ body {
 .page { max-width: 44rem; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
 .page-header h1 { font-size: 1.4rem; margin: 0 0 0.25rem; }
 .muted { color: var(--muted); }
-.status { font-weight: 600; margin: 1rem 0 0.25rem; }
-.reference { margin: 0 0 1rem; font-size: 0.9rem; }
+.status { font-weight: 600; margin: 1rem 0 0.25rem; overflow-wrap: anywhere; }
+.reference { margin: 0 0 1rem; font-size: 0.9rem; overflow-wrap: anywhere; }
 .card {
   background: var(--card);
   border: 1px solid var(--line);
@@ -57,5 +57,10 @@ button:disabled { opacity: 0.6; cursor: wait; }
 .fields dt { color: var(--muted); }
 .fields dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .assets { margin: 0; padding-left: 1.25rem; }
+/* Long unbroken values wrap instead of widening the page at 375px (B6). */
+.assets li { overflow-wrap: anywhere; }
 .note { font-weight: 600; }
-.page-footer { margin-top: 2rem; display: flex; gap: 1rem; align-items: baseline; }
+.page-footer { margin-top: 2rem; display: flex; flex-wrap: wrap; gap: 1rem; align-items: baseline; }
+.page-footer p { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+/* A clearly visible focus ring for keyboard users (B5). */
+:focus-visible { outline: 3px solid #1d4ed8; outline-offset: 2px; }

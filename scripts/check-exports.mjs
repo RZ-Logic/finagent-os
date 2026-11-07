@@ -8,8 +8,10 @@
 //   FAO-GOV-007  the notifier posts through the named Slack credential only
 //   FAO-GOV-008  runs start only through the authenticated invoke webhook
 //
-// One check per rule per workflow, plus one check over the set of exported
-// files. Output is TAP (ok / not ok lines, then # tests, # pass, # fail,
+// One check per rule per workflow, plus three global checks: the set of
+// exported files, the n8n version the node typeVersion pins were checked
+// against (test/env/versions.json), and the README publish order for n8n 2.x
+// (workflows/README.md). Output is TAP (ok / not ok lines, then # tests, # pass, # fail,
 // # skipped, # todo), so the test runner can count it like the Node layer.
 // Exits 1 when any check fails. `--json` prints a JSON report instead.
 // Usable as a module: checkExports({ workflowsDir }) returns the report.
@@ -65,6 +67,53 @@ const T = {
 };
 const ALL_ITEMS = 'runOnceForAllItems';
 
+// FAO-GOV-001 / FAO-GOV-007: the node typeVersion of every node type the
+// exports use. The offline mapping model (test/node/exports.test.mjs:
+// Execute Workflow 1.3, Execute Workflow Trigger 1.1), the Code-node tests
+// and the e2e layer were all run against these versions, and each one was
+// checked to be a supported version of its node in the n8n-nodes-base
+// package of n8n NODE_VERSIONS_N8N. A node re-added or re-saved in a newer
+// editor lands at that node's newest version (in 2.46.6, for example,
+// executeWorkflow 1.4, executeWorkflowTrigger 1.3, httpRequest 4.5), whose
+// mapping or error-output behaviour may differ; this rule refuses it until
+// the model and the e2e layer are re-checked and the pins moved on purpose.
+// NODE_VERSIONS_N8N must equal the n8n version in test/env/versions.json.
+export const NODE_VERSIONS_N8N = '2.46.6';
+export const NODE_TYPE_VERSIONS = {
+  [T.code]: 2,
+  [T.postgres]: 2.6,
+  [T.webhook]: 2,
+  [T.respond]: 1.1,
+  [T.exec]: 1.3,
+  [T.execTrigger]: 1.1,
+  [T.manual]: 1,
+  [T.schedule]: 1.2,
+  [T.errorTrigger]: 1,
+  [T.http]: 4.2,
+  [T.if]: 2.2,
+  [T.noop]: 1,
+  [T.sticky]: 1,
+};
+export const VERSIONS_FILE = join(REPO_ROOT, 'test', 'env', 'versions.json');
+
+// FAO-GOV-007 / FAO-GOV-008: n8n 2.x runs only the published version of a
+// sub-workflow or error workflow from a production (webhook or schedule)
+// execution, `n8n import:workflow` imports every workflow unpublished, and
+// publishing a parent is refused while a sub-workflow it calls is
+// unpublished. The production workflows are therefore published one by one
+// in this order, each after everything it calls or names as its error
+// workflow. The harnesses are never published. workflows/README.md lists the
+// same order as `n8n publish:workflow --id=<id>` lines, and each production
+// workflow's sticky note says its step.
+export const PUBLISH_ORDER = [
+  'writer.json',
+  'fao_hitl_gateway_v1.json',
+  'fao_error_handler_v1.json',
+  'fao_hitl_sweeper_v1.json',
+  'fao_reserve_recon_v1.json',
+];
+export const README_FILE = join(WORKFLOWS_DIR, 'README.md');
+
 // Section 4 node names per workflow. `type`, `mode`, `query` (whitespace-free
 // substring of the SQL), `target`, `onError` are checked when given.
 export const SECTION4 = {
@@ -74,7 +123,7 @@ export const SECTION4 = {
       { name: 'Validate Invoke Body', type: T.code, mode: ALL_ITEMS },
       { name: 'Body Valid?', type: T.if },
       { name: 'Respond 400', type: T.respond },
-      { name: 'Claim Run', type: T.postgres, query: 'public.fao_run_claim($1,$2)' },
+      { name: 'Claim Run', type: T.postgres, query: 'public.fao_run_claim($1,$2,$3)' },
       { name: 'Claim OK?', type: T.if },
       { name: 'Respond Claim Refused', type: T.respond },
       { name: 'Respond 202', type: T.respond },
@@ -102,11 +151,22 @@ export const SECTION4 = {
       { name: 'Should Send?', type: T.if },
       { name: 'Nothing To Send', type: T.noop },
       { name: 'Compose Slack Message', type: T.code, mode: ALL_ITEMS },
+      { name: 'Compose OK?', type: T.if },
       { name: 'Slack: Post Message', type: T.http, onError: 'continueErrorOutput' },
       { name: 'Classify Slack Result', type: T.code, mode: ALL_ITEMS },
       { name: 'Record Notification', type: T.postgres, query: "public.fao_notification_record($1::bigint,$2,$3::int,$4,'slack',$5,$6)" },
     ],
     absent: ['Insert HITL Row', 'Validate Insert + Compose', 'Slack: HITL Notification', 'Compose Writer Payload', 'Writer: HITL_REQUESTED'],
+    // FAO-GOV-007: every path after Compose ends in Record Notification, so
+    // an unusable setting and every Slack outcome are recorded attempts.
+    edges: [
+      ['Compose Slack Message', 0, 'Compose OK?'],
+      ['Compose OK?', 0, 'Slack: Post Message'],
+      ['Compose OK?', 1, 'Classify Slack Result'],
+      ['Slack: Post Message', 0, 'Classify Slack Result'],
+      ['Slack: Post Message', 1, 'Classify Slack Result'],
+      ['Classify Slack Result', 0, 'Record Notification'],
+    ],
   },
   'writer.json': {
     present: [
@@ -123,9 +183,18 @@ export const SECTION4 = {
       { name: 'Run Sweep', type: T.postgres, query: 'public.fao_maintenance_sweep()' },
       { name: 'Expand Notifications', type: T.code, mode: ALL_ITEMS },
       { name: 'HITL Gateway', type: T.exec, mode: 'each', target: NOTIFIER_ID, onError: 'continueRegularOutput' },
+      { name: 'Check Notifier Results', type: T.code, mode: ALL_ITEMS },
       { name: 'Check Sweep Errors', type: T.code, mode: ALL_ITEMS },
     ],
     absent: [],
+    // FAO-GOV-007: the gateway's swallowed errors are read after every item
+    // was attempted; FAO-GOV-008: sweep item errors on their own branch.
+    edges: [
+      ['Run Sweep', 0, 'Expand Notifications'],
+      ['Run Sweep', 0, 'Check Sweep Errors'],
+      ['Expand Notifications', 0, 'HITL Gateway'],
+      ['HITL Gateway', 0, 'Check Notifier Results'],
+    ],
   },
   'fao_error_handler_v1.json': {
     present: [
@@ -140,7 +209,7 @@ export const SECTION4 = {
       { name: 'Assert Test Environment', type: T.code },
       { name: 'Sign In', type: T.http },
       { name: 'Start Run', type: T.http },
-      { name: 'Claim', type: T.postgres, query: 'public.fao_run_claim(' },
+      { name: 'Claim', type: T.postgres, query: 'public.fao_run_claim($1,$2,$3)' },
       { name: 'Assert Results', type: T.code },
       { name: 'Close Run', type: T.postgres, query: 'public.fao_run_fail(' },
     ],
@@ -382,12 +451,80 @@ export const RULES = [
       for (const name of spec.absent) {
         if (byName.has(name)) v.push(`node "${name}" should have been removed`);
       }
+      for (const [from, out, to] of spec.edges || []) {
+        const targets = ((((wf.connections || {})[from] || {}).main || [])[out] || []).map((c) => c && c.node);
+        if (!targets.includes(to)) v.push(`no connection "${from}" output ${out} -> "${to}"`);
+      }
       if (file === FLAGSHIP_FILE) v.push(...checkInvokeWebhook(byName.get('Webhook: Invoke')));
       if (file === 'fao_hitl_gateway_v1.json') v.push(...checkSlackPost(byName.get('Slack: Post Message')));
       return v;
     },
   },
+  {
+    id: 'node_type_versions',
+    text: `every node type and typeVersion is one pinned for n8n ${NODE_VERSIONS_N8N}`,
+    run: ({ wf }) => nodesOf(wf).flatMap((n) => {
+      if (!Object.prototype.hasOwnProperty.call(NODE_TYPE_VERSIONS, n.type)) {
+        return [`node "${n.name}": type ${n.type} has no pinned typeVersion`];
+      }
+      const want = NODE_TYPE_VERSIONS[n.type];
+      return n.typeVersion === want ? [] : [`node "${n.name}": ${n.type} typeVersion ${n.typeVersion}, pinned ${want}`];
+    }),
+  },
+  {
+    id: 'publish_order',
+    text: 'each production workflow is published after everything it calls or names as its error workflow, and its note says its step',
+    run: ({ file, wf, exportedById }) => {
+      const pos = PUBLISH_ORDER.indexOf(file);
+      if (pos < 0) {
+        return HARNESS_FILES.has(file) || !WORKFLOWS[file] ? [] : [`production workflow ${file} is not in PUBLISH_ORDER`];
+      }
+      const v = [];
+      const fileOfId = new Map(Object.entries(WORKFLOWS).map(([f, m]) => [m.id, f]));
+      const deps = nodesOf(wf).filter((n) => n.type === T.exec).map((n) => ({ what: `node "${n.name}"`, id: targetId(n) }));
+      const ew = (wf.settings || {}).errorWorkflow;
+      if (ew) deps.push({ what: 'settings.errorWorkflow', id: String(ew) });
+      for (const d of deps) {
+        const depFile = fileOfId.get(d.id);
+        const depPos = PUBLISH_ORDER.indexOf(depFile);
+        if (depPos < 0 || depPos >= pos) {
+          v.push(`${d.what}: ${d.id} (${depFile || 'not exported'}) is not published before ${file}`);
+        }
+      }
+      const step = `**Publish (n8n 2.x):** step ${pos + 1} of ${PUBLISH_ORDER.length}`;
+      const notes = nodesOf(wf).filter((n) => n.type === T.sticky).map((n) => String(params(n).content || ''));
+      if (!notes.some((c) => c.includes(step))) v.push(`no sticky note says "${step}"`);
+      return v;
+    },
+  },
 ];
+
+// Global checks over files other than the exports themselves.
+// node_versions_n8n: the pins above were checked against the n8n version the
+// tests record. publish_docs: the README import steps publish exactly the
+// PUBLISH_ORDER workflows, in that order, and never a harness.
+function checkVersionsFile(versionsFile) {
+  if (!existsSync(versionsFile)) return [`${versionsFile} not found`];
+  let n8n;
+  try { n8n = JSON.parse(readFileSync(versionsFile, 'utf8')).n8n; } catch (e) { return [`versions file does not parse: ${e.message}`]; }
+  return n8n === NODE_VERSIONS_N8N ? [] : [`test/env/versions.json n8n is ${JSON.stringify(n8n)}, but the typeVersion pins were checked against ${NODE_VERSIONS_N8N}`];
+}
+
+export function checkPublishDocs(text) {
+  const v = [];
+  const ids = [...String(text).matchAll(/publish:workflow\s+--id=([A-Za-z0-9]+)/g)].map((m) => m[1]);
+  const want = PUBLISH_ORDER.map((f) => WORKFLOWS[f].id);
+  if (JSON.stringify(ids) !== JSON.stringify(want)) {
+    v.push(`README publish:workflow ids are [${ids.join(', ')}], expected [${want.join(', ')}] in that order`);
+  }
+  if (/run only when called/i.test(String(text))) v.push('README still says sub-workflows "run only when called"');
+  return v;
+}
+
+function checkReadme(readmeFile) {
+  if (!existsSync(readmeFile)) return [`${readmeFile} not found`];
+  return checkPublishDocs(readFileSync(readmeFile, 'utf8'));
+}
 
 // The fields a sub-workflow's Execute Workflow Trigger declares, in order,
 // with the type n8n infers for each (null means "any": no schema type).
@@ -479,7 +616,7 @@ function checkSlackPost(n) {
 
 // --- Runner -----------------------------------------------------------------
 
-export function checkExports({ workflowsDir = WORKFLOWS_DIR } = {}) {
+export function checkExports({ workflowsDir = WORKFLOWS_DIR, versionsFile = VERSIONS_FILE, readmeFile = README_FILE } = {}) {
   const files = existsSync(workflowsDir)
     ? readdirSync(workflowsDir).filter((f) => f.endsWith('.json')).sort()
     : [];
@@ -500,6 +637,10 @@ export function checkExports({ workflowsDir = WORKFLOWS_DIR } = {}) {
   for (const f of RETIRED_FILES) if (files.includes(f)) setViolations.push(`retired workflow file ${f} still present`);
   for (const f of files) if (!WORKFLOWS[f] && !RETIRED_FILES.includes(f)) setViolations.push(`unexpected workflow file ${f}`);
   checks.push({ rule: 'workflow_set', workflow: '(all)', ok: setViolations.length === 0, violations: setViolations });
+  const versionViolations = checkVersionsFile(versionsFile);
+  checks.push({ rule: 'node_versions_n8n', workflow: '(all)', ok: versionViolations.length === 0, violations: versionViolations });
+  const docViolations = checkReadme(readmeFile);
+  checks.push({ rule: 'publish_docs', workflow: '(all)', ok: docViolations.length === 0, violations: docViolations });
 
   for (const l of loaded) {
     for (const rule of RULES) {

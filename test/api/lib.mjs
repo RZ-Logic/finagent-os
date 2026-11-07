@@ -197,7 +197,8 @@ async function wf(sql, params) {
   const { rows } = await workflow().query(sql, params);
   return rows[0].r;
 }
-export const claim = (token, execId = `api-${randomUUID().slice(0, 18)}`) => wf('SELECT public.fao_run_claim($1, $2) AS r', [token, execId]);
+// Fix round 2 R08: the claim names the agent the calling workflow serves.
+export const claim = (token, execId = `api-${randomUUID().slice(0, 18)}`, agent = FLAGSHIP) => wf('SELECT public.fao_run_claim($1, $2, $3) AS r', [token, execId, agent]);
 export const append = (events) => wf('SELECT public.fao_ledger_append_batch($1::jsonb) AS r', [JSON.stringify(events)]);
 export const finalize = (corr) => wf('SELECT public.fao_run_finalize($1::uuid) AS r', [corr]);
 export const sweep = () => wf('SELECT public.fao_maintenance_sweep() AS r', []);

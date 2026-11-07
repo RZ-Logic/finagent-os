@@ -13,7 +13,8 @@
 --   4. Grant exactly the allow-list (build spec 2.12).
 --   5. Revoke CREATE on schema public from PUBLIC and every client role.
 --   6. Assert: no drift; every public.fao_* function is SECURITY DEFINER,
---      VOLATILE and pins search_path; every client RPC takes only text; every
+--      VOLATILE and pins search_path; every client RPC exists exactly once
+--      and takes one unnamed json argument with no default (IC-18); every
 --      fao_private function pins search_path. Any failure aborts the whole
 --      bundle (a drifted project fails instead of passing silently).
 --
@@ -138,18 +139,18 @@ AS $$
       ('table',    'public',      'fao_notifications',      'authenticated', 'SELECT'),
       ('table',    'public',      'fao_settings',           'authenticated', 'SELECT'),
       ('view',     'public',      'fao_run_summary',        'authenticated', 'SELECT'),
-      ('function', 'public',      'public.fao_run_start(text,text,text,text)',                         'anon',          'EXECUTE'),
-      ('function', 'public',      'public.fao_run_start(text,text,text,text)',                         'authenticated', 'EXECUTE'),
-      ('function', 'public',      'public.fao_hitl_decide(text,text,text)',                            'anon',          'EXECUTE'),
-      ('function', 'public',      'public.fao_hitl_decide(text,text,text)',                            'authenticated', 'EXECUTE'),
-      ('function', 'public',      'public.fao_whoami()',                                               'authenticated', 'EXECUTE'),
-      ('function', 'public',      'public.fao_hitl_get(text)',                                         'authenticated', 'EXECUTE'),
-      ('function', 'public',      'public.fao_ledger_correct(text,text)',                              'authenticated', 'EXECUTE'),
-      ('function', 'public',      'public.fao_admin_set_threshold(text,text,text,text,text,text,text,text,text)', 'authenticated', 'EXECUTE'),
-      ('function', 'public',      'public.fao_admin_set_agent(text,text,text,text,text)',              'authenticated', 'EXECUTE'),
-      ('function', 'public',      'public.fao_admin_set_role(text,text,text,text,text)',               'authenticated', 'EXECUTE'),
-      ('function', 'public',      'public.fao_admin_set_owner_active(text,text,text)',                 'authenticated', 'EXECUTE'),
-      ('function', 'public',      'public.fao_run_claim(text,text)',                                   'fao_workflow',  'EXECUTE'),
+      ('function', 'public',      'public.fao_run_start(json)',                                        'anon',          'EXECUTE'),
+      ('function', 'public',      'public.fao_run_start(json)',                                        'authenticated', 'EXECUTE'),
+      ('function', 'public',      'public.fao_hitl_decide(json)',                                      'anon',          'EXECUTE'),
+      ('function', 'public',      'public.fao_hitl_decide(json)',                                      'authenticated', 'EXECUTE'),
+      ('function', 'public',      'public.fao_whoami(json)',                                           'authenticated', 'EXECUTE'),
+      ('function', 'public',      'public.fao_hitl_get(json)',                                         'authenticated', 'EXECUTE'),
+      ('function', 'public',      'public.fao_ledger_correct(json)',                                   'authenticated', 'EXECUTE'),
+      ('function', 'public',      'public.fao_admin_set_threshold(json)',                              'authenticated', 'EXECUTE'),
+      ('function', 'public',      'public.fao_admin_set_agent(json)',                                  'authenticated', 'EXECUTE'),
+      ('function', 'public',      'public.fao_admin_set_role(json)',                                   'authenticated', 'EXECUTE'),
+      ('function', 'public',      'public.fao_admin_set_owner_active(json)',                           'authenticated', 'EXECUTE'),
+      ('function', 'public',      'public.fao_run_claim(text,text,text)',                              'fao_workflow',  'EXECUTE'),
       ('function', 'public',      'public.fao_ledger_append_batch(jsonb)',                             'fao_workflow',  'EXECUTE'),
       ('function', 'public',      'public.fao_run_finalize(uuid)',                                     'fao_workflow',  'EXECUTE'),
       ('function', 'public',      'public.fao_run_fail(text,text,text)',                               'fao_workflow',  'EXECUTE'),
@@ -317,22 +318,23 @@ GRANT SELECT ON TABLE public.fao_refusal_journal, public.fao_admin_audit,
 -- Summary view (security invoker: the caller's RLS applies).
 GRANT SELECT ON TABLE public.fao_run_summary TO authenticated;
 
--- Client RPCs. anon may call only the two that refuse it with NO_SESSION.
-GRANT EXECUTE ON FUNCTION public.fao_run_start(text, text, text, text) TO anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.fao_hitl_decide(text, text, text)     TO anon, authenticated;
+-- Client RPCs (one unnamed json body each, IC-18). anon may call only the
+-- two that refuse it with NO_SESSION.
+GRANT EXECUTE ON FUNCTION public.fao_run_start(json)   TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.fao_hitl_decide(json) TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION
-  public.fao_whoami(),
-  public.fao_hitl_get(text),
-  public.fao_ledger_correct(text, text),
-  public.fao_admin_set_threshold(text, text, text, text, text, text, text, text, text),
-  public.fao_admin_set_agent(text, text, text, text, text),
-  public.fao_admin_set_role(text, text, text, text, text),
-  public.fao_admin_set_owner_active(text, text, text)
+  public.fao_whoami(json),
+  public.fao_hitl_get(json),
+  public.fao_ledger_correct(json),
+  public.fao_admin_set_threshold(json),
+  public.fao_admin_set_agent(json),
+  public.fao_admin_set_role(json),
+  public.fao_admin_set_owner_active(json)
 TO authenticated;
 
 -- Workflow RPCs (n8n over the fao_workflow connection).
 GRANT EXECUTE ON FUNCTION
-  public.fao_run_claim(text, text),
+  public.fao_run_claim(text, text, text),
   public.fao_ledger_append_batch(jsonb),
   public.fao_run_finalize(uuid),
   public.fao_run_fail(text, text, text),
@@ -386,25 +388,34 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
+  -- IC-18: each client RPC exists exactly once in public (no overload, such
+  -- as a text signature left next to the json one, which PostgREST would
+  -- answer with 300 PGRST203) and takes exactly one argument, unnamed, of
+  -- type json, with no default (a default would let a GET reach it), no
+  -- OUT or VARIADIC argument.
   SELECT string_agg(x.name, ', ' ORDER BY x.name)
     INTO v_detail
     FROM unnest(ARRAY['fao_whoami', 'fao_run_start', 'fao_hitl_get', 'fao_hitl_decide', 'fao_ledger_correct',
                       'fao_admin_set_threshold', 'fao_admin_set_agent', 'fao_admin_set_role',
                       'fao_admin_set_owner_active']) AS x(name)
-   WHERE NOT EXISTS (
-           SELECT 1
-             FROM pg_catalog.pg_proc p
-             JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
-            WHERE n.nspname = 'public' AND p.proname = x.name)
+   WHERE (SELECT count(*)
+            FROM pg_catalog.pg_proc p
+            JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+           WHERE n.nspname = 'public' AND p.proname = x.name) <> 1
       OR EXISTS (
            SELECT 1
              FROM pg_catalog.pg_proc p
              JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
             WHERE n.nspname = 'public'
               AND p.proname = x.name
-              AND EXISTS (SELECT 1 FROM unnest(p.proargtypes::oid[]) t WHERE t <> 'pg_catalog.text'::regtype::oid));
+              AND NOT (p.pronargs = 1
+                       AND p.proargtypes[0] = 'pg_catalog.json'::pg_catalog.regtype::oid
+                       AND (p.proargnames IS NULL OR p.proargnames = ARRAY['']::text[])
+                       AND p.pronargdefaults = 0
+                       AND p.proallargtypes IS NULL
+                       AND p.provariadic = 0));
   IF v_detail IS NOT NULL THEN
-    RAISE EXCEPTION 'FAO-GOV-015 grants assertion failed: client RPC missing or with a non-text argument: %', v_detail
+    RAISE EXCEPTION 'FAO-GOV-015 grants assertion failed: client RPC missing, overloaded or not one unnamed json argument without a default: %', v_detail
       USING ERRCODE = '42501';
   END IF;
 

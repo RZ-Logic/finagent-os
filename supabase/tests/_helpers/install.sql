@@ -28,6 +28,10 @@
 -- or 'owner'.
 -- Run helpers: tests.set_clock, tests.make_run, tests.make_request,
 -- tests.journal_count and small builders for Writer-shaped events.
+-- IC-18: every client RPC takes one unnamed json body. The helpers build it
+-- with json_build_object under today's argument names (a NULL value becomes
+-- JSON null, the old explicit NULL); tests.rpc_body(who, rpc, body) sends a
+-- raw json body for the body rules of fao_private.client_args.
 -- ============================================================================
 
 CREATE EXTENSION IF NOT EXISTS pgtap WITH SCHEMA extensions;
@@ -330,10 +334,27 @@ DECLARE
   v_key text := coalesce(p_key, tests.new_key());  -- built as the owner, before the switch
 BEGIN
   PERFORM tests.as_user(p_email);
-  v := public.fao_run_start(p_agent_id, 'pgtap run', v_key, 'test');
+  v := public.fao_run_start(json_build_object('p_agent_id', p_agent_id, 'p_reason', 'pgtap run', 'p_idempotency_key', v_key, 'p_invoked_via', 'test'));
   PERFORM tests.as_owner();
   RETURN v;
 END;
+$$;
+
+-- Fix round 2 R08: fao_run_claim takes the agent the calling workflow serves.
+-- The helpers stand for that agent's own workflow, so they pass the agent of
+-- the run the token was issued for (looked up as the owner by the token hash;
+-- an unknown or malformed token gets the flagship agent). A test that needs
+-- another workflow's agent uses tests.claim_agent_raw.
+CREATE OR REPLACE FUNCTION tests.token_agent(p_token text)
+RETURNS text
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT coalesce(
+    (SELECT r.agent_id FROM fao_private.run_tokens t
+       JOIN public.run_invocations r ON r.correlation_id = t.correlation_id
+      WHERE t.token_hash = extensions.digest(p_token, 'sha256')),
+    'fao_reserve_recon_v1');
 $$;
 
 CREATE OR REPLACE FUNCTION tests.claim(p_token text, p_exec_id text DEFAULT NULL)
@@ -342,9 +363,10 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
   v jsonb;
+  v_agent text := tests.token_agent(p_token);  -- looked up as the owner, before the switch
 BEGIN
   PERFORM tests.as_role('fao_workflow');
-  v := public.fao_run_claim(p_token, coalesce(p_exec_id, 'pgtap-' || left(replace(gen_random_uuid()::text, '-', ''), 24)));
+  v := public.fao_run_claim(p_token, coalesce(p_exec_id, 'pgtap-' || left(replace(gen_random_uuid()::text, '-', ''), 24)), v_agent);
   PERFORM tests.as_owner();
   RETURN v;
 END;
@@ -387,7 +409,7 @@ DECLARE
   v jsonb;
 BEGIN
   PERFORM tests.as_user(p_email);
-  v := public.fao_hitl_decide(p_hitl_id::text, p_decision, p_notes);
+  v := public.fao_hitl_decide(json_build_object('p_hitl_id', p_hitl_id::text, 'p_decision', p_decision, 'p_notes', p_notes));
   PERFORM tests.as_owner();
   RETURN v;
 END;
@@ -475,7 +497,7 @@ DECLARE
 BEGIN
   BEGIN
     PERFORM tests.use(p_who);
-    v := public.fao_hitl_decide(p_hitl_id, p_decision, p_notes);
+    v := public.fao_hitl_decide(json_build_object('p_hitl_id', p_hitl_id, 'p_decision', p_decision, 'p_notes', p_notes));
     PERFORM tests.as_owner();
   EXCEPTION WHEN OTHERS THEN
     v := jsonb_build_object('error', SQLSTATE, 'message', SQLERRM);
@@ -494,7 +516,7 @@ DECLARE
 BEGIN
   BEGIN
     PERFORM tests.use(p_who);
-    v := public.fao_hitl_get(p_hitl_id);
+    v := public.fao_hitl_get(json_build_object('p_hitl_id', p_hitl_id));
     PERFORM tests.as_owner();
   EXCEPTION WHEN OTHERS THEN
     v := jsonb_build_object('error', SQLSTATE, 'message', SQLERRM);
@@ -513,7 +535,54 @@ DECLARE
 BEGIN
   BEGIN
     PERFORM tests.use(p_who);
-    v := public.fao_run_start(p_agent_id, p_reason, p_key, p_via);
+    v := public.fao_run_start(json_build_object('p_agent_id', p_agent_id, 'p_reason', p_reason, 'p_idempotency_key', p_key, 'p_invoked_via', p_via));
+    PERFORM tests.as_owner();
+  EXCEPTION WHEN OTHERS THEN
+    v := jsonb_build_object('error', SQLSTATE, 'message', SQLERRM);
+  END;
+  PERFORM tests.as_owner();
+  RETURN v;
+END;
+$$;
+
+-- IC-18 (FAO-GOV-008): a client RPC called with a raw JSON body, as PostgREST
+-- passes it. The body stays typed json all the way, so a '\u0000' escape, a
+-- repeated key or a non-object reaches fao_private.client_args exactly as
+-- written. Only the nine client RPCs are accepted; anything else raises.
+CREATE OR REPLACE FUNCTION tests.rpc_body(p_who text, p_rpc text, p_body json)
+RETURNS jsonb
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v jsonb;
+BEGIN
+  IF p_rpc IS NULL OR p_rpc NOT IN ('fao_whoami', 'fao_run_start', 'fao_hitl_get', 'fao_hitl_decide', 'fao_ledger_correct',
+                                    'fao_admin_set_threshold', 'fao_admin_set_agent', 'fao_admin_set_role',
+                                    'fao_admin_set_owner_active') THEN
+    RAISE EXCEPTION 'tests.rpc_body: % is not a client RPC', p_rpc;
+  END IF;
+  BEGIN
+    PERFORM tests.use(p_who);
+    EXECUTE format('SELECT public.%I($1)', p_rpc) INTO v USING p_body;
+    PERFORM tests.as_owner();
+  EXCEPTION WHEN OTHERS THEN
+    v := jsonb_build_object('error', SQLSTATE, 'message', SQLERRM);
+  END;
+  PERFORM tests.as_owner();
+  RETURN v;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION tests.claim_agent_raw(p_token text, p_exec_id text, p_agent_id text)
+RETURNS jsonb
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v jsonb;
+BEGIN
+  BEGIN
+    PERFORM tests.as_role('fao_workflow');
+    v := public.fao_run_claim(p_token, p_exec_id, p_agent_id);
     PERFORM tests.as_owner();
   EXCEPTION WHEN OTHERS THEN
     v := jsonb_build_object('error', SQLSTATE, 'message', SQLERRM);
@@ -525,21 +594,9 @@ $$;
 
 CREATE OR REPLACE FUNCTION tests.claim_raw(p_token text, p_exec_id text)
 RETURNS jsonb
-LANGUAGE plpgsql
+LANGUAGE sql
 AS $$
-DECLARE
-  v jsonb;
-BEGIN
-  BEGIN
-    PERFORM tests.as_role('fao_workflow');
-    v := public.fao_run_claim(p_token, p_exec_id);
-    PERFORM tests.as_owner();
-  EXCEPTION WHEN OTHERS THEN
-    v := jsonb_build_object('error', SQLSTATE, 'message', SQLERRM);
-  END;
-  PERFORM tests.as_owner();
-  RETURN v;
-END;
+  SELECT tests.claim_agent_raw(p_token, p_exec_id, tests.token_agent(p_token));
 $$;
 
 -- Owner-side helper: the newest journal row.

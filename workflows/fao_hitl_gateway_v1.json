@@ -100,7 +100,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// ============================================================================\n// FAO HITL Notifier - Compose Slack Message\n// ----------------------------------------------------------------------------\n// FAO-GOV-004 / FAO-GOV-007: builds the Slack chat.postMessage request from\n// the fao_notification_context result only.\n//   - One link: r.approval_url, the approval page for this request. The page\n//     signs the approver in and records the decision through fao_hitl_decide\n//     with the approver's own session; the link carries no identity and no\n//     decision.\n//   - REQUESTED names the eligible approvers from r.approver_candidates (the\n//     database excludes the invoker). ESCALATED names r.target_name.\n//   - Every dynamic value passes slackEscape() so stored text cannot form\n//     Slack markup, mentions or extra links.\n//   - The API URL is r.slack_api_base_url + '/chat.postMessage', so the same\n//     export posts to Slack live and to a local mock in tests.\n// ============================================================================\n\nconst r = (($input.first() || {}).json || {}).r;\nif (!r || typeof r !== 'object' || r.ok !== true || r.send !== true) {\n  throw new Error('FAO-GOV-007 notifier: notification context is not sendable');\n}\n\nfunction slackEscape(value) {\n  if (value === null || value === undefined) return '';\n  return String(value)\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;');\n}\n\nconst HTTP_URL = /^https?:\\/\\/[^\\s<>|]+$/;\nif (typeof r.approval_url !== 'string' || !HTTP_URL.test(r.approval_url)) {\n  throw new Error('FAO-GOV-007 notifier: approval_url invalid');\n}\nif (typeof r.slack_api_base_url !== 'string' || !HTTP_URL.test(r.slack_api_base_url)) {\n  throw new Error('FAO-GOV-007 notifier: slack_api_base_url invalid');\n}\nif (typeof r.slack_channel_id !== 'string' || r.slack_channel_id === '') {\n  throw new Error('FAO-GOV-007 notifier: slack_channel_id invalid');\n}\nif (r.kind !== 'REQUESTED' && r.kind !== 'ESCALATED') {\n  throw new Error('FAO-GOV-007 notifier: kind invalid');\n}\n\nconst kind = r.kind;\nconst level = r.level;\nconst hitl_id = r.hitl_id;\n\n// Escalated assets: objects {asset, policy_outcome, policy_sub_tier,\n// band_status} from the rollup, or plain symbols.\nconst assets = Array.isArray(r.escalated_assets) ? r.escalated_assets : [];\nconst asset_text = assets.length === 0\n  ? '(none listed)'\n  : assets.map(a => {\n      if (a !== null && typeof a === 'object') {\n        const parts = [a.policy_outcome, a.policy_sub_tier]\n          .filter(p => p !== null && p !== undefined && p !== '');\n        return slackEscape(a.asset) + (parts.length ? ' (' + parts.map(slackEscape).join('/') + ')' : '');\n      }\n      return slackEscape(a);\n    }).join(', ');\n\nconst candidates = Array.isArray(r.approver_candidates) ? r.approver_candidates : [];\nconst candidate_text = candidates.length === 0\n  ? '(no eligible approver found)'\n  : candidates.map(c => slackEscape(c && typeof c === 'object' ? c.name : c)).join(', ');\n\nconst agent_label = slackEscape(r.agent_name || r.agent_id);\nconst header = kind === 'ESCALATED'\n  ? `*Escalation: approval request ${slackEscape(hitl_id)} for ${agent_label} needs attention*`\n  : `*Approval required: request ${slackEscape(hitl_id)} for ${agent_label}*`;\n\nconst lines = [\n  header,\n  '',\n  `*Agent:* ${slackEscape(r.agent_id)}`,\n  `*Risk tier:* ${slackEscape(r.risk_tier)}`,\n  `*Review sub-tier:* ${slackEscape(r.sub_tier)}`,\n  `*Decide by:* ${slackEscape(r.timeout_at)}`,\n  `*Escalated assets:* ${asset_text}`\n];\n\nif (kind === 'ESCALATED') {\n  lines.push(`*Escalation target:* ${slackEscape(r.target_name)}`);\n} else {\n  lines.push(`*Eligible approvers:* ${candidate_text}`);\n}\n\nlines.push(\n  '',\n  `<${slackEscape(r.approval_url)}|Open the approval page>`,\n  '',\n  '_Sign in on the approval page to approve or reject. The person who started the run cannot decide it._'\n);\n\nconst text = lines.join('\\n');\nconst url = r.slack_api_base_url.replace(/\\/+$/, '') + '/chat.postMessage';\n\nreturn [{\n  json: {\n    hitl_id,\n    kind,\n    level,\n    url,\n    body: { channel: r.slack_channel_id, text, mrkdwn: true }\n  }\n}];"
+        "jsCode": "// ============================================================================\n// FAO HITL Notifier - Compose Slack Message\n// ----------------------------------------------------------------------------\n// FAO-GOV-004 / FAO-GOV-007: builds the Slack chat.postMessage request from\n// the fao_notification_context result only.\n//   - One link: r.approval_url, the approval page for this request. The page\n//     signs the approver in and records the decision through fao_hitl_decide\n//     with the approver's own session; the link carries no identity and no\n//     decision.\n//   - REQUESTED names the eligible approvers from r.approver_candidates (the\n//     database excludes the invoker). ESCALATED names r.target_name, or says\n//     \"none eligible (operator alerted)\" when the database found no target\n//     (IC-13: the sweep raises FAO-GOV-008 for the operator then).\n//   - ESCALATED after the deadline (a TIMEOUT escalation: the sweep has\n//     already expired the request and closed the run) says the request\n//     expired without a decision and asks for no decision; fao_hitl_decide\n//     refuses one with EXPIRED. The deadline is compared with this host's\n//     clock, which matches the database clock outside local tests.\n//   - Every dynamic value passes slackEscape() so stored text cannot form\n//     Slack markup, mentions or extra links.\n//   - The API URL is r.slack_api_base_url + '/chat.postMessage', so the same\n//     export posts to Slack live and to a local mock in tests.\n//   - FAO-GOV-007: an unusable Slack or approval-page setting does not throw.\n//     The node emits {compose_ok: false, compose_error}; Compose OK? sends it\n//     straight to Classify Slack Result, and Record Notification stores a\n//     FAILED attempt, so the sweep's notify_max_attempts count and the\n//     NOTIFICATION_FAILED escalation see it like a Slack failure.\n// ============================================================================\n\nconst r = (($input.first() || {}).json || {}).r;\nif (!r || typeof r !== 'object' || r.ok !== true || r.send !== true) {\n  throw new Error('FAO-GOV-007 notifier: notification context is not sendable');\n}\nif (r.kind !== 'REQUESTED' && r.kind !== 'ESCALATED') {\n  throw new Error('FAO-GOV-007 notifier: kind invalid');\n}\n\nconst kind = r.kind;\nconst level = r.level;\nconst hitl_id = r.hitl_id;\n\nfunction slackEscape(value) {\n  if (value === null || value === undefined) return '';\n  return String(value)\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;');\n}\n\n// Settings problems become a recorded FAILED attempt, not a thrown error.\nconst HTTP_URL = /^https?:\\/\\/[^\\s<>|]+$/;\nconst setting_problems = [];\nif (typeof r.approval_url !== 'string' || !HTTP_URL.test(r.approval_url)) {\n  setting_problems.push('approval_url invalid');\n}\nif (typeof r.slack_api_base_url !== 'string' || !HTTP_URL.test(r.slack_api_base_url)) {\n  setting_problems.push('slack_api_base_url invalid');\n}\nif (typeof r.slack_channel_id !== 'string' || r.slack_channel_id === '') {\n  setting_problems.push('slack_channel_id invalid');\n}\nif (setting_problems.length > 0) {\n  return [{\n    json: {\n      hitl_id,\n      kind,\n      level,\n      compose_ok: false,\n      compose_error: `FAO-GOV-007 notifier: ${setting_problems.join('; ')}`\n    }\n  }];\n}\n\n// Escalated assets: objects {asset, policy_outcome, policy_sub_tier,\n// band_status} from the rollup, or plain symbols.\nconst assets = Array.isArray(r.escalated_assets) ? r.escalated_assets : [];\nconst asset_text = assets.length === 0\n  ? '(none listed)'\n  : assets.map(a => {\n      if (a !== null && typeof a === 'object') {\n        const parts = [a.policy_outcome, a.policy_sub_tier]\n          .filter(p => p !== null && p !== undefined && p !== '');\n        return slackEscape(a.asset) + (parts.length ? ' (' + parts.map(slackEscape).join('/') + ')' : '');\n      }\n      return slackEscape(a);\n    }).join(', ');\n\nconst candidates = Array.isArray(r.approver_candidates) ? r.approver_candidates : [];\nconst candidate_text = candidates.length === 0\n  ? '(no eligible approver found)'\n  : candidates.map(c => slackEscape(c && typeof c === 'object' ? c.name : c)).join(', ');\n\nconst target_text = (typeof r.target_name === 'string' && r.target_name.trim() !== '')\n  ? slackEscape(r.target_name)\n  : 'none eligible (operator alerted)';\n\nconst deadline_ms = Date.parse(r.timeout_at);\nconst expired = kind === 'ESCALATED' && Number.isFinite(deadline_ms) && deadline_ms <= Date.now();\n\nconst agent_label = slackEscape(r.agent_name || r.agent_id);\nlet header;\nif (kind === 'REQUESTED') {\n  header = `*Approval required: request ${slackEscape(hitl_id)} for ${agent_label}*`;\n} else if (expired) {\n  header = `*Escalation: approval request ${slackEscape(hitl_id)} for ${agent_label} expired without a decision*`;\n} else {\n  header = `*Escalation: approval request ${slackEscape(hitl_id)} for ${agent_label} needs attention*`;\n}\n\nconst lines = [\n  header,\n  '',\n  `*Agent:* ${slackEscape(r.agent_id)}`,\n  `*Risk tier:* ${slackEscape(r.risk_tier)}`,\n  `*Review sub-tier:* ${slackEscape(r.sub_tier)}`,\n  expired ? `*Deadline passed:* ${slackEscape(r.timeout_at)}` : `*Decide by:* ${slackEscape(r.timeout_at)}`,\n  `*Escalated assets:* ${asset_text}`\n];\n\nif (kind === 'ESCALATED') {\n  lines.push(`*Escalation target:* ${target_text}`);\n} else {\n  lines.push(`*Eligible approvers:* ${candidate_text}`);\n}\n\nif (expired) {\n  lines.push(\n    '',\n    `<${slackEscape(r.approval_url)}|View the expired request>`,\n    '',\n    '_No decision can be recorded now: the request expired unanswered and the run was closed with status FAILURE. Please review why it was not decided in time._'\n  );\n} else {\n  lines.push(\n    '',\n    `<${slackEscape(r.approval_url)}|Open the approval page>`,\n    '',\n    '_Sign in on the approval page to approve or reject. The person who started the run cannot decide it._'\n  );\n}\n\nconst text = lines.join('\\n');\nconst url = r.slack_api_base_url.replace(/\\/+$/, '') + '/chat.postMessage';\n\nreturn [{\n  json: {\n    hitl_id,\n    kind,\n    level,\n    compose_ok: true,\n    url,\n    body: { channel: r.slack_channel_id, text, mrkdwn: true }\n  }\n}];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -110,6 +110,40 @@
       ],
       "id": "3eafd0e1-4658-4540-93bd-8929d9cb5b35",
       "name": "Compose Slack Message"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "7c1d2f0e-5b8a-5e64-9a3f-2d4b6c8e0a11",
+              "leftValue": "={{ $json.compose_ok === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1100,
+        640
+      ],
+      "id": "9b2e4c61-3f7a-5d08-8c15-6e0a2b4d7f93",
+      "name": "Compose OK?"
     },
     {
       "parameters": {
@@ -133,7 +167,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1100,
+        1320,
         640
       ],
       "id": "b9915f98-58c8-5c95-8534-25577bf261d7",
@@ -149,12 +183,12 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// ============================================================================\n// FAO HITL Notifier - Classify Slack Result\n// ----------------------------------------------------------------------------\n// FAO-GOV-007: both outputs of Slack: Post Message (success and error) feed\n// this node. The attempt counts as SENT only when Slack answered HTTP 200\n// with body.ok === true; anything else (HTTP error, timeout, ok:false) is\n// FAILED, recorded by Record Notification, and retried by the sweep.\n// The ids come from Validate Payload, never from the HTTP response.\n// ============================================================================\n\nconst ids = $('Validate Payload').first().json;\nconst res = (($input.first() || {}).json) || {};\n\nconst clean = (s) => String(s).replace(/[\\u0000-\\u001f\\u007f]/g, ' ').slice(0, 300);\n\nlet outcome = 'FAILED';\nlet external_ref = null;\nlet error = null;\n\nif (res.error !== undefined && res.error !== null && res.statusCode === undefined) {\n  // Error output of the HTTP Request node (network error, timeout, 4xx, 5xx).\n  const e = res.error;\n  let msg;\n  if (typeof e === 'string') msg = e;\n  else if (e && typeof e === 'object') msg = e.message || e.description || e.code || 'request failed';\n  else msg = 'request failed';\n  const code = e && typeof e === 'object' ? (e.httpCode || e.status || e.statusCode) : undefined;\n  error = code !== undefined ? `http error ${code}: ${msg}` : `http error: ${msg}`;\n} else if (res.statusCode !== undefined || res.body !== undefined) {\n  let body = res.body;\n  if (typeof body === 'string') {\n    try { body = JSON.parse(body); } catch (err) { body = null; }\n  }\n  const status = res.statusCode;\n  if (status === 200 && body !== null && typeof body === 'object' && body.ok === true) {\n    outcome = 'SENT';\n    external_ref = typeof body.ts === 'string' ? body.ts : null;\n  } else {\n    const slack_error = body !== null && typeof body === 'object' && typeof body.error === 'string'\n      ? body.error : 'not ok';\n    error = `slack status ${status}: ${slack_error}`;\n  }\n} else {\n  error = 'no response from Slack';\n}\n\nreturn [{\n  json: {\n    hitl_id: ids.hitl_id,\n    kind: ids.kind,\n    level: ids.level,\n    outcome,\n    external_ref: external_ref === null ? null : clean(external_ref).slice(0, 200),\n    error: error === null ? null : clean(error)\n  }\n}];"
+        "jsCode": "// ============================================================================\n// FAO HITL Notifier - Classify Slack Result\n// ----------------------------------------------------------------------------\n// FAO-GOV-007: both outputs of Slack: Post Message (success and error) and\n// the false branch of Compose OK? feed this node. The attempt counts as SENT\n// only when Slack answered HTTP 200 with body.ok === true; anything else\n// (unusable setting, HTTP error, timeout, ok:false) is FAILED, recorded by\n// Record Notification, and retried by the sweep.\n// The HTTP status of an error item is read from error.httpCode, status or\n// statusCode, then from error.cause (n8n 2.x puts \"500 - <body>\" in\n// cause.message and Slack's error code in description).\n// The ids come from Validate Payload, never from the HTTP response.\n// ============================================================================\n\nconst ids = $('Validate Payload').first().json;\nconst res = (($input.first() || {}).json) || {};\n\nconst clean = (s) => String(s).replace(/[\\u0000-\\u001f\\u007f]/g, ' ').slice(0, 300);\n\nconst STATUS = /^\\s*(\\d{3})\\b/;\nfunction statusOf(e) {\n  if (!e || typeof e !== 'object') return undefined;\n  const sources = [e, e.cause && typeof e.cause === 'object' ? e.cause : null];\n  for (const s of sources) {\n    if (!s) continue;\n    for (const k of ['httpCode', 'status', 'statusCode']) {\n      const v = s[k];\n      if ((typeof v === 'number' && Number.isInteger(v)) || (typeof v === 'string' && /^\\d{3}$/.test(v))) return String(v);\n    }\n  }\n  for (const s of sources) {\n    if (s && typeof s.message === 'string') {\n      const m = STATUS.exec(s.message);\n      if (m) return m[1];\n    }\n  }\n  return undefined;\n}\n\n// Slack's own error code from a \"500 - <body>\" message, where the body may be\n// JSON or a JSON-encoded string of JSON.\nfunction slackErrorIn(text) {\n  if (typeof text !== 'string') return null;\n  const i = text.indexOf(' - ');\n  if (i < 0) return null;\n  let body = text.slice(i + 3);\n  for (let n = 0; n < 2 && typeof body === 'string'; n += 1) {\n    try { body = JSON.parse(body); } catch (err) { return null; }\n  }\n  return body && typeof body === 'object' && typeof body.error === 'string' ? body.error : null;\n}\n\nlet outcome = 'FAILED';\nlet external_ref = null;\nlet error = null;\n\nif (res.compose_ok === false) {\n  // Compose OK? false branch: a setting made the message unsendable.\n  error = `compose error: ${typeof res.compose_error === 'string' ? res.compose_error : 'unknown'}`;\n} else if (res.error !== undefined && res.error !== null && res.statusCode === undefined) {\n  // Error output of the HTTP Request node (network error, timeout, 4xx, 5xx).\n  const e = res.error;\n  let msg;\n  if (typeof e === 'string') msg = e;\n  else if (e && typeof e === 'object') msg = e.message || e.description || e.code || 'request failed';\n  else msg = 'request failed';\n  let detail = null;\n  if (e && typeof e === 'object') {\n    if (typeof e.description === 'string' && e.description !== '' && e.description !== msg) detail = e.description;\n    else detail = slackErrorIn(e.cause && typeof e.cause === 'object' ? e.cause.message : null) || slackErrorIn(e.message);\n  }\n  const code = statusOf(e);\n  error = (code !== undefined ? `http error ${code}: ${msg}` : `http error: ${msg}`) + (detail ? ` (${detail})` : '');\n} else if (res.statusCode !== undefined || res.body !== undefined) {\n  let body = res.body;\n  if (typeof body === 'string') {\n    try { body = JSON.parse(body); } catch (err) { body = null; }\n  }\n  const status = res.statusCode;\n  if (status === 200 && body !== null && typeof body === 'object' && body.ok === true) {\n    outcome = 'SENT';\n    external_ref = typeof body.ts === 'string' ? body.ts : null;\n  } else {\n    const slack_error = body !== null && typeof body === 'object' && typeof body.error === 'string'\n      ? body.error : 'not ok';\n    error = `slack status ${status}: ${slack_error}`;\n  }\n} else {\n  error = 'no response from Slack';\n}\n\nreturn [{\n  json: {\n    hitl_id: ids.hitl_id,\n    kind: ids.kind,\n    level: ids.level,\n    outcome,\n    external_ref: external_ref === null ? null : clean(external_ref).slice(0, 200),\n    error: error === null ? null : clean(error)\n  }\n}];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1320,
+        1540,
         640
       ],
       "id": "4d6f73fb-1170-5a8d-92a8-3c87c08e759d",
@@ -171,7 +205,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.6,
       "position": [
-        1540,
+        1760,
         640
       ],
       "id": "7693d993-3199-5aff-963c-0fb294faa209",
@@ -185,7 +219,7 @@
     },
     {
       "parameters": {
-        "content": "## FAO HITL Notifier (fao_hitl_gateway_v1)\n\n**Controls:** FAO-GOV-004 (approvers named from roles, never the invoker), FAO-GOV-007 (notification attempts recorded)\n\nThe request already exists when this workflow runs: `fao_run_finalize` created it and wrote HITL_REQUESTED. This workflow only notifies.\n\n### Input\n\nExactly `{hitl_id, kind, level}`: REQUESTED with level 0 (from the flagship and the sweeper's re-notify list) or ESCALATED with level 1 (from the sweeper). Nothing else is read.\n\n### Flow\n\n1. **Validate Payload**: shape of the three fields\n2. **Get Notification Context** (`fao_notification_context`): request facts, the approval link, eligible approvers or the escalation target, Slack settings; `send:false` when the request is no longer pending or was already sent\n3. **Compose Slack Message**: one link (the approval page), every dynamic value escaped\n4. **Slack: Post Message**: HTTP chat.postMessage with the `FAO Slack Bot` credential; errors go to the error output\n5. **Classify Slack Result**: SENT only for HTTP 200 with `ok: true`\n6. **Record Notification** (`fao_notification_record`): notification row plus NOTIFICATION_SENT or NOTIFICATION_FAILED in the ledger\n\nA FAILED attempt is retried by the sweeper up to `notify_max_attempts`, then escalated.",
+        "content": "## FAO HITL Notifier (fao_hitl_gateway_v1)\n\n**Controls:** FAO-GOV-004 (approvers named from roles, never the invoker), FAO-GOV-007 (notification attempts recorded)\n\nThe request already exists when this workflow runs: `fao_run_finalize` created it and wrote HITL_REQUESTED. This workflow only notifies.\n\n### Input\n\nExactly `{hitl_id, kind, level}`: REQUESTED with level 0 (from the flagship and the sweeper's re-notify list) or ESCALATED with level 1 (from the sweeper). Nothing else is read.\n\n### Flow\n\n1. **Validate Payload**: shape of the three fields\n2. **Get Notification Context** (`fao_notification_context`): request facts, the approval link, eligible approvers or the escalation target, Slack settings; `send:false` when the request is no longer pending or was already sent\n3. **Compose Slack Message**: one link (the approval page), every dynamic value escaped; an expired escalation asks for no decision; an unusable Slack or approval-page setting gives `compose_ok: false` instead of an error\n4. **Compose OK?**: false goes straight to Classify Slack Result, so the bad setting is recorded as a FAILED attempt\n5. **Slack: Post Message**: HTTP chat.postMessage with the `FAO Slack Bot` credential; errors go to the error output\n6. **Classify Slack Result**: SENT only for HTTP 200 with `ok: true`; the HTTP status and Slack error code are kept in the error text\n7. **Record Notification** (`fao_notification_record`): notification row plus NOTIFICATION_SENT or NOTIFICATION_FAILED in the ledger\n\nA FAILED attempt is retried by the sweeper up to `notify_max_attempts`, then escalated.\n\n**Publish (n8n 2.x):** step 2 of 5 (Writer, notifier, error handler, sweeper, flagship). Publish before the sweeper and the flagship: production executions run only the published version of a sub-workflow.",
         "height": 600,
         "width": 620,
         "color": 4
@@ -257,7 +291,25 @@
       "main": [
         [
           {
+            "node": "Compose OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose OK?": {
+      "main": [
+        [
+          {
             "node": "Slack: Post Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Classify Slack Result",
             "type": "main",
             "index": 0
           }

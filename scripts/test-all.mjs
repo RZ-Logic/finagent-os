@@ -25,12 +25,15 @@
 //   --layer <name>  run only the named layers (repeatable)
 //
 // A layer passes only when its process exits 0, at least one test ran, and
-// nothing was skipped or marked todo. A layer that cannot start is ERROR.
+// nothing was skipped or marked todo. For pgtap, any pgTAP skip() or todo()
+// call in the SQL it runs also counts (R23), since pg_prove's non-verbose
+// output reports those tests as passed. A layer that cannot start is ERROR.
+// CI runs its static, mcp, db and e2e jobs through this command (R25).
 // Exit code 0 only when every selected layer passes.
 // ============================================================================
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -130,8 +133,12 @@ export function parsePgProve(text) {
     if (n > 0) counted += n;
     else if (/Parse errors|Non-zero exit status/.test(b)) broken += 1;
   }
-  const skipM = text.match(/# SKIP|skipped:/gi);
-  const todoM = text.match(/# TODO/gi);
+  // R23: `supabase test db` runs pg_prove without --verbose, so a per-test
+  // skip prints nothing and a failing todo prints "# Failed (TODO) test N".
+  // Both are matched here when they do appear; pgtapSkipCalls() below is the
+  // guard that does not depend on the console output.
+  const skipM = text.match(/# SKIP|skipped:|^ok \d+ # skip/gim);
+  const todoM = text.match(/# TODO|# Failed \(TODO\)|^(?:not )?ok \d+ # TODO/gim);
   if (result[1] === 'FAIL' && counted + broken === 0) broken = 1;
   return {
     found: true,
@@ -141,6 +148,47 @@ export function parsePgProve(text) {
     todo: todoM ? todoM.length : 0,
     result: result[1],
   };
+}
+
+// R23 (FAO-GOV-001 to FAO-GOV-015 control evidence): pgTAP skip(), todo(),
+// todo_start(), todo_end() and in_todo() calls in the SQL the pgtap layer
+// runs (the staged tests and the source tests, helpers included). pg_prove's
+// non-verbose output reports such tests as passed, so each call found counts
+// as a skip or todo and fails the layer. Comments and string literals are
+// not exempt (fail closed): a comment that spells such a call fails too.
+export function pgtapSkipCalls(sql) {
+  const calls = { skip: 0, todo: 0 };
+  const re = /\b(skip|todo|todo_start|todo_end|in_todo)\s*\(/gi;
+  let m;
+  while ((m = re.exec(sql)) !== null) {
+    if (m[1].toLowerCase() === 'skip') calls.skip += 1;
+    else calls.todo += 1;
+  }
+  return calls;
+}
+function sqlFiles(dir) {
+  if (!existsSync(dir)) return [];
+  const out = [];
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) out.push(...sqlFiles(p));
+    else if (e.isFile() && e.name.endsWith('.sql')) out.push(p);
+  }
+  return out;
+}
+export function scanPgtapSkips(dirs) {
+  const total = { skip: 0, todo: 0, files: [] };
+  for (const d of dirs) {
+    for (const f of sqlFiles(d)) {
+      const c = pgtapSkipCalls(readFileSync(f, 'utf8'));
+      if (c.skip + c.todo > 0) {
+        total.skip += c.skip;
+        total.todo += c.todo;
+        total.files.push(f.replace(`${ROOT}`, '.'));
+      }
+    }
+  }
+  return total;
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +317,7 @@ function layerCommand(name, python) {
   }
 }
 
-function judge(name, proc, counts) {
+export function judge(name, proc, counts) {
   if (!counts.found) return { result: 'ERROR', note: 'no test summary in the output' };
   const ran = counts.passed + counts.failed;
   if (proc.status !== 0) return { result: 'FAIL', note: `exit code ${proc.status}` };
@@ -305,6 +353,11 @@ function runLayer(name, python) {
     counts = existsSync(xmlPath) ? parseJunit(readFileSync(xmlPath, 'utf8')) : { found: false };
   } else if (name === 'pgtap') {
     counts = parsePgProve(proc.out);
+    const calls = scanPgtapSkips([join(ROOT, WORKDIR_REL, 'supabase', 'tests'), join(ROOT, 'supabase', 'tests')]);
+    if (calls.skip + calls.todo > 0) {
+      counts = { ...counts, skipped: (counts.skipped || 0) + calls.skip, todo: (counts.todo || 0) + calls.todo };
+      writeFileSync(logPath, `pgTAP skip or todo calls (R23) in: ${calls.files.join(', ')}\n`, { flag: 'a' });
+    }
   } else {
     counts = parseTap(proc.out);
   }

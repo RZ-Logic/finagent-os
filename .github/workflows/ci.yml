@@ -35,7 +35,7 @@ defaults:
 jobs:
   static:
     name: static (exports and Node unit tests)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Guard, local URLs only
@@ -58,15 +58,26 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
-          node-version: "22"
+          node-version: "22.23.4"
           cache: npm
       - run: npm ci
-      - run: npm run check:exports
-      - run: npm run test:node
+      # R25: exports and Node unit tests run through test-all.mjs, so the
+      # strict pass rule (exit 0, at least one test, nothing skipped or todo)
+      # applies in CI as it does to npm test.
+      - name: Exports check and Node unit tests
+        run: node scripts/test-all.mjs --layer exports --layer node
+      - name: Upload reports
+        if: failure()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: static-reports
+          path: .local/reports/
+          if-no-files-found: ignore
+          retention-days: 7
 
   mcp:
     name: mcp (pytest, offline)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Guard, local URLs only
@@ -89,13 +100,36 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
-          python-version: "3.12"
-      - run: python -m pip install -r mcp/requirements.txt -r mcp/requirements-dev.txt
-      - run: npm run test:py
+          python-version: "3.12.16"
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "22.23.4"
+      # R29: the whole dependency tree is installed from a hashed lock
+      # resolved for Python 3.12 on Linux from mcp/requirements.txt and
+      # mcp/requirements-dev.txt (command in its header; test/node/test-all.test.mjs
+      # checks the direct pins agree), so a green run names its toolchain.
+      - name: Install locked MCP dependencies
+        run: |
+          python -m pip install --require-hashes --no-deps -r test/env/mcp-py312-linux.lock.txt
+          python -m pip check
+          python --version
+          python -m pip freeze
+      # R25: pytest runs through test-all.mjs (junit counts; skipped and xfail
+      # fail the layer).
+      - name: MCP tests
+        run: node scripts/test-all.mjs --layer pytest
+      - name: Upload reports
+        if: failure()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: mcp-reports
+          path: .local/reports/
+          if-no-files-found: ignore
+          retention-days: 7
 
   db:
     name: db (pgTAP and API tests on local Supabase)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Guard, local URLs only
@@ -118,7 +152,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
-          node-version: "22"
+          node-version: "22.23.4"
           cache: npm
       - run: npm ci
       - run: npm run stage
@@ -143,7 +177,7 @@ jobs:
 
   e2e:
     name: e2e (real n8n executions on local Supabase)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Guard, local URLs only
@@ -166,7 +200,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
-          node-version: "22"
+          node-version: "22.23.4"
           cache: npm
       - run: npm ci
       - run: npm run stage

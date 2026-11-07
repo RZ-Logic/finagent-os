@@ -2,7 +2,8 @@
 -- FinAgent OS: Migration 0016: admin RPCs, ledger corrections and the run
 -- summary view
 -- ============================================================================
--- Client RPCs for the global admin role (PostgREST, every parameter text):
+-- Client RPCs for the global admin role (PostgREST, one unnamed json body
+-- whose keys are the old argument names, every key required, IC-18):
 --   fao_admin_set_threshold()     upsert one materiality threshold
 --   fao_admin_set_agent()         registry status, AI flag, run rate limit
 --   fao_admin_set_role()          grant or revoke an application role
@@ -25,13 +26,20 @@
 --   FAO-REC-002  threshold changes validated (finite, positive, floor <=
 --                lower <= upper)
 --
--- Pattern for every admin RPC: session (NO_SESSION); every input including
--- the reason (INVALID_INPUT); global admin role (NOT_AUTHORISED); then the
+-- Pattern for every admin RPC: fao_private.client_args with every key
+-- required (it never raises); session (NO_SESSION); the body result and
+-- every input including the reason (INVALID_INPUT); global admin role
+-- (NOT_AUTHORISED); then the
 -- change reason is set to "<function> by <admin uuid>: <reason>" for the
 -- transaction, so the audit trigger records actor and reason. The data
 -- change runs in an inner block that maps check, numeric range and foreign
 -- key violations to INVALID_INPUT (a refusal, so journaled). No database
--- error text reaches a caller.
+-- error text reaches a caller. The body is decoded inside the function, so
+-- a \u0000 escape or a form-encoded %00 cannot cut a reason or notes value
+-- before text_ok sees it (R11): a JSON \u0000 is refused by client_args,
+-- and GET, form-encoded and text/plain calls cannot reach these functions.
+-- attempted holds the decoded values plus invalid_body when the body was
+-- refused.
 --
 -- Replaces: nothing (direct owner edits keep working through the SQL recipe
 -- with a change reason; they are audited the same way).
@@ -53,17 +61,10 @@
 -- sign, digits, optional fraction and exponent, at most 40 characters), so
 -- NaN and the infinities are refused before any cast. last_reviewed_by is
 -- the admin from the session.
-CREATE FUNCTION public.fao_admin_set_threshold(
-  p_asset_symbol     text,
-  p_scope            text,
-  p_asset_class      text,
-  p_materiality_usd  text,
-  p_ratio_floor      text,
-  p_ratio_band_lower text,
-  p_ratio_band_upper text,
-  p_notes            text,
-  p_reason           text
-)
+-- Body {p_asset_symbol, p_scope, p_asset_class, p_materiality_usd,
+-- p_ratio_floor, p_ratio_band_lower, p_ratio_band_upper, p_notes, p_reason},
+-- every key required; p_notes null means no notes.
+CREATE FUNCTION public.fao_admin_set_threshold(json)
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -72,6 +73,19 @@ AS $$
 DECLARE
   c_entry   constant text := 'rpc:fao_admin_set_threshold';
   c_num     constant text := '^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]{1,3})?$';
+  v_in      jsonb := fao_private.client_args($1, ARRAY['p_asset_symbol', 'p_scope', 'p_asset_class',
+                       'p_materiality_usd', 'p_ratio_floor', 'p_ratio_band_lower', 'p_ratio_band_upper',
+                       'p_notes', 'p_reason']);
+  -- Decoded body fields under the old argument names.
+  p_asset_symbol     text := v_in->'args'->>'p_asset_symbol';
+  p_scope            text := v_in->'args'->>'p_scope';
+  p_asset_class      text := v_in->'args'->>'p_asset_class';
+  p_materiality_usd  text := v_in->'args'->>'p_materiality_usd';
+  p_ratio_floor      text := v_in->'args'->>'p_ratio_floor';
+  p_ratio_band_lower text := v_in->'args'->>'p_ratio_band_lower';
+  p_ratio_band_upper text := v_in->'args'->>'p_ratio_band_upper';
+  p_notes            text := v_in->'args'->>'p_notes';
+  p_reason           text := v_in->'args'->>'p_reason';
   v_uid     uuid;
   v_key     text;
   v_attempt jsonb;
@@ -94,7 +108,7 @@ BEGIN
     'ratio_band_lower', left(p_ratio_band_lower, 200),
     'ratio_band_upper', left(p_ratio_band_upper, 200),
     'notes',            left(p_notes, 200),
-    'reason',           left(p_reason, 200));
+    'reason',           left(p_reason, 200)) || (v_in->'note');
 
   -- Session
   BEGIN
@@ -106,8 +120,9 @@ BEGIN
     RETURN fao_private.refuse(c_entry, 'materiality_thresholds', v_key, v_attempt, 'NO_SESSION');
   END IF;
 
-  -- Inputs
-  IF coalesce(p_asset_symbol ~ '^[A-Z0-9]{1,12}$', false) IS NOT TRUE
+  -- Body and inputs
+  IF (v_in->>'ok')::boolean IS NOT TRUE
+     OR coalesce(p_asset_symbol ~ '^[A-Z0-9]{1,12}$', false) IS NOT TRUE
      OR coalesce(p_scope = ANY (enum_range(NULL::public.attestation_scope)::text[]), false) IS NOT TRUE
      OR coalesce(p_asset_class = ANY (enum_range(NULL::public.asset_class)::text[]), false) IS NOT TRUE
      OR (p_notes IS NOT NULL AND NOT fao_private.text_ok(p_notes, 0, 2000))
@@ -179,21 +194,25 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.fao_admin_set_threshold(text, text, text, text, text, text, text, text, text) IS
-  'FAO-REC-002, FAO-GOV-002: global admin upserts one materiality threshold with a reason; finite positive values with floor <= lower <= upper; last_reviewed_by is the admin from the session; audited with before and after images.';
+COMMENT ON FUNCTION public.fao_admin_set_threshold(json) IS
+  'FAO-REC-002, FAO-GOV-002: global admin upserts one materiality threshold with a reason (one json body, every key required, decoded by fao_private.client_args); finite positive values with floor <= lower <= upper; last_reviewed_by is the admin from the session; audited with before and after images.';
 
 -- ----------------------------------------------------------------------------
 -- fao_admin_set_agent (FAO-GOV-002, FAO-GOV-014)
 -- ----------------------------------------------------------------------------
--- Each NULL argument leaves its column unchanged; all three NULL is
--- INVALID_INPUT. The rate limit is an integer 1 to 60.
-CREATE FUNCTION public.fao_admin_set_agent(
-  p_agent_id            text,
-  p_status              text,
-  p_ai_advisory_enabled text,
-  p_max_runs_per_hour   text,
-  p_reason              text
-)
+-- Body {p_agent_id, p_status, p_ai_advisory_enabled, p_max_runs_per_hour,
+-- p_reason}, every key required. Each null setting leaves its column
+-- unchanged; all three null is INVALID_INPUT. The rate limit is an integer
+-- 1 to 60.
+-- FAO-GOV-014, FAO-GOV-004 (R10): status ACTIVE is refused (INVALID_INPUT,
+-- journaled, nothing changed) unless the agent has both SLAs set
+-- (sla_max_hitl_resolution_hrs and sla_max_execution_seconds). Without the
+-- HITL SLA an ACTIVE agent could start runs but never open a request
+-- (create_request refuses), and without the execution SLA the sweep would
+-- time its runs out on the 900 s default. The SLAs are set by the audited
+-- direct owner edit; this RPC cannot set them. Checked after the agent is
+-- found (NOT_FOUND first), against the locked row.
+CREATE FUNCTION public.fao_admin_set_agent(json)
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -201,6 +220,14 @@ SET search_path = ''
 AS $$
 DECLARE
   c_entry   constant text := 'rpc:fao_admin_set_agent';
+  v_in      jsonb := fao_private.client_args($1, ARRAY['p_agent_id', 'p_status', 'p_ai_advisory_enabled',
+                       'p_max_runs_per_hour', 'p_reason']);
+  -- Decoded body fields under the old argument names.
+  p_agent_id            text := v_in->'args'->>'p_agent_id';
+  p_status              text := v_in->'args'->>'p_status';
+  p_ai_advisory_enabled text := v_in->'args'->>'p_ai_advisory_enabled';
+  p_max_runs_per_hour   text := v_in->'args'->>'p_max_runs_per_hour';
+  p_reason              text := v_in->'args'->>'p_reason';
   v_uid     uuid;
   v_key     text;
   v_attempt jsonb;
@@ -215,7 +242,7 @@ BEGIN
     'status',              left(p_status, 200),
     'ai_advisory_enabled', left(p_ai_advisory_enabled, 200),
     'max_runs_per_hour',   left(p_max_runs_per_hour, 200),
-    'reason',              left(p_reason, 200));
+    'reason',              left(p_reason, 200)) || (v_in->'note');
 
   -- Session
   BEGIN
@@ -227,8 +254,9 @@ BEGIN
     RETURN fao_private.refuse(c_entry, 'agent_registry', v_key, v_attempt, 'NO_SESSION');
   END IF;
 
-  -- Inputs
-  IF coalesce(p_agent_id ~ '^[a-z0-9_]{1,64}$', false) IS NOT TRUE
+  -- Body and inputs
+  IF (v_in->>'ok')::boolean IS NOT TRUE
+     OR coalesce(p_agent_id ~ '^[a-z0-9_]{1,64}$', false) IS NOT TRUE
      OR (p_status IS NOT NULL AND coalesce(p_status = ANY (enum_range(NULL::public.agent_status)::text[]), false) IS NOT TRUE)
      OR (p_ai_advisory_enabled IS NOT NULL AND p_ai_advisory_enabled NOT IN ('true', 'false'))
      OR (p_max_runs_per_hour IS NOT NULL AND p_max_runs_per_hour !~ '^[0-9]{1,2}$')
@@ -256,6 +284,13 @@ BEGIN
     RETURN fao_private.refuse(c_entry, 'agent_registry', v_key, v_attempt, 'NOT_FOUND');
   END IF;
 
+  -- R10: no activation without both SLAs.
+  IF p_status = 'ACTIVE'
+     AND (jsonb_typeof(v_before->'sla_max_hitl_resolution_hrs') IS DISTINCT FROM 'number'
+          OR jsonb_typeof(v_before->'sla_max_execution_seconds') IS DISTINCT FROM 'number') THEN
+    RETURN fao_private.refuse(c_entry, 'agent_registry', v_key, v_attempt, 'INVALID_INPUT');
+  END IF;
+
   PERFORM set_config('fao.change_reason', format('%s by %s: %s', 'fao_admin_set_agent', v_uid, p_reason), true);
 
   BEGIN
@@ -276,8 +311,8 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.fao_admin_set_agent(text, text, text, text, text) IS
-  'FAO-GOV-002, FAO-GOV-014: global admin changes an agent''s status, AI advisory flag or run rate limit with a reason (NULL leaves a column unchanged); audited with before and after images.';
+COMMENT ON FUNCTION public.fao_admin_set_agent(json) IS
+  'FAO-GOV-002, FAO-GOV-014: global admin changes an agent''s status, AI advisory flag or run rate limit with a reason (one json body, every key required; null leaves a column unchanged); ACTIVE is refused unless both SLAs are set; audited with before and after images.';
 
 -- ----------------------------------------------------------------------------
 -- fao_admin_set_role (FAO-GOV-004)
@@ -288,13 +323,9 @@ COMMENT ON FUNCTION public.fao_admin_set_agent(text, text, text, text, text) IS
 -- reader, have a process owner row. Granting an identical active grant is a
 -- no-op that returns the grant as both before and after; revoking sets
 -- revoked_at on the active grant (rows are never deleted).
-CREATE FUNCTION public.fao_admin_set_role(
-  p_user_id  text,
-  p_role     text,
-  p_agent_id text,
-  p_grant    text,
-  p_reason   text
-)
+-- Body {p_user_id, p_role, p_agent_id, p_grant, p_reason}, every key
+-- required; p_agent_id null means all agents.
+CREATE FUNCTION public.fao_admin_set_role(json)
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -303,6 +334,13 @@ AS $$
 DECLARE
   c_entry   constant text := 'rpc:fao_admin_set_role';
   c_uuid    constant text := '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
+  v_in      jsonb := fao_private.client_args($1, ARRAY['p_user_id', 'p_role', 'p_agent_id', 'p_grant', 'p_reason']);
+  -- Decoded body fields under the old argument names.
+  p_user_id  text := v_in->'args'->>'p_user_id';
+  p_role     text := v_in->'args'->>'p_role';
+  p_agent_id text := v_in->'args'->>'p_agent_id';
+  p_grant    text := v_in->'args'->>'p_grant';
+  p_reason   text := v_in->'args'->>'p_reason';
   v_uid     uuid;
   v_key     text;
   v_attempt jsonb;
@@ -320,7 +358,7 @@ BEGIN
     'role',     left(p_role, 200),
     'agent_id', left(p_agent_id, 200),
     'grant',    left(p_grant, 200),
-    'reason',   left(p_reason, 200));
+    'reason',   left(p_reason, 200)) || (v_in->'note');
 
   -- Session
   BEGIN
@@ -332,8 +370,9 @@ BEGIN
     RETURN fao_private.refuse(c_entry, 'fao_user_roles', v_key, v_attempt, 'NO_SESSION');
   END IF;
 
-  -- Inputs
-  IF coalesce(p_user_id ~ c_uuid, false) IS NOT TRUE
+  -- Body and inputs
+  IF (v_in->>'ok')::boolean IS NOT TRUE
+     OR coalesce(p_user_id ~ c_uuid, false) IS NOT TRUE
      OR coalesce(p_role = ANY (enum_range(NULL::public.fao_app_role)::text[]), false) IS NOT TRUE
      OR (p_agent_id IS NOT NULL AND p_agent_id !~ '^[a-z0-9_]{1,64}$')
      OR (p_agent_id IS NOT NULL AND p_role IN ('admin', 'reader'))
@@ -426,8 +465,8 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.fao_admin_set_role(text, text, text, text, text) IS
-  'FAO-GOV-004: global admin grants or revokes an application role with a reason. admin and reader are global only; no admin changes their own roles (SELF_CHANGE); grants are revoked, never deleted; audited with before and after images.';
+COMMENT ON FUNCTION public.fao_admin_set_role(json) IS
+  'FAO-GOV-004: global admin grants or revokes an application role with a reason (one json body, every key required). admin and reader are global only; no admin changes their own roles (SELF_CHANGE); grants are revoked, never deleted; audited with before and after images.';
 
 -- ----------------------------------------------------------------------------
 -- fao_admin_set_owner_active (FAO-GOV-013)
@@ -435,11 +474,8 @@ COMMENT ON FUNCTION public.fao_admin_set_role(text, text, text, text, text) IS
 -- Deactivates or reactivates a process owner. Only the active flag changes;
 -- the owner row and every request and ledger row naming them stay. An
 -- inactive owner holds no honoured role except reader (has_role).
-CREATE FUNCTION public.fao_admin_set_owner_active(
-  p_user_id text,
-  p_active  text,
-  p_reason  text
-)
+-- Body {p_user_id, p_active, p_reason}, every key required.
+CREATE FUNCTION public.fao_admin_set_owner_active(json)
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -448,6 +484,11 @@ AS $$
 DECLARE
   c_entry   constant text := 'rpc:fao_admin_set_owner_active';
   c_uuid    constant text := '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
+  v_in      jsonb := fao_private.client_args($1, ARRAY['p_user_id', 'p_active', 'p_reason']);
+  -- Decoded body fields under the old argument names.
+  p_user_id text := v_in->'args'->>'p_user_id';
+  p_active  text := v_in->'args'->>'p_active';
+  p_reason  text := v_in->'args'->>'p_reason';
   v_uid     uuid;
   v_key     text;
   v_attempt jsonb;
@@ -460,7 +501,7 @@ BEGIN
   v_attempt := jsonb_build_object(
     'user_id', left(p_user_id, 200),
     'active',  left(p_active, 200),
-    'reason',  left(p_reason, 200));
+    'reason',  left(p_reason, 200)) || (v_in->'note');
 
   -- Session
   BEGIN
@@ -472,8 +513,9 @@ BEGIN
     RETURN fao_private.refuse(c_entry, 'process_owners', v_key, v_attempt, 'NO_SESSION');
   END IF;
 
-  -- Inputs
-  IF coalesce(p_user_id ~ c_uuid, false) IS NOT TRUE
+  -- Body and inputs
+  IF (v_in->>'ok')::boolean IS NOT TRUE
+     OR coalesce(p_user_id ~ c_uuid, false) IS NOT TRUE
      OR coalesce(p_active IN ('true', 'false'), false) IS NOT TRUE
      OR NOT fao_private.text_ok(p_reason, 1, 500) THEN
     RETURN fao_private.refuse(c_entry, 'process_owners', v_key, v_attempt, 'INVALID_INPUT');
@@ -521,8 +563,8 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.fao_admin_set_owner_active(text, text, text) IS
-  'FAO-GOV-013: global admin deactivates or reactivates a process owner with a reason; only the active flag changes; no admin changes their own flag (SELF_CHANGE); audited with before and after images.';
+COMMENT ON FUNCTION public.fao_admin_set_owner_active(json) IS
+  'FAO-GOV-013: global admin deactivates or reactivates a process owner with a reason (one json body, every key required); only the active flag changes; no admin changes their own flag (SELF_CHANGE); audited with before and after images.';
 
 -- ----------------------------------------------------------------------------
 -- fao_ledger_correct (FAO-GOV-001)
@@ -530,7 +572,8 @@ COMMENT ON FUNCTION public.fao_admin_set_owner_active(text, text, text) IS
 -- Appends a CORRECTION event for the original row's correlation, with
 -- corrects_ledger_id set. The original row is never changed. Works for runs
 -- from before run records existed (run_context falls back to the ledger).
-CREATE FUNCTION public.fao_ledger_correct(p_ledger_id text, p_reason text)
+-- Body {p_ledger_id, p_reason}, every key required.
+CREATE FUNCTION public.fao_ledger_correct(json)
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -538,6 +581,10 @@ SET search_path = ''
 AS $$
 DECLARE
   c_entry   constant text := 'rpc:fao_ledger_correct';
+  v_in      jsonb := fao_private.client_args($1, ARRAY['p_ledger_id', 'p_reason']);
+  -- Decoded body fields under the old argument names.
+  p_ledger_id text := v_in->'args'->>'p_ledger_id';
+  p_reason    text := v_in->'args'->>'p_reason';
   v_uid     uuid;
   v_id      bigint;
   v_key     text;
@@ -548,7 +595,7 @@ BEGIN
   v_key := left(p_ledger_id, 20);
   v_attempt := jsonb_build_object(
     'ledger_id', left(p_ledger_id, 200),
-    'reason',    left(p_reason, 200));
+    'reason',    left(p_reason, 200)) || (v_in->'note');
 
   -- Session
   BEGIN
@@ -560,9 +607,9 @@ BEGIN
     RETURN fao_private.refuse(c_entry, 'shadow_ledger', v_key, v_attempt, 'NO_SESSION');
   END IF;
 
-  -- Inputs
+  -- Body and inputs
   v_id := fao_private.parse_id(p_ledger_id);
-  IF v_id IS NULL OR NOT fao_private.text_ok(p_reason, 1, 500) THEN
+  IF (v_in->>'ok')::boolean IS NOT TRUE OR v_id IS NULL OR NOT fao_private.text_ok(p_reason, 1, 500) THEN
     RETURN fao_private.refuse(c_entry, 'shadow_ledger', v_key, v_attempt, 'INVALID_INPUT');
   END IF;
 
@@ -601,8 +648,8 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.fao_ledger_correct(text, text) IS
-  'FAO-GOV-001: global admin appends a CORRECTION ledger event with a reason, referencing the original row (corrects_ledger_id); the original row is never changed.';
+COMMENT ON FUNCTION public.fao_ledger_correct(json) IS
+  'FAO-GOV-001: global admin appends a CORRECTION ledger event with a reason (one json body, every key required), referencing the original row (corrects_ledger_id); the original row is never changed.';
 
 -- ----------------------------------------------------------------------------
 -- fao_run_summary (FAO-GOV-015, FAO-GOV-008)
@@ -648,9 +695,9 @@ COMMENT ON VIEW public.fao_run_summary IS
 -- 0017 grants EXECUTE on the five RPCs and SELECT on the view to
 -- authenticated only.
 -- ----------------------------------------------------------------------------
-REVOKE ALL ON FUNCTION public.fao_admin_set_threshold(text, text, text, text, text, text, text, text, text) FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
-REVOKE ALL ON FUNCTION public.fao_admin_set_agent(text, text, text, text, text)                             FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
-REVOKE ALL ON FUNCTION public.fao_admin_set_role(text, text, text, text, text)                              FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
-REVOKE ALL ON FUNCTION public.fao_admin_set_owner_active(text, text, text)                                  FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
-REVOKE ALL ON FUNCTION public.fao_ledger_correct(text, text)                                                FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
-REVOKE ALL ON TABLE public.fao_run_summary                                                                  FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
+REVOKE ALL ON FUNCTION public.fao_admin_set_threshold(json)     FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
+REVOKE ALL ON FUNCTION public.fao_admin_set_agent(json)         FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
+REVOKE ALL ON FUNCTION public.fao_admin_set_role(json)          FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
+REVOKE ALL ON FUNCTION public.fao_admin_set_owner_active(json)  FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
+REVOKE ALL ON FUNCTION public.fao_ledger_correct(json)          FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
+REVOKE ALL ON TABLE public.fao_run_summary                      FROM PUBLIC, anon, authenticated, service_role, fao_workflow;

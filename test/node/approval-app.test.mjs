@@ -243,3 +243,67 @@ test('_headers and serve.json carry the same directives apart from connect-src',
   assert.equal(cf.get('cache-control'), 'no-store');
   assert.equal(cf.get('x-content-type-options'), 'nosniff');
 });
+
+// --- Fix round 2 (B2, B3, B4, B8) ---------------------------------------------------
+test('noteLength counts code points against NOTES_MAX like the database (B3)', () => {
+  assert.equal(app.NOTES_MAX, 2000);
+  assert.equal(app.noteLength(''), 0);
+  assert.equal(app.noteLength('abc'), 3);
+  const emoji = '\u{1F600}';
+  assert.equal(emoji.length, 2, 'one emoji is two UTF-16 units');
+  assert.equal(app.noteLength(emoji), 1);
+  assert.equal(app.noteLength(emoji.repeat(2000)), 2000, '2000 emoji are within the limit');
+  assert.ok(app.noteLength(emoji.repeat(2000)) <= app.NOTES_MAX);
+  assert.ok(app.noteLength('a'.repeat(2001)) > app.NOTES_MAX, '2001 characters are over the limit');
+  assert.equal(app.noteLength(null), 0);
+  assert.equal(app.noteLength(undefined), 0);
+});
+
+test('buildViewModel keeps the form for retryable refusals and only those (B2)', () => {
+  const env = (code, http_status) => ({ ok: false, code, http_status, message: code, ref: 7 });
+  assert.equal(app.buildViewModel(env('INVALID_INPUT', 400)).retry, true, 'INVALID_INPUT');
+  assert.equal(app.buildViewModel(env('BUSY', 409)).retry, true, 'BUSY');
+  assert.equal(app.buildViewModel({ http_status: 0 }).retry, true, 'network failure');
+  assert.equal(app.buildViewModel(null).retry, true, 'no response at all');
+  for (const s of [500, 502, 503]) assert.equal(app.buildViewModel({ http_status: s }).retry, true, `status ${s}`);
+  for (const [code, s] of [['NOT_AUTHORISED', 403], ['SOD_SELF_APPROVAL', 403], ['NOT_FOUND', 404], ['NO_SESSION', 401]]) {
+    assert.equal(app.buildViewModel(env(code, s)).retry, false, code);
+  }
+  assert.equal(app.buildViewModel({ http_status: 401 }).retry, false, 'plain 401');
+});
+
+test('buildViewModel drops empty fields and states the invoker text once (B4)', () => {
+  const r = getResult();
+  r.request.decided_at = null;
+  r.request.sub_tier = '';
+  r.request.escalated_assets = [];
+  r.request.viewer_is_invoker = true;
+  r.request.viewer_can_decide = false;
+  const vm = app.buildViewModel(r);
+  const labels = vm.fields.map((f) => (f && typeof f === 'object' ? (f.label ?? f[0]) : f));
+  const flat = JSON.stringify(vm.fields);
+  assert.ok(!flat.includes('Decided at'), `no empty Decided at row: ${JSON.stringify(labels)}`);
+  assert.ok(!flat.includes('Review sub-tier'), 'no empty sub-tier row');
+  assert.deepEqual(vm.assets, [], 'no assets');
+  const strings = leaves(vm).filter((x) => typeof x === 'string');
+  const self = 'You cannot decide a run you started.';
+  assert.equal(strings.filter((s) => s.includes(self)).length, 1, 'invoker text appears once');
+
+  const closed = app.buildViewModel({
+    ok: false, code: 'EXPIRED', http_status: 410, message: 'EXPIRED', ref: 3,
+    request: { hitl_id: 5, decision: 'EXPIRED', decided_at: null },
+  });
+  assert.equal(closed.kind, 'closed');
+  assert.ok(!JSON.stringify(closed.fields).includes('Decided at'), 'closed view has no empty Decided at row');
+  assert.deepEqual(closed.assets, []);
+});
+
+test('serve.json redirects every docs and config file away from the page (B8)', () => {
+  const sv = JSON.parse(read('serve.json'));
+  const sources = (sv.redirects || []).map((r) => r.source);
+  for (const f of ['/README.md', '/serve.json', '/config.example.js', '/vendor/SHA256SUMS', '/.gitattributes', '/_headers']) {
+    assert.ok(sources.includes(`${f}*`), `serve.json redirects ${f} (trailing * also catches ${f}::$DATA)`);
+  }
+  for (const r of sv.redirects) assert.equal(r.destination, '/', `${r.source} goes to /`);
+  assert.equal(sv.directoryListing, false);
+});

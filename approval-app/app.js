@@ -68,6 +68,17 @@ export const PAGE_TEXT = Object.freeze({
 
 const HITL_ID_RE = /^\d{1,12}$/;
 
+// Notes limit, counted like the database (length() in characters, that is
+// Unicode code points), not in UTF-16 units (B3).
+export const NOTES_MAX = 2000;
+
+export function noteLength(text) {
+  if (typeof text !== 'string') return 0;
+  let n = 0;
+  for (const _ of text) n += 1; // string iteration walks code points
+  return n;
+}
+
 function hasOwn(obj, key) {
   return Object.prototype.hasOwnProperty.call(obj, key);
 }
@@ -139,6 +150,17 @@ function field(label, value) {
   return { label, value: toText(value) };
 }
 
+// Rows with no value are left out, so a closed or expired request shows no
+// empty "Decided at" row (B4).
+function filled(fields) {
+  return fields.filter((f) => f.value !== '');
+}
+
+// Results after which the approver may try the same decision again with the
+// form and note kept (B2): a refused note (INVALID_INPUT), someone else
+// deciding (BUSY), or a network or server failure.
+const RETRY_CODES = Object.freeze(['BUSY', 'INVALID_INPUT']);
+
 function referenceText(result) {
   const ref = result && result.ref;
   if (typeof ref === 'number' && Number.isSafeInteger(ref) && ref > 0) {
@@ -177,6 +199,7 @@ export function buildViewModel(result) {
     const status = result && typeof result.http_status === 'number' ? result.http_status : 0;
     model.message = statusMessage(status, null);
     model.needsSignIn = status === 401;
+    model.retry = status === 0 || status >= 500;
     return model;
   }
   const code = result.code;
@@ -195,7 +218,7 @@ export function buildViewModel(result) {
     model.title = `Request ${model.hitlId}`;
     model.canDecide = request.viewer_can_decide === true;
     model.isInvoker = request.viewer_is_invoker === true;
-    model.fields = [
+    model.fields = filled([
       field('Request id', request.hitl_id),
       field('Agent', request.agent_name),
       field('Agent id', request.agent_id),
@@ -209,15 +232,18 @@ export function buildViewModel(result) {
       field('Decision', request.decision),
       field('Decided at', request.decided_at),
       field('Started by', request.invoker_name),
-    ];
+    ]);
     const assets = Array.isArray(request.escalated_assets) ? request.escalated_assets : [];
     model.assets = assets.map(assetText);
+    let note = '';
     if (model.isInvoker) {
-      model.note = CODE_MESSAGES.SOD_SELF_APPROVAL;
+      note = CODE_MESSAGES.SOD_SELF_APPROVAL;
     } else if (!model.canDecide) {
-      model.note = PAGE_TEXT.viewOnly;
+      note = PAGE_TEXT.viewOnly;
     }
-    model.message = model.canDecide ? PAGE_TEXT.review : model.note;
+    // The status line already carries this text; it is not repeated as a
+    // note under the request (B4).
+    model.message = model.canDecide ? PAGE_TEXT.review : note;
     return model;
   }
 
@@ -226,13 +252,13 @@ export function buildViewModel(result) {
     model.hitlId = toText(result.hitl_id);
     model.title = `Request ${model.hitlId}`;
     model.message = code === 'OK' ? PAGE_TEXT.decided : statusMessage(result.http_status, model.code || null);
-    model.fields = [
+    model.fields = filled([
       field('Request id', result.hitl_id),
       field('Decision', result.decision),
       field('Decided at', result.decided_at),
       field('Committed', result.committed === true ? PAGE_TEXT.committedYes : PAGE_TEXT.committedNo),
       field('Committed ledger id', result.committed_ledger_id),
-    ];
+    ]);
     return model;
   }
 
@@ -240,16 +266,16 @@ export function buildViewModel(result) {
     model.kind = 'closed';
     model.hitlId = toText(request.hitl_id);
     model.title = `Request ${model.hitlId}`;
-    model.fields = [
+    model.fields = filled([
       field('Request id', request.hitl_id),
       field('Decision', request.decision),
       field('Decided at', request.decided_at),
-    ];
+    ]);
     return model;
   }
 
   model.needsSignIn = code === 'NO_SESSION';
-  model.retry = code === 'BUSY';
+  model.retry = RETRY_CODES.includes(model.code);
   return model;
 }
 
@@ -342,11 +368,41 @@ async function bootstrap(win) {
     ui.show('signout', Boolean(session));
   };
 
+  // Moves focus to the status line when the focused control was hidden or
+  // disabled by a view change, so keyboard users keep their place (B5).
+  const settleFocus = () => {
+    const doc = win.document;
+    const active = doc.activeElement;
+    const lost =
+      !active ||
+      active === doc.body ||
+      active.disabled === true ||
+      (typeof active.closest === 'function' && active.closest('[hidden]') !== null);
+    const status = ui.el('status');
+    if (lost && status && typeof status.focus === 'function') status.focus();
+  };
+
+  // Clears everything the previous person typed or was shown: draft notes,
+  // request fields, assets and result (B1). Runs on sign-out, whenever the
+  // sign-in form is shown, and after each successful sign-in.
+  const resetViews = () => {
+    const notesEl = ui.el('decide-notes');
+    if (notesEl) notesEl.value = '';
+    ui.setText('request-title', 'Request');
+    ui.fillFields('request-fields', []);
+    ui.fillList('request-assets', []);
+    ui.setText('request-note', '');
+    ui.show('request-note', false);
+    ui.fillFields('result-fields', []);
+  };
+
   const showSignIn = (text) => {
     hideAll();
+    resetViews();
     setSignedIn(null);
     message(text || CODE_MESSAGES.NO_SESSION);
     ui.show('signin', true);
+    settleFocus();
   };
 
   const callRpc = async (name, args) => {
@@ -372,17 +428,25 @@ async function bootstrap(win) {
       ui.setText('request-title', model.title);
       ui.fillFields('request-fields', model.fields);
       ui.fillList('request-assets', model.assets);
+      // No empty "Escalated assets" heading (B4).
+      ui.show('request-assets-heading', model.assets.length > 0);
+      ui.show('request-assets', model.assets.length > 0);
       ui.setText('request-note', model.note);
-      ui.show('request-note', model.note !== '');
+      ui.show('request-note', model.note !== '' && model.note !== model.message);
       ui.show('request', true);
     }
     if (model.kind === 'request' && model.canDecide) {
       ui.show('decide', true);
+    } else {
+      // The decision form is gone for good on this view: drop any draft.
+      const notesEl = ui.el('decide-notes');
+      if (notesEl) notesEl.value = '';
     }
     if (model.kind === 'decided') {
       ui.fillFields('result-fields', model.fields);
       ui.show('result', true);
     }
+    settleFocus();
   };
 
   const loadRequest = async () => {
@@ -405,7 +469,7 @@ async function bootstrap(win) {
     try {
       const notesEl = ui.el('decide-notes');
       const notes = notesEl ? notesEl.value : '';
-      if (notes.length > 2000) {
+      if (noteLength(notes) > NOTES_MAX) {
         message(CODE_MESSAGES.INVALID_INPUT);
         return;
       }
@@ -417,7 +481,8 @@ async function bootstrap(win) {
       });
       const model = buildViewModel(result);
       if (model.retry) {
-        // BUSY: keep the form so the approver can try again.
+        // BUSY, INVALID_INPUT or a network or server failure: keep the form
+        // and the typed note so the approver can fix it or try again (B2).
         message(model.message, model.reference);
         return;
       }
@@ -425,6 +490,7 @@ async function bootstrap(win) {
     } finally {
       busy = false;
       setButtons(true);
+      settleFocus();
     }
   };
 
@@ -452,6 +518,7 @@ async function bootstrap(win) {
         message(PAGE_TEXT.signInFailed);
         return;
       }
+      resetViews();
       setSignedIn(outcome.data.session);
       await loadRequest();
     } finally {
@@ -468,6 +535,9 @@ async function bootstrap(win) {
     } catch {
       // The local session is cleared either way.
     }
+    // The next person starts from an empty form (B1).
+    const emailEl = ui.el('signin-email');
+    if (emailEl) emailEl.value = '';
     showSignIn(CODE_MESSAGES.NO_SESSION);
   });
 

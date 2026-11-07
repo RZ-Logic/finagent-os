@@ -25,10 +25,13 @@ export const WORKFLOWS = join(REPO_ROOT, 'workflows');
 
 let importCounter = 0;
 
-const wrap = (j) => ({ json: j === undefined ? {} : j, pairedItem: { item: 0 } });
+// Item i is paired with input item i, as n8n pairs a node's output with its
+// input when the counts match (and as Execute Workflow mode each pairs every
+// result with the item that started it).
+const wrap = (j, i = 0) => ({ json: j === undefined ? {} : j, pairedItem: { item: i } });
 
 function itemList(arr) {
-  const items = (arr || []).map(wrap);
+  const items = (arr || []).map((j, i) => wrap(j, i));
   return {
     all: () => items,
     first: () => items[0],

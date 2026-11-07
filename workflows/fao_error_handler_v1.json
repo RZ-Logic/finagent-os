@@ -51,7 +51,7 @@
     },
     {
       "parameters": {
-        "content": "## FAO Error Handler v1\n\n**Control:** FAO-GOV-008\n\nSet as `errorWorkflow` on the flagship only, so the execution id it receives is the flagship's, which `fao_run_claim` recorded on the run.\n\n1. **Extract Failure**: execution id, last node, message (control characters removed, 500 characters)\n2. **Record Run Failure** (`fao_run_fail`): FAILED in the ledger; the run moves to FAILED, or, when a request already exists, the request stands for the sweep\n\nAn execution that matches no run returns `UNKNOWN_EXECUTION` and nothing is written.",
+        "content": "## FAO Error Handler v1\n\n**Control:** FAO-GOV-008\n\nSet as `errorWorkflow` on the flagship only, so the execution id it receives is the flagship's, which `fao_run_claim` recorded on the run.\n\n1. **Extract Failure**: execution id, last node, message (control characters removed, 500 characters)\n2. **Record Run Failure** (`fao_run_fail`): FAILED in the ledger; the run moves to FAILED, or, when a request already exists, the request stands for the sweep\n\nAn execution that matches no run returns `UNKNOWN_EXECUTION` and nothing is written.\n\n**Publish (n8n 2.x):** step 3 of 5 (Writer, notifier, error handler, sweeper, flagship). Publish before the flagship: n8n runs an error workflow only when it is published, and otherwise only logs that it is not active.",
         "height": 400,
         "width": 560,
         "color": 4

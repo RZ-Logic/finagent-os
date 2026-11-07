@@ -4,8 +4,10 @@
 -- The functions that read and decide HITL requests, record notification
 -- attempts, and run the five-minute maintenance sweep.
 --
--- Client RPCs (PostgREST, every parameter text):
---   fao_hitl_get()      the request for the approval page, for members only
+-- Client RPCs (PostgREST, one unnamed json body, IC-18):
+--   fao_hitl_get()      the request for the approval page (the decision view
+--                       model; the row itself is readable by every member
+--                       through the hitl_queue read policy, build spec 2.12)
 --   fao_hitl_decide()   the only way a decision is recorded: decision,
 --                       HITL_RESOLVED, rollup and COMMITTED in one transaction
 -- Workflow RPCs (n8n over the fao_workflow connection, typed parameters):
@@ -26,7 +28,9 @@
 --                overdue requests expire and escalate once
 --   FAO-GOV-007  notification context and attempts recorded, at most one SENT
 --                per request, kind and level; failed sends retried up to the
---                notify_max_attempts setting, then escalated
+--                notify_max_attempts setting, then escalated; a request
+--                with no notice sent within the notice window is escalated
+--                and notices are not relisted after it (R12)
 --   FAO-GOV-008  stale RUNNING runs and expired run tokens are closed
 --   FAO-GOV-015  the sweep reports privilege drift and any test clock offset,
 --                journaled once per day per distinct state
@@ -37,8 +41,13 @@
 --   - public.fao_hitl_resolve(bigint, hitl_decision, text, text) from
 --     migration 0008 (now a stub returning void that always raises)
 --
--- Validation pattern for client RPCs: session check, then every input check
--- with a fixed message, then authorization. Expected refusals never raise:
+-- Validation pattern for client RPCs (FAO-GOV-008, IC-18): decode the body
+-- with fao_private.client_args first (it never raises), then the session
+-- check, then the body result together with every input check with a fixed
+-- message, then authorization. Body keys are the old argument names (the
+-- local variables p_* below), so HTTP callers send the same bodies; GET,
+-- form-encoded and text/plain calls cannot reach these functions (no
+-- default on the one json parameter). Expected refusals never raise:
 -- they journal, set the HTTP status and return ok:false with the fixed
 -- message for the code. No database error text reaches a caller.
 --
@@ -91,8 +100,9 @@ COMMENT ON FUNCTION public.fao_hitl_resolve(bigint, public.hitl_decision, text, 
 -- 2. fao_hitl_get (FAO-GOV-004, FAO-GOV-007)
 -- ----------------------------------------------------------------------------
 -- The approval page's read of one request, for the signed-in caller only.
+-- Body {p_hitl_id} (IC-18).
 --   1. session (NO_SESSION)
---   2. id (INVALID_INPUT)
+--   2. body (client_args) and id (INVALID_INPUT)
 --   3. caller holds no honoured invoker, approver or admin grant for any
 --      agent: NOT_AUTHORISED, without looking the row up
 --   4. missing row: NOT_FOUND (not journaled)
@@ -102,7 +112,14 @@ COMMENT ON FUNCTION public.fao_hitl_resolve(bigint, public.hitl_decision, text, 
 --      not journaled, carrying request{hitl_id, decision, decided_at} only)
 --   7. the request with the viewer flags
 -- A read never changes the request or the ledger.
-CREATE FUNCTION public.fao_hitl_get(p_hitl_id text)
+-- Scope of step 5 (R02, build spec 2.12 and 6.6 110_rls): this function
+-- decides who gets the decision view model (viewer_can_decide,
+-- viewer_is_invoker, invoker_name). It does not hide the row from members:
+-- the hitl_queue read policy is has_any_role, so every member, the reader
+-- included, can read every request row directly. Only a caller with no
+-- honoured role gets the same NOT_AUTHORISED body for existing and missing
+-- ids (step 3 runs before the lookup); RLS shows that caller no rows either.
+CREATE FUNCTION public.fao_hitl_get(json)
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -110,6 +127,9 @@ SET search_path = ''
 AS $$
 DECLARE
   c_entry    constant text := 'rpc:fao_hitl_get';
+  v_in       jsonb := fao_private.client_args($1, ARRAY['p_hitl_id']);
+  -- Decoded body field under the old argument name.
+  p_hitl_id  text := v_in->'args'->>'p_hitl_id';
   v_uid      uuid;
   v_id       bigint;
   v_key      text;
@@ -120,7 +140,7 @@ DECLARE
   v_short    jsonb;
 BEGIN
   v_key     := left(p_hitl_id, 20);
-  v_attempt := jsonb_build_object('hitl_id', left(p_hitl_id, 200));
+  v_attempt := jsonb_build_object('hitl_id', left(p_hitl_id, 200)) || (v_in->'note');
 
   -- 1. Session
   BEGIN
@@ -132,9 +152,9 @@ BEGIN
     RETURN fao_private.refuse(c_entry, 'hitl_queue', v_key, v_attempt, 'NO_SESSION');
   END IF;
 
-  -- 2. Input
+  -- 2. Body and input
   v_id := fao_private.parse_id(p_hitl_id);
-  IF v_id IS NULL THEN
+  IF (v_in->>'ok')::boolean IS NOT TRUE OR v_id IS NULL THEN
     RETURN fao_private.refuse(c_entry, 'hitl_queue', v_key, v_attempt, 'INVALID_INPUT');
   END IF;
 
@@ -205,22 +225,23 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.fao_hitl_get(text) IS
-  'FAO-GOV-004, FAO-GOV-007: one request for the signed-in caller (identity from auth.uid() only). Members with a right to the row get the request and viewer flags; everyone else gets the same NOT_AUTHORISED body for existing, decided and missing ids. Never writes the request or the ledger.';
+COMMENT ON FUNCTION public.fao_hitl_get(json) IS
+  'FAO-GOV-004, FAO-GOV-007: the decision view of one request for the signed-in caller (identity from auth.uid() only); body {p_hitl_id}. An approver for the agent, the invoker or a global admin gets the request and viewer flags; another member gets NOT_AUTHORISED for an existing row (the row stays readable to every member through the hitl_queue read policy); a caller with no honoured role gets the same NOT_AUTHORISED body for existing, decided and missing ids. Never writes the request or the ledger.';
 
 -- ----------------------------------------------------------------------------
 -- 3. fao_hitl_decide (FAO-GOV-004, FAO-GOV-001, FAO-REC-001)
 -- ----------------------------------------------------------------------------
--- The only way a decision is recorded. All in one transaction:
+-- The only way a decision is recorded. Body {p_hitl_id, p_decision,
+-- p_notes? [null]} (IC-18). All in one transaction:
 --   1. session (NO_SESSION; the anonymous path)
---   2. id, decision (APPROVED or REJECTED only) and notes (INVALID_INPUT);
---      over HTTP the body must be JSON (INVALID_INPUT): PostgREST decodes an
---      application/x-www-form-urlencoded body itself and cuts each value at
---      a NUL (%00), so notes would be stored cut short with no control
---      character left for text_ok to refuse. Calls with no request.headers
---      (direct SQL; anon and authenticated cannot log in) are not affected.
---      A JSON \u0000 never reaches this function: PostgREST's argument
---      conversion raises 22P05 first (KNOWN-LIMITS).
+--   2. body, id, decision (APPROVED or REJECTED only) and notes
+--      (INVALID_INPUT). The body rules are fao_private.client_args: a
+--      \u0000 escape anywhere, a non-object, a repeated, unknown or missing
+--      key, a value that is not a string or null, and a Content-Type other
+--      than none or application/json (the IC-14 check, moved there) are
+--      refused. PostgREST passes the body unchanged to the one json
+--      parameter, so neither a JSON \u0000 nor a form-encoded %00 can cut
+--      the notes before text_ok sees them.
 --   3. caller holds some honoured role (NOT_AUTHORISED)
 --   4. lock the request without waiting (BUSY when another session holds it)
 --   5. NOT_FOUND, EXPIRED, ALREADY_DECIDED; at or after the deadline EXPIRED
@@ -235,11 +256,12 @@ COMMENT ON FUNCTION public.fao_hitl_get(text) IS
 --      rollup; COMMITTED and run COMMITTED, or COMMIT_BLOCKED and run FAILED
 --      (AUDIT_CHAIN_MISMATCH, ok:true, not journaled)
 -- Every refusal in steps 1 to 7 is journaled with target hitl_queue, the id
--- text as key and the attempted decision, and returns no request data.
+-- text as key and the attempted decision (plus invalid_body when the body
+-- was refused), and returns no request data.
 -- Any error after step 7 rolls back the decision and every ledger row.
 -- Dual approval (ADR-0001) is not enforced: step 8 is the single update
 -- where an approvals table would plug in.
-CREATE FUNCTION public.fao_hitl_decide(p_hitl_id text, p_decision text, p_notes text DEFAULT NULL)
+CREATE FUNCTION public.fao_hitl_decide(json)
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -247,6 +269,11 @@ SET search_path = ''
 AS $$
 DECLARE
   c_entry     constant text := 'rpc:fao_hitl_decide';
+  v_in        jsonb := fao_private.client_args($1, ARRAY['p_hitl_id', 'p_decision'], '{"p_notes": null}'::jsonb);
+  -- Decoded body fields under the old argument names.
+  p_hitl_id   text := v_in->'args'->>'p_hitl_id';
+  p_decision  text := v_in->'args'->>'p_decision';
+  p_notes     text := v_in->'args'->>'p_notes';
   v_uid       uuid;
   v_id        bigint;
   v_key       text;
@@ -261,10 +288,9 @@ DECLARE
   v_ledger    bigint;
   v_obl       text[];
   v_symbols   jsonb;
-  v_ctype     text;
 BEGIN
   v_key     := left(p_hitl_id, 20);
-  v_attempt := jsonb_build_object('decision', left(p_decision, 200));
+  v_attempt := jsonb_build_object('decision', left(p_decision, 200)) || (v_in->'note');
 
   -- 1. Session
   BEGIN
@@ -276,16 +302,10 @@ BEGIN
     RETURN fao_private.refuse(c_entry, 'hitl_queue', v_key, v_attempt, 'NO_SESSION');
   END IF;
 
-  -- 2. Inputs. Media type of the request body, '' when no header was sent or
-  --    the call did not come through PostgREST; unreadable headers fail closed.
-  BEGIN
-    v_ctype := lower(btrim(split_part(coalesce(
-                 nullif(current_setting('request.headers', true), '')::jsonb->>'content-type', ''), ';', 1)));
-  EXCEPTION WHEN others THEN
-    v_ctype := 'unreadable';
-  END;
+  -- 2. Body (client_args, which also holds the IC-14 media type check) and
+  --    inputs
   v_id := fao_private.parse_id(p_hitl_id);
-  IF v_ctype NOT IN ('', 'application/json')
+  IF (v_in->>'ok')::boolean IS NOT TRUE
      OR v_id IS NULL
      OR coalesce(p_decision IN ('APPROVED', 'REJECTED'), false) IS NOT TRUE
      OR (p_notes IS NOT NULL AND NOT fao_private.text_ok(p_notes, 0, 2000)) THEN
@@ -454,8 +474,8 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.fao_hitl_decide(text, text, text) IS
-  'FAO-GOV-004, FAO-GOV-001, FAO-REC-001: the only way a HITL decision is recorded. Approver from auth.uid() only; approver role required; the invoker is refused (SOD_SELF_APPROVAL); refused at or after the deadline; decision, HITL_RESOLVED, rollup and COMMITTED (or COMMIT_BLOCKED) in one transaction. Refusals are journaled.';
+COMMENT ON FUNCTION public.fao_hitl_decide(json) IS
+  'FAO-GOV-004, FAO-GOV-001, FAO-REC-001: the only way a HITL decision is recorded; body {p_hitl_id, p_decision, p_notes?} decoded by fao_private.client_args. Approver from auth.uid() only; approver role required; the invoker is refused (SOD_SELF_APPROVAL); refused at or after the deadline; decision, HITL_RESOLVED, rollup and COMMITTED (or COMMIT_BLOCKED) in one transaction. Refusals are journaled.';
 
 -- ----------------------------------------------------------------------------
 -- 4. fao_notification_context (FAO-GOV-007)
@@ -727,11 +747,20 @@ COMMENT ON FUNCTION public.fao_notification_record(bigint, text, int, text, text
 --   4. PENDING requests not yet due with no SENT REQUESTED notification,
 --      whose latest attempt FAILED or which are older than 5 minutes with no
 --      attempt: renotify while failures are below notify_max_attempts, then
---      one NOTIFICATION_FAILED escalation
+--      one NOTIFICATION_FAILED escalation. Also escalated (R12): a request
+--      with no SENT REQUESTED notification once the notice window has
+--      passed since created_at, however many attempts were recorded, so a
+--      notifier that fails before it records an attempt cannot keep a
+--      request at "renotify attempt 1" until its deadline
 --   5. level-1 escalations with no SENT ESCALATED notification and failures
 --      below the limit, whose latest attempt FAILED or which are older than
---      5 minutes with no attempt: listed again, once per request (decided
---      requests are not listed)
+--      5 minutes with no attempt, and whose escalation event is younger than
+--      the notice window (R12: bounded even when no attempt is ever
+--      recorded): listed again, once per request (decided requests are not
+--      listed)
+-- Notice window (R12): 5 minutes (one sweep interval) times
+-- (notify_max_attempts + 1), 20 minutes at the default of 3: the first
+-- notice plus notify_max_attempts retries, one per sweep.
 -- Deadlines are compared with fao_private.clock(). Escalations go to the
 -- agent process owner's escalation_to, else the process owner.
 -- FAO-GOV-004: the escalation target is never the invoker (the request's
@@ -752,6 +781,8 @@ AS $$
 DECLARE
   v_now         timestamptz;
   v_max         int;
+  v_window      interval;
+  v_overdue     boolean;
   v_offset      int := 0;
   v_drift       boolean := false;
   v_md5         text;
@@ -786,6 +817,8 @@ BEGIN
     v_max := NULL;  -- a non-integer setting falls back to the default
   END;
   v_max := greatest(coalesce(v_max, 3), 1);
+  -- FAO-GOV-007 (R12): the notice window bounds steps 4 and 5.
+  v_window := interval '5 minutes' * (v_max + 1);
 
   -- --------------------------------------------------------------------------
   -- 0. Checks (FAO-GOV-015)
@@ -1090,7 +1123,11 @@ BEGIN
         v_last := NULL;
       END IF;
 
-      IF (v_last = 'FAILED') OR (v_last IS NULL AND c.created_at < v_now - interval '5 minutes') THEN
+      -- R12: no SENT notice within the window escalates even when the
+      -- notifier never recorded an attempt.
+      v_overdue := c.created_at <= v_now - v_window;
+
+      IF (v_last = 'FAILED') OR (v_last IS NULL AND c.created_at < v_now - interval '5 minutes') OR v_overdue THEN
         SELECT count(*)::int
           INTO v_failed
           FROM public.fao_notifications n
@@ -1099,7 +1136,7 @@ BEGIN
            AND n.level = 0
            AND n.outcome = 'FAILED';
 
-        IF v_failed < v_max THEN
+        IF v_failed < v_max AND NOT v_overdue THEN
           v_renotify := v_renotify || jsonb_build_array(jsonb_build_object(
             'hitl_id', c.hitl_id, 'attempt', v_failed + 1));
         ELSE
@@ -1211,7 +1248,12 @@ BEGIN
          AND n.level = 1
          AND n.outcome = 'FAILED';
 
+      -- R12: never listed once the notice window has passed since the
+      -- escalation event, so an escalation whose notices are never recorded
+      -- (an EXPIRED request's TIMEOUT notice included) is not relisted
+      -- every five minutes without limit.
       IF v_failed < v_max
+         AND c.event_timestamp > v_now - v_window
          AND ((v_last = 'FAILED') OR (v_last IS NULL AND c.event_timestamp < v_now - interval '5 minutes')) THEN
         v_escalations := v_escalations || jsonb_build_array(jsonb_build_object(
           'hitl_id', c.hitl_id, 'level', 1, 'reason', c.reason));
@@ -1243,8 +1285,8 @@ COMMENT ON FUNCTION public.fao_maintenance_sweep() IS
 --    to nobody.
 -- ----------------------------------------------------------------------------
 REVOKE ALL ON FUNCTION public.fao_hitl_resolve(bigint, public.hitl_decision, text, text)          FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
-REVOKE ALL ON FUNCTION public.fao_hitl_get(text)                                                  FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
-REVOKE ALL ON FUNCTION public.fao_hitl_decide(text, text, text)                                   FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
+REVOKE ALL ON FUNCTION public.fao_hitl_get(json)                                                  FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
+REVOKE ALL ON FUNCTION public.fao_hitl_decide(json)                                               FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION public.fao_notification_context(bigint, text, int)                         FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION public.fao_notification_record(bigint, text, int, text, text, text, text)  FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION public.fao_maintenance_sweep()                                             FROM PUBLIC, anon, authenticated, service_role, fao_workflow;

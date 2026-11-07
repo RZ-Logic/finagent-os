@@ -38,6 +38,10 @@ export const PUBLISH_ORDER = ['writer', 'gateway', 'errorHandler', 'flagship'];
 export const FLAGSHIP_PATH = 'fao-recon-invoke';
 export const SWEEP_PATH = 'fao-e2e-sweep';
 export const SWEEP_ID = 'FaoE2eSweepHook1';
+// The flagship agent and the local-only agent S10 runs under (lib.mjs
+// re-exports both).
+export const FLAGSHIP_AGENT = 'fao_reserve_recon_v1';
+export const MARKUP_AGENT = 'fao_e2e_markup_v1';
 
 // JS source for each variant's three literal blocks. JS, not JSON, so NaN and
 // markup survive exactly as a fixture author would write them.
@@ -118,6 +122,9 @@ export const VARIANTS = {
   markup: {
     id: 'FaoE2eReconMrkp1',
     path: 'fao-e2e-recon-markup',
+    // Fix round 2 R08: a claim names the agent its workflow serves, so this
+    // copy's Claim Run names the markup agent its runs are started for.
+    agent: MARKUP_AGENT,
     wallet: `{
   BTC:  1100,
   USDT: 1234567890.50
@@ -172,6 +179,15 @@ export function flagshipVariant(root, name) {
   code = replaceOnce(code, 'const fixture_metadata =', v.meta, `${name} metadata`);
   init.parameters.jsCode = `// E2E FIXTURE VARIANT "${name}": wallet_data, ledger_data and fixture_metadata\n// replaced by test/e2e/variants.mjs; everything else is the export.\n${code}`;
   hook.parameters.path = v.path;
+  if (v.agent) {
+    // FAO-GOV-008 (R08): exactly one flagship agent id in Claim Run, swapped
+    // for the variant's agent; anything else fails the build loudly.
+    const claim = wf.nodes.find((n) => n.name === 'Claim Run');
+    const text = claim ? JSON.stringify(claim.parameters) : '';
+    const hits = text.split(FLAGSHIP_AGENT).length - 1;
+    if (hits !== 1) throw new Error(`variants: ${name}: expected Claim Run to name ${FLAGSHIP_AGENT} once (fao_run_claim agent argument), found ${hits}`);
+    claim.parameters = JSON.parse(text.replace(FLAGSHIP_AGENT, v.agent));
+  }
   hook.webhookId = randomUUID();
   wf.id = v.id;
   wf.name = `fao_reserve_recon_v1 [e2e ${name}]`;

@@ -172,9 +172,9 @@ SELECT is((SELECT asset_scope FROM public.run_invocations WHERE correlation_id =
 -- Corrections reference the original and leave it unchanged
 INSERT INTO v VALUES ('orig_before', (SELECT to_jsonb(l) FROM public.shadow_ledger l WHERE ledger_id = (SELECT (j::text)::bigint FROM v WHERE k = 'any_ledger_id')));
 INSERT INTO v VALUES ('correct', tests.jsonb_as('marcus.patel@finagent-os.demo',
-  format($$SELECT public.fao_ledger_correct(%L, 'pgtap correction')$$, (SELECT j::text FROM v WHERE k = 'any_ledger_id'))));
+  format($$SELECT public.fao_ledger_correct(json_build_object('p_ledger_id', %L, 'p_reason', 'pgtap correction'))$$, (SELECT j::text FROM v WHERE k = 'any_ledger_id'))));
 INSERT INTO v VALUES ('correct_sarah', tests.jsonb_as('sarah.chen@finagent-os.demo',
-  format($$SELECT public.fao_ledger_correct(%L, 'pgtap correction')$$, (SELECT j::text FROM v WHERE k = 'any_ledger_id'))));
+  format($$SELECT public.fao_ledger_correct(json_build_object('p_ledger_id', %L, 'p_reason', 'pgtap correction'))$$, (SELECT j::text FROM v WHERE k = 'any_ledger_id'))));
 SELECT is((SELECT j->>'ok' FROM v WHERE k = 'correct'), 'true', 'Marcus records a correction');
 SELECT is((SELECT corrects_ledger_id FROM public.shadow_ledger WHERE ledger_id = (SELECT (j->>'ledger_id')::bigint FROM v WHERE k = 'correct')),
   (SELECT (j::text)::bigint FROM v WHERE k = 'any_ledger_id'), 'the CORRECTION row references the original');

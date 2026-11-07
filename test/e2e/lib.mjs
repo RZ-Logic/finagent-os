@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { cfg, signIn, rpc, q, one, closeAll, uid, REPO_ROOT } from '../api/lib.mjs';
 import { assertLocalTargets, assertLocalEnv, N8N_CONTAINER } from './guard.mjs';
+import { FLAGSHIP_AGENT, MARKUP_AGENT } from './variants.mjs';
 
 export { cfg, signIn, rpc, q, one, closeAll, uid };
 
@@ -34,8 +35,8 @@ assertLocalTargets([
   ['Supabase db url', cfg.dbUrl],
 ]);
 
-export const FLAGSHIP = 'fao_reserve_recon_v1';
-export const MARKUP_AGENT = 'fao_e2e_markup_v1';
+export const FLAGSHIP = FLAGSHIP_AGENT;
+export { MARKUP_AGENT };
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const newKey = () => `e2e_${randomUUID().replace(/-/g, '')}`;
 
@@ -158,23 +159,29 @@ export async function ownerTx(fn) {
   }
 }
 
-// The test clock is shared by everything on the local stack: set it, run the
-// callback, and always clear it again.
+// The test clock is shared by everything on the local stack (FAO-GOV-008
+// sweep timing; S08). The layer only sets a clock it owns: it refuses to
+// start when any clock row is already set (someone else's), inserts its own
+// row, and in the finally deletes only that row (matched by its reason), so
+// it never overwrites or clears a clock it did not set. While the row is set,
+// any sweep on the stack sees the moved clock; S08's own sweep expires every
+// overdue request and fails every stale run on the stack (test/e2e/README.md).
+const CLOCK_REASON = 'e2e n8n sweeper expiry';
 export async function withTestClock(offsetSeconds, fn) {
   await ownerTx(async (c) => {
+    const held = await c.query('SELECT reason FROM fao_private.test_clock FOR UPDATE');
+    if (held.rows.length > 0) {
+      throw new Error(`e2e: the shared test clock is already set (reason "${held.rows[0].reason}"); not overwriting it`);
+    }
     await c.query("SELECT set_config('fao.change_reason', 'e2e n8n: test clock for the sweeper expiry scenario', true)");
-    await c.query(
-      `INSERT INTO fao_private.test_clock (id, offset_seconds, reason) VALUES (1, $1, 'e2e n8n sweeper expiry')
-       ON CONFLICT (id) DO UPDATE SET offset_seconds = EXCLUDED.offset_seconds, set_at = now(), reason = EXCLUDED.reason`,
-      [offsetSeconds],
-    );
+    await c.query('INSERT INTO fao_private.test_clock (id, offset_seconds, reason) VALUES (1, $1, $2)', [offsetSeconds, CLOCK_REASON]);
   });
   try {
     return await fn();
   } finally {
     await ownerTx(async (c) => {
       await c.query("SELECT set_config('fao.change_reason', 'e2e n8n: clear the test clock', true)");
-      await c.query('DELETE FROM fao_private.test_clock WHERE id = 1');
+      await c.query('DELETE FROM fao_private.test_clock WHERE id = 1 AND reason = $1', [CLOCK_REASON]);
     });
   }
 }

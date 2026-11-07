@@ -271,7 +271,10 @@ async def test_registry_status_filter_owner_embed_and_untrusted(harness: Harness
     (agent,) = result["agents"]
     assert "rollback_procedure" not in agent
     assert agent["untrusted_text"]["rollback_procedure"].startswith("Append")
-    assert agent["process_owners"]["name"] == "Sarah Chen"
+    # R18: a person's name and role are free text, so they are marked; the
+    # email keeps its place in the owner embed.
+    assert agent["process_owners"] == {"email": "s@x"}
+    assert agent["untrusted_text"]["process_owners"] == {"name": "Sarah Chen", "role": "Controller"}
     (req,) = harness.router.calls("/rest/v1/agent_registry")
     params = req.url.params.multi_items()
     assert ("status", "eq.ACTIVE") in params
@@ -391,7 +394,10 @@ async def test_process_owners_active_and_escalation_names(harness: Harness):
     harness.router.add("GET", "/rest/v1/process_owners", handler)
     result = await harness.call("get_process_owners", {"limit": 2})
     assert result["has_more"] is True
-    names = {o["name"]: o["escalates_to_name"] for o in result["owners"]}
+    # R18: names are free text, so the name and the escalation name are marked.
+    for o in result["owners"]:
+        assert "name" not in o and "role" not in o and "escalates_to_name" not in o
+    names = {o["untrusted_text"]["name"]: o["untrusted_text"]["escalates_to_name"] for o in result["owners"]}
     assert names == {"Aisha": "Marcus", "Marcus": "Sarah"}
     assert [o["active"] for o in result["owners"]] == [True, False]
     first = harness.router.calls("/rest/v1/process_owners")[0]

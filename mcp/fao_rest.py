@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, Mapping, Optional, Sequence, Tuple, Union
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -63,9 +64,33 @@ class FaoError(Exception):
         return {"status": "error", "kind": self.kind, "http_status": self.http_status}
 
 
+# Hosts on which plain http is allowed (local stack only). Everywhere else the
+# URL must be https, because passwords, bearer tokens, the invoke key and run
+# tokens travel on the first request (FAO-GOV-003).
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def url_is_secure(value: Any) -> bool:
+    """True for an https URL, or a plain http URL whose host is loopback."""
+    if not isinstance(value, str) or re.search(r"\s", value):
+        return False
+    m = re.match(r"^(https?)://[^/\s]+", value, re.IGNORECASE)
+    if not m:
+        return False
+    try:
+        host = urlsplit(value).hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if m.group(1).lower() == "https":
+        return True
+    return host.lower() in LOOPBACK_HOSTS
+
+
 def _check_base_url(value: str) -> str:
-    if not isinstance(value, str) or not re.match(r"^https?://[^/\s]+", value):
-        raise ValueError("base url must be an http or https URL")
+    if not url_is_secure(value):
+        raise ValueError("base url must be https, or http on 127.0.0.1, localhost or ::1")
     return value.rstrip("/")
 
 

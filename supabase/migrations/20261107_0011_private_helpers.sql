@@ -16,7 +16,8 @@
 --                no-TRUNCATE triggers; admin audit images
 --   FAO-GOV-002  change reason required for configuration tables
 --   FAO-GOV-004  role checks (has_role, has_any_role) used by RLS and RPCs
---   FAO-GOV-008  fixed result envelope, codes, HTTP statuses and messages
+--   FAO-GOV-008  fixed result envelope, codes, HTTP statuses and messages;
+--                the client RPC body decoder client_args (IC-18)
 --
 -- Replaces: nothing.
 --
@@ -296,6 +297,92 @@ $$;
 COMMENT ON FUNCTION fao_private.parse_id(text) IS
   'FAO-GOV-008: id parsing for client RPCs: 1 to 12 digits and at least 1, else NULL.';
 
+-- IC-18 (FAO-GOV-008): the body of a client RPC. Every client RPC takes one
+-- unnamed json parameter, so PostgREST passes the request body unchanged and
+-- a \u0000 escape reaches the function instead of failing in PostgREST. This
+-- helper decodes it once and never raises. The first failure in this order
+-- sets the reason:
+--   media_type     a Content-Type other than none or application/json (IC-14,
+--                  moved here so it covers all nine; unparseable headers fail
+--                  closed)
+--   undecodable    the body does not cast to jsonb (\u0000 anywhere, keys
+--                  included; bad escapes; numeric overflow)
+--   not_object     SQL NULL, an array or a scalar
+--   duplicate_key  a key repeated (json keeps both, jsonb keeps the last)
+--   unknown_key    a key outside p_required and p_optional (case-sensitive)
+--   missing_key    a p_required key absent
+--   not_string     a value that is not a JSON string or null
+-- Returns {ok, args, note}. ok: args is p_optional merged with the body (every
+-- allowed key present, defaults filled), note {}. Not ok: args is the decoded
+-- object when there is one, else {}; note {invalid_body: <reason>}. The field
+-- rules (text_ok, patterns, parse_id) stay in each RPC.
+CREATE FUNCTION fao_private.client_args(p_body json, p_required text[], p_optional jsonb DEFAULT '{}'::jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_ctype   text;
+  v_obj     jsonb;
+  v_allowed text[];
+  v_reason  text;
+BEGIN
+  BEGIN
+    v_ctype := lower(btrim(split_part(coalesce(
+                 nullif(current_setting('request.headers', true), '')::jsonb->>'content-type', ''), ';', 1)));
+  EXCEPTION WHEN others THEN
+    v_ctype := 'unreadable';
+  END;
+  IF v_ctype IS NULL OR v_ctype NOT IN ('', 'application/json') THEN
+    v_reason := 'media_type';
+  END IF;
+
+  IF v_reason IS NULL THEN
+    BEGIN
+      v_obj := p_body::jsonb;
+    EXCEPTION WHEN others THEN
+      v_reason := 'undecodable';
+      v_obj := NULL;
+    END;
+  END IF;
+
+  IF v_reason IS NULL AND (v_obj IS NULL OR jsonb_typeof(v_obj) <> 'object') THEN
+    v_reason := 'not_object';
+    v_obj := NULL;
+  END IF;
+
+  IF v_reason IS NULL THEN
+    v_allowed := coalesce(p_required, ARRAY[]::text[])
+                 || ARRAY(SELECT k FROM jsonb_object_keys(coalesce(p_optional, '{}'::jsonb)) AS k);
+    IF (SELECT count(*) FROM json_object_keys(p_body)) <> (SELECT count(*) FROM jsonb_object_keys(v_obj)) THEN
+      v_reason := 'duplicate_key';
+    ELSIF EXISTS (SELECT 1 FROM jsonb_object_keys(v_obj) AS k WHERE k <> ALL (v_allowed)) THEN
+      v_reason := 'unknown_key';
+    ELSIF EXISTS (SELECT 1 FROM unnest(coalesce(p_required, ARRAY[]::text[])) AS r WHERE NOT v_obj ? r) THEN
+      v_reason := 'missing_key';
+    ELSIF EXISTS (SELECT 1 FROM jsonb_each(v_obj) AS e WHERE jsonb_typeof(e.value) NOT IN ('string', 'null')) THEN
+      v_reason := 'not_string';
+    END IF;
+  END IF;
+
+  RETURN jsonb_build_object(
+    'ok',   v_reason IS NULL,
+    'args', CASE WHEN v_reason IS NULL THEN coalesce(p_optional, '{}'::jsonb) || v_obj
+                 ELSE coalesce(v_obj, '{}'::jsonb) END,
+    'note', CASE WHEN v_reason IS NULL THEN '{}'::jsonb
+                 ELSE jsonb_build_object('invalid_body', v_reason) END);
+EXCEPTION WHEN others THEN
+  -- Never raises: anything unexpected refuses the body.
+  RETURN jsonb_build_object('ok', false, 'args', '{}'::jsonb,
+                            'note', jsonb_build_object('invalid_body', 'undecodable'));
+END;
+$$;
+
+COMMENT ON FUNCTION fao_private.client_args(json, text[], jsonb) IS
+  'FAO-GOV-008 (IC-18): decodes the one json body of a client RPC and never raises. Returns {ok, args, note}; refuses (note invalid_body) media_type, undecodable (a \u0000 escape anywhere), not_object, duplicate_key, unknown_key, missing_key, not_string; on success args is p_optional merged with the body.';
+
 -- ----------------------------------------------------------------------------
 -- Result envelope (FAO-GOV-008)
 -- ----------------------------------------------------------------------------
@@ -423,7 +510,12 @@ BEGIN
 
   v_attempt := coalesce(p_attempted, '{}'::jsonb);
   IF length(v_attempt::text) > 4000 THEN
-    v_attempt := jsonb_build_object('truncated', left(v_attempt::text, 4000));
+    -- IC-18: the body refusal reason survives the cut, so a journal row still
+    -- says which body rule fired.
+    v_attempt := jsonb_build_object('truncated', left(v_attempt::text, 4000))
+                 || CASE WHEN jsonb_typeof(p_attempted -> 'invalid_body') = 'string'
+                         THEN jsonb_build_object('invalid_body', left(p_attempted ->> 'invalid_body', 64))
+                         ELSE '{}'::jsonb END;
   END IF;
 
   INSERT INTO public.fao_refusal_journal
@@ -672,6 +764,7 @@ REVOKE ALL ON FUNCTION fao_private.code_message(text)                           
 REVOKE ALL ON FUNCTION fao_private.code_http(text)                                        FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION fao_private.text_ok(text, int, int)                                FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION fao_private.parse_id(text)                                         FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
+REVOKE ALL ON FUNCTION fao_private.client_args(json, text[], jsonb)                       FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION fao_private.set_http_status(int)                                   FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION fao_private.journal_allowed(uuid, text)                            FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION fao_private.journal_refusal(text, text, text, jsonb, text)         FROM PUBLIC, anon, authenticated, service_role, fao_workflow;

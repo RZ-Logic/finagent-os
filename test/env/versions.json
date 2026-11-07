@@ -1,7 +1,9 @@
 {
   "postgres_major": 17,
   "supabase_cli": "2.122.0",
-  "node": "22",
-  "python": "3.12",
+  "node": "22.23.4",
+  "python": "3.12.16",
+  "ci_runner": "ubuntu-24.04",
+  "python_lock": "test/env/mcp-py312-linux.lock.txt",
   "n8n": "2.46.6"
 }

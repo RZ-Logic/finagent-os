@@ -97,7 +97,7 @@ SELECT throws_ok(format($$DELETE FROM auth.users WHERE id = %L$$, tests.uid('ais
 INSERT INTO v VALUES ('hitl_before', to_jsonb((SELECT count(*) FROM public.hitl_queue WHERE agent_invoker_id = tests.uid('aisha.okonkwo@finagent-os.demo') OR approver_id = tests.uid('aisha.okonkwo@finagent-os.demo'))));
 INSERT INTO v VALUES ('ledger_before', to_jsonb((SELECT count(*) FROM public.shadow_ledger WHERE inputs->>'invoker_id' = tests.uid('aisha.okonkwo@finagent-os.demo')::text OR inputs->>'agent_invoker_id' = tests.uid('aisha.okonkwo@finagent-os.demo')::text)));
 INSERT INTO v VALUES ('deactivate', tests.jsonb_as('marcus.patel@finagent-os.demo',
-  format($$SELECT public.fao_admin_set_owner_active(%L, 'false', 'pgtap 030 leaver')$$, tests.uid('aisha.okonkwo@finagent-os.demo'))));
+  format($$SELECT public.fao_admin_set_owner_active(json_build_object('p_user_id', %L, 'p_active', 'false', 'p_reason', 'pgtap 030 leaver'))$$, tests.uid('aisha.okonkwo@finagent-os.demo'))));
 SELECT is((SELECT j->>'ok' FROM v WHERE k = 'deactivate'), 'true', 'Marcus deactivates Aisha');
 SELECT is((SELECT active FROM public.process_owners WHERE email = 'aisha.okonkwo@finagent-os.demo'), false, 'Aisha is inactive');
 SELECT is((SELECT count(*) FROM public.hitl_queue WHERE agent_invoker_id = tests.uid('aisha.okonkwo@finagent-os.demo') OR approver_id = tests.uid('aisha.okonkwo@finagent-os.demo')),

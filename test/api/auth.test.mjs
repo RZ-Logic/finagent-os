@@ -12,10 +12,15 @@ import {
 
 after(closeAll);
 
+// IC-18: the same anonymous calls with a JSON \u0000 escape in the body (sent
+// through JSON.stringify) are still NO_SESSION, journaled, because the body
+// is decoded inside the function after the session check.
 test('public key alone: fao_hitl_decide and fao_run_start return 401 NO_SESSION, each journaled once as anon', async () => {
   for (const [fn, args] of [
     ['fao_hitl_decide', { p_hitl_id: '1', p_decision: 'APPROVED' }],
     ['fao_run_start', { p_agent_id: FLAGSHIP, p_reason: 'anon probe', p_idempotency_key: newKey() }],
+    ['fao_hitl_decide', { p_hitl_id: '1', p_decision: 'APPROVED', p_notes: 'a\u0000b' }],
+    ['fao_run_start', { p_agent_id: FLAGSHIP, p_reason: 'anon \u0000 probe', p_idempotency_key: newKey() }],
   ]) {
     const before = await maxRefusalId();
     const r = await rpc(fn, args);
@@ -39,7 +44,7 @@ test('public key alone: other FinAgent functions, tables and the view get PostgR
     ['fao_hitl_get', { p_hitl_id: '1' }],
     ['fao_ledger_correct', { p_ledger_id: '1', p_reason: 'x' }],
     ['fao_admin_set_agent', { p_agent_id: FLAGSHIP, p_status: null, p_ai_advisory_enabled: null, p_max_runs_per_hour: '6', p_reason: 'x' }],
-    ['fao_run_claim', { p_run_token: 'x', p_n8n_execution_id: 'y' }],
+    ['fao_run_claim', { p_run_token: 'x', p_n8n_execution_id: 'y', p_agent_id: FLAGSHIP }],
     ['fao_maintenance_sweep', {}],
   ];
   for (const [fn, args] of calls) {
@@ -64,7 +69,15 @@ test('expired, tampered and foreign-secret tokens get PostgREST 401 and leave no
     tampered_payload: `${h}.${Buffer.from(JSON.stringify({ ...jwtPayload(sarahToken), sub: uid('marcus') })).toString('base64url')}.${s}`,
     other_secret: forgeJwt({ ...claims, iat: now, exp: now + 3600 }, 'not-the-project-secret-not-the-project-secret'),
   };
-  if (cfg.jwtSecret) tokens.expired = forgeJwt({ ...claims, iat: now - 7200, exp: now - 3600 }, cfg.jwtSecret);
+  // R27: the expired case is required (BUILD-CORE 6.7), so a missing secret
+  // fails here instead of silently dropping it. The control proves the
+  // secret is accepted, so the expired token is refused for its expiry and
+  // not for its signature.
+  assert.ok(cfg.jwtSecret, 'test-users.json has jwt_secret (written by local-setup from supabase status); the expired-token case needs it');
+  const control = await rpc('fao_whoami', {}, { token: forgeJwt({ ...claims, iat: now - 60, exp: now + 3600 }, cfg.jwtSecret) });
+  assert.equal(control.status, 200, `control: a fresh token signed with the project secret is accepted (status ${control.status})`);
+  assert.equal(control.body.user_id, uid('sarah'), 'control: it resolves to Sarah');
+  tokens.expired = forgeJwt({ ...claims, iat: now - 7200, exp: now - 3600 }, cfg.jwtSecret);
   const before = await maxRefusalId();
   for (const [label, token] of Object.entries(tokens)) {
     const r = await rpc('fao_hitl_decide', { p_hitl_id: '1', p_decision: 'APPROVED' }, { token });

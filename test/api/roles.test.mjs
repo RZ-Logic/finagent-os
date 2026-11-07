@@ -27,7 +27,7 @@ const WRITE = {
   fao_notifications: ['notification_id', { error: 'reader probe' }],
 };
 const WORKFLOW_RPCS = [
-  ['fao_run_claim', { p_run_token: 'A'.repeat(43), p_n8n_execution_id: 'x' }],
+  ['fao_run_claim', { p_run_token: 'A'.repeat(43), p_n8n_execution_id: 'x', p_agent_id: FLAGSHIP }],
   ['fao_ledger_append_batch', { p_events: [] }],
   ['fao_run_finalize', { p_correlation_id: '00000000-0000-4000-8000-000000000000' }],
   ['fao_run_fail', { p_n8n_execution_id: 'x', p_failed_node: 'x', p_message: 'x' }],

@@ -12,16 +12,31 @@ after(closeAll);
 
 const decision = async (id) => (await one('SELECT decision::text AS d FROM public.hitl_queue WHERE hitl_id = $1', [id])).d;
 
-test('identity named in extra RPC arguments is refused as an unknown function signature', async () => {
+// IC-18: an extra body key is refused by fao_private.client_args as
+// unknown_key, before any authorization, journaled with the caller's id.
+const assertUnknownKey = async (r, label, who) => {
+  assert.equal(r.status, 400, `${label}: status ${r.status}`);
+  assert.equal(r.body.code, 'INVALID_INPUT', label);
+  assert.equal(r.body.message, MESSAGES.INVALID_INPUT, label);
+  assert.notEqual(r.body.ok, true, label);
+  assert.ok(r.body.ref, `${label}: journal reference returned`);
+  const row = await journalRow(r.body.ref);
+  assert.equal(row.code, 'INVALID_INPUT', label);
+  assert.equal(row.actor_uid, uid(who), `${label}: journal names the signed-in caller`);
+  assert.equal(row.attempted.invalid_body, 'unknown_key', `${label}: refused by the body rule`);
+};
+
+test('identity named in extra body keys is refused with 400 INVALID_INPUT (unknown_key), journaled', async () => {
   const { hitlId } = await makeRequest('aisha');
   const aisha = await signIn('aisha');
   for (const extra of [{ p_approver_id: uid('sarah') }, { p_user_id: uid('sarah') }, { approver_id: uid('sarah') }]) {
     const r = await rpc('fao_hitl_decide', { p_hitl_id: String(hitlId), p_decision: 'APPROVED', ...extra }, { token: aisha });
-    assert.ok([400, 404].includes(r.status), `status ${r.status}`);
-    assert.ok(!(r.body && r.body.ok === true));
+    await assertUnknownKey(r, `decide + ${Object.keys(extra)[0]}`, 'aisha');
   }
+  const runsBefore = Number((await one('SELECT count(*) AS n FROM public.run_invocations WHERE invoker_id = $1', [uid('sarah')])).n);
   const s = await rpc('fao_run_start', { p_agent_id: FLAGSHIP, p_reason: 'x', p_idempotency_key: newKey(), p_invoker_id: uid('sarah') }, { token: aisha });
-  assert.ok([400, 404].includes(s.status), `run start status ${s.status}`);
+  await assertUnknownKey(s, 'run start + p_invoker_id', 'aisha');
+  assert.equal(Number((await one('SELECT count(*) AS n FROM public.run_invocations WHERE invoker_id = $1', [uid('sarah')])).n), runsBefore, 'no run recorded under Sarah');
   assert.equal(await decision(hitlId), 'PENDING');
 });
 

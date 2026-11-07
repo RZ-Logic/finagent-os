@@ -69,16 +69,20 @@ function loadUsers() {
   return JSON.parse(readFileSync(USERS_FILE, 'utf8'));
 }
 
-// Highest numeric n8n execution id any run was ever claimed with, rounded up
-// to the next 1000: a fresh instance starts above it (see n8n-exec-seq.cjs).
-async function executionFloor(users) {
+// FAO-GOV-008 (fix round 2 R09): the highest numeric n8n execution id any run
+// on the stack was claimed with. Recorded only. A fresh instance numbers its
+// executions from 1 again, so a rerun without a reset reuses ids that earlier
+// runs hold, which the database allows since R09 (an id is unique only among
+// RUNNING runs). The earlier n8n-exec-seq.cjs workaround that started each
+// instance above this value is gone, so every rerun exercises the R09 fix.
+async function claimedExecutionMax(users) {
   const client = new pg.Client({ connectionString: users.db_url });
   await client.connect();
   try {
     const { rows } = await client.query(
       "SELECT coalesce(max(n8n_execution_id::bigint), 0) AS m FROM public.run_invocations WHERE n8n_execution_id ~ '^[0-9]{1,15}$'",
     );
-    return (Math.floor(Number(rows[0].m) / 1000) + 1) * 1000;
+    return Number(rows[0].m);
   } finally {
     await client.end();
   }
@@ -202,19 +206,17 @@ async function up() {
     '-v', `${VOLUME}:/home/node/.n8n`,
   ];
   const ids = publishIds();
-  const floor = await executionFloor(users);
+  const reusedUpTo = await claimedExecutionMax(users);
   const script = [
     'set -e',
     'n8n import:credentials --input=/import/credentials.json',
     'n8n import:workflow --separate --input=/import/workflows',
     ...ids.map((id) => `n8n publish:workflow --id=${id}`),
-    `node /e2e/n8n-exec-seq.cjs ${floor}`,
   ].join('\n');
   const t0 = Date.now();
   const imp = docker([
     'run', '--rm', '--network', 'none', ...common,
     '--mount', `type=bind,source=${IMPORT_DIR},target=/import,readonly`,
-    '--mount', `type=bind,source=${TEST_DIR},target=/e2e,readonly`,
     '--entrypoint', 'sh', image, '-c', script,
   ], { allowFail: true, timeout: 600000 });
   writeFileSync(join(E2E_DIR, 'import.log'), imp.out);
@@ -225,7 +227,6 @@ async function up() {
   if (/Skipped workflow|Skipping credential|could not be imported/i.test(imp.out)) importProblems.push('import skipped items');
   const published = (imp.out.match(/Publishing workflow with ID: /g) || []).length;
   if (published !== ids.length) importProblems.push(`published ${published} of ${ids.length}`);
-  if (!imp.out.includes(`execution ids start after ${floor}`)) importProblems.push(`execution id floor ${floor} not set`);
   if (/An error occurred|Error updating database|^Error/im.test(imp.out)) importProblems.push('error text in the import log');
   if (importProblems.length) throw new Error(`n8n import/publish problems: ${importProblems.join('; ')} (see .local/e2e/import.log)`);
   log(`import and publish done in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
@@ -267,7 +268,7 @@ async function up() {
     flagship_path: FLAGSHIP_PATH,
     sweep_path: SWEEP_PATH,
     variant_paths: Object.fromEntries(Object.entries(VARIANTS).map(([k, v]) => [k, v.path])),
-    execution_id_floor: floor,
+    execution_ids_already_claimed_up_to: reusedUpTo,
     setup_seconds: Number(((Date.now() - started) / 1000).toFixed(1)),
   };
   writeFileSync(STATE, `${JSON.stringify(state, null, 2)}\n`);

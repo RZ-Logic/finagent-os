@@ -17,8 +17,9 @@
 --   FAO-GOV-002  Settings table (fao_settings) and per-agent run rate limit
 --                (agent_registry.max_runs_per_hour)
 --   FAO-GOV-004  Application roles (fao_user_roles); hitl_queue coherence
---                rule extended for EXPIRED; no-self-approval and tier CHECKs;
---                frozen approval counts on every request
+--                rule extended for EXPIRED; no-self-approval CHECK (the tier
+--                CHECK is added in 0013, after the legacy closure, fix round
+--                2 R31); frozen approval counts on every request
 --   FAO-GOV-007  Notification attempts (fao_notifications)
 --   FAO-GOV-008  Run records (run_invocations) and single-use run tokens
 --                stored only as a hash (fao_private.run_tokens)
@@ -33,6 +34,10 @@
 --
 -- Must work both applied on its own and inside one transaction with 0011 to
 -- 0017: no CREATE INDEX CONCURRENTLY, no VACUUM, no transaction control.
+-- Must also re-apply after phase2-5/rollback/rollback_core.sql (fix round 2
+-- R33): the rollback keeps the columns section 6 adds and the widened
+-- coherence CHECK, so those columns are added IF NOT EXISTS and a guard then
+-- checks that every kept column has exactly the shape this file creates.
 -- The fao_workflow role is created NOLOGIN with no password. LOGIN and the
 -- password are set outside migrations (local setup script, or the runbook).
 --
@@ -91,7 +96,7 @@ CREATE TABLE public.run_invocations (
   idempotency_key   text                  NOT NULL CHECK (idempotency_key ~ '^[A-Za-z0-9_-]{8,64}$'),
   state             public.fao_run_state  NOT NULL DEFAULT 'REQUESTED',
   asset_scope       text[],
-  n8n_execution_id  text                  UNIQUE,
+  n8n_execution_id  text,
   requested_at      timestamptz           NOT NULL DEFAULT now(),
   claimed_at        timestamptz,
   finished_at       timestamptz,
@@ -102,6 +107,18 @@ CREATE TABLE public.run_invocations (
 -- Rate limit lookups: runs by an invoker for an agent in the last hour.
 CREATE INDEX idx_run_invocations_invoker_agent_requested
   ON public.run_invocations (invoker_id, agent_id, requested_at);
+
+-- FAO-GOV-008 (fix round 2 R09): n8n numbers executions per instance, so a
+-- new or restored n8n database reuses ids that earlier runs hold. An id is
+-- unique only among RUNNING runs (one n8n execution claims one run); finished
+-- and AWAITING_HITL runs keep theirs as evidence. fao_run_fail resolves an id
+-- to the unfinished run that claimed it most recently.
+CREATE UNIQUE INDEX run_invocations_running_execution_key
+  ON public.run_invocations (n8n_execution_id)
+  WHERE state = 'RUNNING';
+
+CREATE INDEX idx_run_invocations_n8n_execution_id
+  ON public.run_invocations (n8n_execution_id);
 
 -- Sweeper lookups: runs that are not yet terminal.
 CREATE INDEX idx_run_invocations_open_state
@@ -245,33 +262,35 @@ REVOKE ALL ON SEQUENCE public.fao_notifications_notification_id_seq  FROM PUBLIC
 -- ----------------------------------------------------------------------------
 -- 6. Changes to existing tables. Adding a column with a constant default
 --    neither rewrites rows nor fires row triggers, so the shadow_ledger
---    append-only trigger is not involved.
+--    append-only trigger is not involved. The seven columns are added IF NOT
+--    EXISTS because rollback_core.sql keeps them (R33); the guard after the
+--    ALTERs refuses a kept column whose shape differs.
 -- ----------------------------------------------------------------------------
 
 -- process_owners (FAO-GOV-013, FAO-GOV-004): an owner can be deactivated
 -- instead of deleted; email is unique ignoring case.
 ALTER TABLE public.process_owners
-  ADD COLUMN active boolean NOT NULL DEFAULT true;
+  ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true;
 
 CREATE UNIQUE INDEX process_owners_email_lower_key
   ON public.process_owners (lower(email));
 
 -- agent_registry (FAO-GOV-002): per-agent run rate limit for fao_run_start.
 ALTER TABLE public.agent_registry
-  ADD COLUMN max_runs_per_hour int NOT NULL DEFAULT 6
+  ADD COLUMN IF NOT EXISTS max_runs_per_hour int NOT NULL DEFAULT 6
     CONSTRAINT agent_max_runs_per_hour_range CHECK (max_runs_per_hour BETWEEN 1 AND 60);
 
 -- hitl_queue (FAO-GOV-004): approval counts frozen at creation, the approval
 -- link, and the assets that caused the review.
 ALTER TABLE public.hitl_queue
-  ADD COLUMN configured_approvals int   NOT NULL DEFAULT 1 CHECK (configured_approvals >= 1),
-  ADD COLUMN enforced_approvals   int   NOT NULL DEFAULT 1 CHECK (enforced_approvals >= 1),
-  ADD COLUMN approval_url         text,
-  ADD COLUMN escalated_assets     jsonb NOT NULL DEFAULT '[]'::jsonb;
+  ADD COLUMN IF NOT EXISTS configured_approvals int   NOT NULL DEFAULT 1 CHECK (configured_approvals >= 1),
+  ADD COLUMN IF NOT EXISTS enforced_approvals   int   NOT NULL DEFAULT 1 CHECK (enforced_approvals >= 1),
+  ADD COLUMN IF NOT EXISTS approval_url         text,
+  ADD COLUMN IF NOT EXISTS escalated_assets     jsonb NOT NULL DEFAULT '[]'::jsonb;
 
 -- Coherence rule extended for EXPIRED. A superset of the 0005 rule, so every
 -- existing row passes and the constraint is validated.
-ALTER TABLE public.hitl_queue DROP CONSTRAINT hitl_decision_coherence;
+ALTER TABLE public.hitl_queue DROP CONSTRAINT IF EXISTS hitl_decision_coherence;
 ALTER TABLE public.hitl_queue ADD CONSTRAINT hitl_decision_coherence CHECK (
   (decision = 'PENDING' AND approver_id IS NULL AND decided_at IS NULL)
   OR (decision IN ('APPROVED','REJECTED') AND approver_id IS NOT NULL AND decided_at IS NOT NULL)
@@ -279,16 +298,87 @@ ALTER TABLE public.hitl_queue ADD CONSTRAINT hitl_decision_coherence CHECK (
 );
 
 -- NOT VALID: enforced for every new or changed row; historical rows stay as
--- evidence exactly as recorded.
+-- evidence exactly as recorded. The tier CHECK (hitl_tier_not_blocked) is
+-- added in 0013 after the legacy closure (fix round 2 R31): a NOT VALID CHECK
+-- still applies to UPDATEs, so a v1 PENDING request with tier BLOCKED could
+-- not be closed as EXPIRED if the CHECK came first.
 ALTER TABLE public.hitl_queue ADD CONSTRAINT hitl_no_self_approval
   CHECK (approver_id IS NULL OR approver_id <> agent_invoker_id) NOT VALID;
-ALTER TABLE public.hitl_queue ADD CONSTRAINT hitl_tier_not_blocked
-  CHECK (risk_tier <> 'BLOCKED') NOT VALID;
 
 -- shadow_ledger (FAO-GOV-001): a CORRECTION row references the row it
 -- corrects; the original is never changed.
 ALTER TABLE public.shadow_ledger
-  ADD COLUMN corrects_ledger_id bigint NULL REFERENCES public.shadow_ledger(ledger_id) ON DELETE RESTRICT;
+  ADD COLUMN IF NOT EXISTS corrects_ledger_id bigint NULL REFERENCES public.shadow_ledger(ledger_id) ON DELETE RESTRICT;
+
+-- Guard (R33): every column above, whether added now or kept by a rollback,
+-- has exactly the shape this file creates, with its CHECK or foreign key.
+DO $$
+DECLARE
+  r     record;
+  v_bad text[] := ARRAY[]::text[];
+BEGIN
+  FOR r IN
+    SELECT *
+      FROM (VALUES
+        ('process_owners', 'active',               'boolean', true,  'true'),
+        ('agent_registry', 'max_runs_per_hour',    'integer', true,  '6'),
+        ('hitl_queue',     'configured_approvals', 'integer', true,  '1'),
+        ('hitl_queue',     'enforced_approvals',   'integer', true,  '1'),
+        ('hitl_queue',     'approval_url',         'text',    false, NULL),
+        ('hitl_queue',     'escalated_assets',     'jsonb',   true,  '''[]''::jsonb'),
+        ('shadow_ledger',  'corrects_ledger_id',   'bigint',  false, NULL)
+      ) AS t(tbl, col, typ, is_notnull, dflt)
+  LOOP
+    IF NOT EXISTS (
+      SELECT 1
+        FROM pg_catalog.pg_attribute a
+        JOIN pg_catalog.pg_class cl     ON cl.oid = a.attrelid
+        JOIN pg_catalog.pg_namespace ns ON ns.oid = cl.relnamespace
+        LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+       WHERE ns.nspname = 'public'
+         AND cl.relname = r.tbl
+         AND a.attname = r.col
+         AND NOT a.attisdropped
+         AND pg_catalog.format_type(a.atttypid, a.atttypmod) = r.typ
+         AND a.attnotnull = r.is_notnull
+         AND pg_catalog.pg_get_expr(d.adbin, d.adrelid) IS NOT DISTINCT FROM r.dflt
+    ) THEN
+      v_bad := v_bad || (r.tbl || '.' || r.col);
+    END IF;
+  END LOOP;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint
+                  WHERE conrelid = 'public.agent_registry'::regclass
+                    AND conname = 'agent_max_runs_per_hour_range'
+                    AND pg_catalog.pg_get_constraintdef(oid) = 'CHECK (((max_runs_per_hour >= 1) AND (max_runs_per_hour <= 60)))') THEN
+    v_bad := v_bad || 'agent_registry.agent_max_runs_per_hour_range'::text;
+  END IF;
+  IF (SELECT count(*) FROM pg_catalog.pg_constraint
+       WHERE conrelid = 'public.hitl_queue'::regclass
+         AND contype = 'c'
+         AND pg_catalog.pg_get_constraintdef(oid) IN ('CHECK ((configured_approvals >= 1))',
+                                                      'CHECK ((enforced_approvals >= 1))')) <> 2 THEN
+    v_bad := v_bad || 'hitl_queue approval count checks'::text;
+  END IF;
+  IF NOT EXISTS (SELECT 1
+                   FROM pg_catalog.pg_constraint con
+                   JOIN pg_catalog.pg_attribute a  ON a.attrelid = con.conrelid AND a.attname = 'corrects_ledger_id'
+                   JOIN pg_catalog.pg_attribute fa ON fa.attrelid = con.confrelid AND fa.attname = 'ledger_id'
+                  WHERE con.conrelid = 'public.shadow_ledger'::regclass
+                    AND con.contype = 'f'
+                    AND con.confrelid = 'public.shadow_ledger'::regclass
+                    AND con.conkey = ARRAY[a.attnum]
+                    AND con.confkey = ARRAY[fa.attnum]
+                    AND con.confdeltype = 'r') THEN
+    v_bad := v_bad || 'shadow_ledger.corrects_ledger_id foreign key'::text;
+  END IF;
+
+  IF cardinality(v_bad) > 0 THEN
+    RAISE EXCEPTION 'FAO-GOV-001 migration 0010: existing columns or constraints differ from this file: %', array_to_string(v_bad, ', ')
+      USING ERRCODE = '22023';
+  END IF;
+END
+$$;
 
 CREATE INDEX idx_shadow_ledger_corr_event
   ON public.shadow_ledger (correlation_id, (inputs->>'event_type'));

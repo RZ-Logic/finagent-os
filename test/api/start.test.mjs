@@ -7,7 +7,7 @@
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { startRun, one, uid, rpc, signIn, closeAll, newKey, MESSAGES } from './lib.mjs';
+import { startRun, one, q, uid, rpc, signIn, closeAll, newKey, MESSAGES } from './lib.mjs';
 
 after(closeAll);
 
@@ -79,17 +79,18 @@ test('the reader and Outsider get NOT_AN_OWNER', async () => {
   }
 });
 
+// R28: only rows newer than the call are read, so RUN_REFUSED rows left by
+// earlier runs (a --no-reset rerun) cannot satisfy the invoker check.
 test('a STUB agent gives 409 and a committed RUN_REFUSED row', async () => {
-  const before = Number((await one(
-    "SELECT count(*) AS n FROM public.shadow_ledger WHERE agent_id = 'fao_variance_analyzer_v1' AND inputs->>'event_type' = 'RUN_REFUSED'",
-  )).n);
+  const before = (await one('SELECT coalesce(max(ledger_id), 0)::text AS m FROM public.shadow_ledger')).m;
   const r = await startRun('aisha', { agent: 'fao_variance_analyzer_v1' });
   assert.equal(r.status, 409);
   assert.equal(r.body.code, 'AGENT_NOT_ACTIVE');
-  const row = await one(
-    "SELECT count(*) AS n, max(inputs->>'invoker_id') AS inv, max(policy_outcome::text) AS o FROM public.shadow_ledger WHERE agent_id = 'fao_variance_analyzer_v1' AND inputs->>'event_type' = 'RUN_REFUSED'",
+  const rows = await q(
+    "SELECT inputs->>'invoker_id' AS inv, policy_outcome::text AS o FROM public.shadow_ledger WHERE ledger_id > $1::bigint AND agent_id = 'fao_variance_analyzer_v1' AND inputs->>'event_type' = 'RUN_REFUSED' ORDER BY ledger_id",
+    [before],
   );
-  assert.equal(Number(row.n), before + 1, 'RUN_REFUSED committed and visible to another connection');
-  assert.equal(row.inv, uid('aisha'));
-  assert.equal(row.o, 'DENY');
+  assert.equal(rows.length, 1, 'exactly one new RUN_REFUSED row, committed and visible to another connection');
+  assert.equal(rows[0].inv, uid('aisha'), 'the new row names the invoker from the session');
+  assert.equal(rows[0].o, 'DENY', 'the new row is DENY');
 });

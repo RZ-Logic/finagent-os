@@ -5,7 +5,7 @@
 -- RUN_REFUSED row), FAO-GOV-003 (rate limit), FAO-GOV-001 (journal).
 -- ============================================================================
 BEGIN;
-SELECT plan(64);
+SELECT plan(65);
 
 CREATE TEMP TABLE v (k text PRIMARY KEY, j jsonb);
 CREATE TEMP TABLE tokens (t text);
@@ -116,6 +116,14 @@ SELECT ok(pg_temp.g('s1c')->>'replayed' = 'true' AND pg_temp.g('s1c')->>'run_tok
 SELECT is(pg_temp.g('s1c')->>'state', 'RUNNING', 'replay after the claim reports RUNNING');
 INSERT INTO v VALUES ('s1d', tests.start_raw('aisha.okonkwo@finagent-os.demo', 'fao_ratelimit_test_v1', 'pgtap 050', pg_temp.g('key1')#>>'{}'));
 SELECT is(pg_temp.g('s1d')->>'code', 'INVALID_INPUT', 'the same key for a different agent is INVALID_INPUT');
+-- IC-18: each field-rule refusal was refused by its own rule, not by the body
+-- check of fao_private.client_args (no attempted.invalid_body)
+SELECT is((SELECT count(*) FROM v
+           WHERE k IN ('bad_agent','empty_reason','long_reason','ctrl_reason','short_key','bad_key','bad_via','s1d')
+             AND j->>'code' = 'INVALID_INPUT'
+             AND tests.journal_row((j->>'ref')::bigint) IS NOT NULL
+             AND NOT (tests.journal_row((j->>'ref')::bigint)->'attempted' ? 'invalid_body')),
+  8::bigint, 'IC-18: the eight field-rule refusals of fao_run_start carry no attempted.invalid_body');
 
 -- Claim refusals
 INSERT INTO v VALUES ('claim_second', tests.claim_raw(pg_temp.g('s1b')->>'run_token', 'pgtap-050-second'));

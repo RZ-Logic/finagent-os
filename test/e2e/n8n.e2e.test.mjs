@@ -193,6 +193,7 @@ test('S05 forged, expired, reused and missing run tokens are refused at the webh
   const ev = {};
   const before = L.lastExecutionId();
   const journalStart = Number((await L.one('SELECT coalesce(max(refusal_id), 0) AS m FROM public.fao_refusal_journal')).m);
+  const s05Start = (await L.one('SELECT clock_timestamp() AS t')).t;
 
   // Forged: the right shape, never issued.
   const forged = randomBytes(32).toString('base64url');
@@ -209,7 +210,9 @@ test('S05 forged, expired, reused and missing run tokens are refused at the webh
   );
   assert.deepEqual(jr.map((r) => r.code), ['INVALID_TOKEN']);
   assert.ok(!JSON.stringify(jr[0].attempted).includes(forged), 'the token is never journaled');
-  assert.equal((await L.q('SELECT 1 FROM public.run_invocations WHERE n8n_execution_id = $1', [fex.id])).length, 0);
+  // R09: a fresh instance reuses execution ids that earlier runs hold, so only
+  // a run claimed during this test would mean the forged token claimed one.
+  assert.equal((await L.q('SELECT 1 FROM public.run_invocations WHERE n8n_execution_id = $1 AND claimed_at >= $2', [fex.id, s05Start])).length, 0);
   ev.forged = { status: f.status, execution: fex.id };
 
   // Missing or malformed: refused by Validate Invoke Body before any database call.
@@ -392,7 +395,7 @@ test('S12 a NaN or missing balance fails closed', T, async (t) => {
   assert.deepEqual(Object.keys(by), ['BTC', 'ETH', 'XRP']);
   assert.equal(by.BTC.outcome, 'BLOCKED');
   assert.equal(by.BTC.inputs.band_status, 'INVALID_INPUT');
-  assert.match(by.BTC.inputs.input_problem, /^wallet value is (nan|null)$/);
+  assert.match(by.BTC.inputs.input_problem, /^wallet value is nan$/);
   assert.equal(by.BTC.inputs.wallet, null);
   assert.equal(by.BTC.inputs.ratio, null);
   assert.equal(by.ETH.outcome, 'BLOCKED');
@@ -427,9 +430,10 @@ test('S07 a Slack failure records NOTIFICATION_FAILED and the sweeper renotifies
   assert.equal(first.length, 1);
   assert.equal(first[0].outcome, 'FAILED');
   assert.equal(first[0].attempt, 1);
-  // n8n 2.46 puts no HTTP status on the error-output item, so the stored text is
-  // the generic NodeApiError message (recorded as a finding in test/e2e/README.md).
-  assert.match(first[0].error, /^http error/);
+  // n8n 2.46 puts no HTTP status on the error-output item; Classify Slack Result
+  // recovers it from the cause and adds the Slack error code (e2e finding 2, fixed
+  // in fix round 2).
+  assert.match(first[0].error, /^http error 500: .*\(e2e_forced_failure\)$/);
   const failedRow = (await L.ledger(corr)).filter((r) => r.t === 'NOTIFICATION_FAILED');
   assert.equal(failedRow.length, 1);
   assert.equal(failedRow[0].status, 'FAILURE');

@@ -20,6 +20,15 @@ import { configToml } from '../../scripts/stage-local-supabase.mjs';
 after(closeAll);
 
 const PRIVATE_SCHEMAS = ['fao_private', 'tests'];
+// IC-18: client RPCs take one unnamed json body, which pg_graphql does not
+// reflect, so none of these names may appear; a control function with a
+// named argument, created in the rolled-back transaction, shows that
+// introspection works.
+const CLIENT_RPCS = [
+  'fao_whoami', 'fao_run_start', 'fao_hitl_get', 'fao_hitl_decide', 'fao_ledger_correct',
+  'fao_admin_set_threshold', 'fao_admin_set_agent', 'fao_admin_set_role', 'fao_admin_set_owner_active',
+];
+const CONTROL_FN = 'zz_graphql_control';
 const INTROSPECTION = '{ __schema { queryType { name } mutationType { name } types { name fields { name } } } }';
 
 // The request search_path PostgREST uses for /graphql/v1, from the staged
@@ -122,15 +131,18 @@ test('pg_graphql (enabled, introspection on, in a rolled-back transaction) refle
     for (const s of ['public', ...PRIVATE_SCHEMAS]) {
       await client.query(`COMMENT ON SCHEMA ${s} IS e'@graphql({"introspection": true})'`);
     }
+    await client.query(`CREATE FUNCTION public.${CONTROL_FN}(p_x text) RETURNS text LANGUAGE sql VOLATILE AS $$ SELECT p_x $$`);
+    await client.query(`GRANT EXECUTE ON FUNCTION public.${CONTROL_FN}(text) TO anon, authenticated`);
     await client.query(`SET LOCAL search_path = ${path.map((s) => `"${s}"`).join(', ')}`);
 
-    for (const [label, become, control] of [['anon', asAnon, 'fao_run_start'], ['outsider', asOutsider, 'fao_whoami']]) {
+    for (const [label, become, control] of [['anon', asAnon, CONTROL_FN], ['outsider', asOutsider, CONTROL_FN]]) {
       await become();
       const body = await resolve(INTROSPECTION);
       const names = schemaNames(body);
       assert.ok(names, `${label}: introspection answered (${JSON.stringify(body.errors || null)})`);
       assert.ok(names.includes(control), `${label}: control field ${control} is reflected, so introspection works`);
       assert.deepEqual(leaked(names, priv), [], `${label}: no fao_private or tests name is reflected`);
+      assert.deepEqual(CLIENT_RPCS.filter((n) => names.some((x) => x === n || x.includes(n))), [], `${label}: no client RPC is reflected (IC-18)`);
       for (const query of [`{ has_any_role(p_uid: "${uid('sarah')}") }`, 'mutation { do_as(p_who: "service_role", p_sql: "SELECT 1") }']) {
         const r = await resolve(query);
         assert.equal(r.data ?? null, null, `${label}: ${query}: no data`);

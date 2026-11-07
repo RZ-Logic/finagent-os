@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
   <title>FinAgent OS approval</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="styles.css">
   <script src="config.js"></script>
   <script src="vendor/supabase.js"></script>
@@ -17,7 +18,7 @@
       <p class="muted">Human review of a governed agent run (FAO-GOV-004).</p>
     </header>
 
-    <p id="status" class="status" role="status" aria-live="polite">Loading.</p>
+    <p id="status" class="status" role="status" aria-live="polite" tabindex="-1">Loading.</p>
     <p id="reference" class="reference muted" hidden></p>
 
     <section id="signin" class="card" hidden>
@@ -34,7 +35,7 @@
     <section id="request" class="card" hidden>
       <h2 id="request-title">Request</h2>
       <dl id="request-fields" class="fields"></dl>
-      <h3>Escalated assets</h3>
+      <h3 id="request-assets-heading">Escalated assets</h3>
       <ul id="request-assets" class="assets"></ul>
       <p id="request-note" class="note" hidden></p>
     </section>
@@ -43,7 +44,7 @@
       <h2>Decision</h2>
       <form id="decide-form" novalidate>
         <label for="decide-notes">Notes (optional, up to 2000 characters)</label>
-        <textarea id="decide-notes" name="notes" rows="4" maxlength="2000"></textarea>
+        <textarea id="decide-notes" name="notes" rows="4"></textarea>
         <div class="actions">
           <button id="approve" type="button" class="approve">Approve</button>
           <button id="reject" type="button" class="reject">Reject</button>

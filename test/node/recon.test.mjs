@@ -7,7 +7,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runCodeNode, codeOf, decodeBalances, readJson } from './harness.mjs';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { runCodeNode, codeOf, decodeBalances, readJson, WORKFLOWS } from './harness.mjs';
 
 const WF = 'fao_reserve_recon_v1.json';
 const FIX = readJson('fixtures/policy_branches.json');
@@ -281,4 +284,76 @@ test('Notify Input has exactly hitl_id, kind and level', async () => {
     upstream: { 'Finalize Run': [{ r }], 'Human Review Required?': [{ r }], 'Claim Run': [{ r: CLAIM }] },
   });
   assert.deepEqual(out, [{ hitl_id: 42, kind: 'REQUESTED', level: 0 }]);
+});
+
+// --- Fix round 2: zero/zero rationale, NaN across the task runner -------------
+
+test('Per-Asset Reconcile ZERO_LEDGER with a zero wallet does not claim a non-zero wallet (FAO-REC-006)', async () => {
+  for (const [w, l] of [[0, 0], ['0', '0'], [0, '0.0']]) {
+    const out = await reconcile({ BTC: w }, { BTC: l });
+    assert.equal(out.length, 1);
+    const item = out[0];
+    assert.equal(item.inputs.band_status, 'ZERO_LEDGER');
+    assert.equal(item.policy_outcome, 'REQUIRE_HUMAN');
+    assert.equal(item.policy_sub_tier, 'STANDARD');
+    assert.equal(item.hitl_status, 'PENDING');
+    assert.ok(!/non-zero wallet/.test(item.policy_rationale), item.policy_rationale);
+    assert.match(item.policy_rationale, /^FAO-REC-006 BTC zero ledger balance and zero wallet balance\./);
+  }
+  const out = await reconcile({ BTC: 5 }, { BTC: 0 });
+  assert.match(out[0].policy_rationale, /^FAO-REC-006 BTC zero ledger balance with non-zero wallet \(5\)\./);
+});
+
+// n8n hands items to the next node as JSON (the task runner), which turns NaN
+// and +/-Infinity into null. Init Execution runs on a copy of the export whose
+// fixture literals hold those values (as test/e2e/variants.mjs does), its
+// output goes through JSON, and Per-Asset Reconcile must still name nan and
+// infinite, not null.
+test('Init Execution sends NaN and infinities so Per-Asset Reconcile still names them after JSON (FAO-REC-001)', async () => {
+  const wf = JSON.parse(readFileSync(join(WORKFLOWS, WF), 'utf8'));
+  const init = wf.nodes.find((n) => n.name === 'Init Execution');
+  const code = init.parameters.jsCode;
+  const swapped = code
+    .replace(/(const wallet_data = \{\n\s*BTC:\s*)167690\.25,/, '$1NaN,')
+    .replace(/(const ledger_data = \{\n\s*BTC:\s*167188\.68,\n\s*ETH:\s*)2847100,/, '$1-Infinity,')
+    .replace(/(\n\s*USDC:\s*)891723456,(\s*\/\/ synthetic clean)/, '$1Infinity,$2');
+  assert.notEqual(swapped, code, 'fixture literals were replaced');
+  assert.equal((swapped.match(/NaN,|-Infinity,|Infinity,/g) || []).length, 3, 'three literals replaced');
+  init.parameters.jsCode = swapped;
+  const dir = mkdtempSync(join(tmpdir(), 'fao-recon-nan-'));
+  const copy = join(dir, 'fao_reserve_recon_nan_probe.json');
+  writeFileSync(copy, JSON.stringify(wf));
+  try {
+    const claim = CLAIM;
+    const out = await runCodeNode(copy, 'Init Execution', { items: [{ r: claim }], upstream: { 'Claim Run': [{ r: claim }] } });
+    assert.equal(out.length, 1);
+    const wire = JSON.parse(JSON.stringify(out[0]));
+    assert.equal(wire._wallet_data.BTC, 'NaN');
+    assert.equal(wire._ledger_data.ETH, '-Infinity');
+    assert.equal(wire._wallet_data.USDC, 'Infinity');
+    assert.equal(wire._ledger_data.BTC, 167188.68, 'finite balances unchanged');
+    const thresholds = FIX.thresholds;
+    const up = { ...upstreamFor(wire._wallet_data, wire._ledger_data, thresholds), 'Init Execution': [wire] };
+    const items = await runCodeNode(WF, 'Per-Asset Reconcile', { items: thresholds, upstream: up });
+    const by = Object.fromEntries(items.map((o) => [o.inputs.asset, o]));
+    assert.equal(by.BTC.inputs.band_status, 'INVALID_INPUT');
+    assert.equal(by.BTC.policy_outcome, 'BLOCKED');
+    assert.equal(by.BTC.inputs.input_problem, 'wallet value is nan');
+    assert.equal(by.ETH.inputs.input_problem, 'ledger value is infinite');
+    assert.equal(by.USDC.inputs.input_problem, 'wallet value is infinite');
+    for (const a of ['BTC', 'ETH', 'USDC']) {
+      assert.equal(by[a].hitl_status, 'PENDING', a);
+      assert.equal(by[a].inputs.ratio, null, a);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Init Execution sends the shipped fixtures unchanged through JSON', async () => {
+  const out = await runCodeNode(WF, 'Init Execution', { items: [{ r: CLAIM }], upstream: { 'Claim Run': [{ r: CLAIM }] } });
+  const wire = JSON.parse(JSON.stringify(out[0]));
+  assert.deepEqual(wire._wallet_data, out[0]._wallet_data);
+  assert.deepEqual(wire._ledger_data, out[0]._ledger_data);
+  for (const v of [...Object.values(wire._wallet_data), ...Object.values(wire._ledger_data)]) assert.equal(typeof v, 'number');
 });

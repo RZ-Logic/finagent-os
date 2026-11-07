@@ -5,7 +5,7 @@
 -- FAO-GOV-001 (refusals journaled with actor and attempt).
 -- ============================================================================
 BEGIN;
-SELECT plan(48);
+SELECT plan(58);
 
 CREATE TEMP TABLE v (k text PRIMARY KEY, j jsonb);
 INSERT INTO v VALUES ('req', to_jsonb(tests.make_request('aisha.okonkwo@finagent-os.demo')));
@@ -66,6 +66,51 @@ SELECT ok((tests.journal_row((SELECT (j->>'ref')::bigint FROM v WHERE k = 'anon'
           AND tests.journal_row((SELECT (j->>'ref')::bigint FROM v WHERE k = 'anon'))->>'db_role' = 'anon',
   'the anonymous refusal is journaled with no actor and db role anon');
 
+-- IC-18: the field-rule refusals above were refused by their own rule, not by
+-- the body check (no attempted.invalid_body on their journal rows)
+SELECT is((SELECT count(*) FROM v
+           WHERE k IN ('bad_id','zero_id','bad_decision','lower_decision','expired_decision','long_notes','ctrl_notes')
+             AND j->>'code' = 'INVALID_INPUT'
+             AND tests.journal_row((j->>'ref')::bigint) IS NOT NULL
+             AND NOT (tests.journal_row((j->>'ref')::bigint)->'attempted' ? 'invalid_body')),
+  7::bigint, 'IC-18: the seven field-rule refusals carry no attempted.invalid_body');
+
+-- IC-18 body rules (FAO-GOV-004, FAO-GOV-008): fao_hitl_decide takes one json
+-- body; a body fao_private.client_args refuses is INVALID_INPUT, journaled
+-- with attempted.invalid_body, and decides nothing
+INSERT INTO v VALUES ('body_before', to_jsonb(tests.journal_total()));
+INSERT INTO v VALUES ('b_nul_value', tests.rpc_body('sarah.chen@finagent-os.demo', 'fao_hitl_decide',
+  format('{"p_hitl_id": "%s", "p_decision": "APPROVED", "p_notes": "a\u0000b"}', (SELECT j::text FROM v WHERE k = 'req3'))::json));
+INSERT INTO v VALUES ('b_nul_key', tests.rpc_body('sarah.chen@finagent-os.demo', 'fao_hitl_decide',
+  format('{"p_hitl_id": "%s", "p_decision": "APPROVED", "p_no\u0000tes": "x"}', (SELECT j::text FROM v WHERE k = 'req3'))::json));
+INSERT INTO v VALUES ('b_duplicate', tests.rpc_body('sarah.chen@finagent-os.demo', 'fao_hitl_decide',
+  format('{"p_hitl_id": "%s", "p_decision": "REJECTED", "p_decision": "APPROVED"}', (SELECT j::text FROM v WHERE k = 'req3'))::json));
+INSERT INTO v VALUES ('b_unknown', tests.rpc_body('sarah.chen@finagent-os.demo', 'fao_hitl_decide',
+  format('{"p_hitl_id": "%s", "p_decision": "APPROVED", "p_approver_id": "x"}', (SELECT j::text FROM v WHERE k = 'req3'))::json));
+INSERT INTO v VALUES ('b_missing', tests.rpc_body('sarah.chen@finagent-os.demo', 'fao_hitl_decide',
+  format('{"p_hitl_id": "%s"}', (SELECT j::text FROM v WHERE k = 'req3'))::json));
+INSERT INTO v VALUES ('b_number', tests.rpc_body('sarah.chen@finagent-os.demo', 'fao_hitl_decide',
+  format('{"p_hitl_id": %s, "p_decision": "APPROVED"}', (SELECT j::text FROM v WHERE k = 'req3'))::json));
+INSERT INTO v VALUES ('b_boolean', tests.rpc_body('sarah.chen@finagent-os.demo', 'fao_hitl_decide',
+  format('{"p_hitl_id": "%s", "p_decision": "APPROVED", "p_notes": true}', (SELECT j::text FROM v WHERE k = 'req3'))::json));
+INSERT INTO v VALUES ('body_after', to_jsonb(tests.journal_total()));
+CREATE FUNCTION pg_temp.body_refusal(p_k text) RETURNS text LANGUAGE sql AS $$
+  SELECT (SELECT j->>'code' || '/' || (j->>'http_status') FROM v WHERE k = p_k) || '/'
+         || coalesce(tests.journal_row((SELECT (j->>'ref')::bigint FROM v WHERE k = p_k))->'attempted'->>'invalid_body', '<none>') $$;
+SELECT is(pg_temp.body_refusal('b_nul_value'), 'INVALID_INPUT/400/undecodable', 'IC-18: a \u0000 escape in a value is INVALID_INPUT, journaled as undecodable');
+SELECT is(pg_temp.body_refusal('b_nul_key'), 'INVALID_INPUT/400/undecodable', 'IC-18: a \u0000 escape in a key is INVALID_INPUT, journaled as undecodable');
+SELECT is(pg_temp.body_refusal('b_duplicate'), 'INVALID_INPUT/400/duplicate_key', 'IC-18: a repeated p_decision is INVALID_INPUT (the second value cannot win)');
+SELECT is(pg_temp.body_refusal('b_unknown'), 'INVALID_INPUT/400/unknown_key', 'IC-18: an unknown key is INVALID_INPUT');
+SELECT is(pg_temp.body_refusal('b_missing'), 'INVALID_INPUT/400/missing_key', 'IC-18: a missing p_decision is INVALID_INPUT');
+SELECT is(pg_temp.body_refusal('b_number'), 'INVALID_INPUT/400/not_string', 'IC-18: a JSON number as the id is INVALID_INPUT');
+SELECT is(pg_temp.body_refusal('b_boolean'), 'INVALID_INPUT/400/not_string', 'IC-18: a JSON boolean as the notes is INVALID_INPUT');
+SELECT is((SELECT (j::text)::bigint FROM v WHERE k = 'body_after') - (SELECT (j::text)::bigint FROM v WHERE k = 'body_before'), 7::bigint,
+  'IC-18: seven body refusals add exactly seven journal rows');
+SELECT ok((SELECT decision::text = 'PENDING' AND decision_notes IS NULL AND approver_id IS NULL
+           FROM public.hitl_queue WHERE hitl_id = (SELECT (j::text)::bigint FROM v WHERE k = 'req3'))
+          AND tests.ledger_count(tests.request_corr((SELECT (j::text)::bigint FROM v WHERE k = 'req3')), 'HITL_RESOLVED') = 0,
+  'IC-18: the refused bodies decided nothing');
+
 -- Success: Sarah approves Aisha's request
 INSERT INTO v VALUES ('approve', tests.decide_raw('sarah.chen@finagent-os.demo', (SELECT j::text FROM v WHERE k = 'req'), 'APPROVED', 'looks right'));
 INSERT INTO v VALUES ('corr', to_jsonb(tests.request_corr((SELECT (j::text)::bigint FROM v WHERE k = 'req'))));
@@ -93,8 +138,8 @@ SELECT is((SELECT hitl_status::text FROM public.shadow_ledger WHERE correlation_
   'REJECTED', 'the rejected COMMITTED row carries hitl_status REJECTED');
 
 -- Workflow and service roles cannot decide; the old function is retired
-SELECT throws_ok($$SELECT tests.do_as('fao_workflow', 'SELECT public.fao_hitl_decide(''1'', ''APPROVED'')')$$, '42501', NULL, 'fao_workflow cannot execute fao_hitl_decide');
-SELECT throws_ok($$SELECT tests.do_as('service_role', 'SELECT public.fao_hitl_decide(''1'', ''APPROVED'')')$$, '42501', NULL, 'service_role cannot execute fao_hitl_decide');
+SELECT throws_ok($$SELECT tests.do_as('fao_workflow', 'SELECT public.fao_hitl_decide(json_build_object(''p_hitl_id'', ''1'', ''p_decision'', ''APPROVED''))')$$, '42501', NULL, 'fao_workflow cannot execute fao_hitl_decide');
+SELECT throws_ok($$SELECT tests.do_as('service_role', 'SELECT public.fao_hitl_decide(json_build_object(''p_hitl_id'', ''1'', ''p_decision'', ''APPROVED''))')$$, '42501', NULL, 'service_role cannot execute fao_hitl_decide');
 SELECT throws_ok($$SELECT tests.do_as('fao_workflow', 'SELECT public.fao_hitl_resolve(1, ''APPROVED'', NULL, NULL)')$$, '42501', NULL, 'fao_workflow cannot execute fao_hitl_resolve');
 SELECT throws_ok($$SELECT tests.do_as('service_role', 'SELECT public.fao_hitl_resolve(1, ''APPROVED'', NULL, NULL)')$$, '42501', NULL, 'service_role cannot execute fao_hitl_resolve');
 SELECT throws_ok($$SELECT public.fao_hitl_resolve(1, 'APPROVED', NULL, NULL)$$, '42501', 'FAO-GOV-004 fao_hitl_resolve is superseded by fao_hitl_decide', 'fao_hitl_resolve raises the superseded message for the owner');

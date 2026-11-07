@@ -143,16 +143,22 @@ SELECT is_empty(
     WHERE n.nspname = 'fao_private'
       AND NOT EXISTS (SELECT 1 FROM unnest(coalesce(p.proconfig, ARRAY[]::text[])) c WHERE c LIKE 'search\_path=%')$$,
   'every fao_private function pins search_path');
+-- IC-18: each client RPC exists exactly once in public and takes one unnamed
+-- json argument with no default (an overload or a named or defaulted
+-- parameter would let PostgREST bind arguments by name again).
 SELECT results_eq(
   $$SELECT p.proname::text COLLATE "default" FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = 'public'
       AND p.proname IN ('fao_whoami','fao_run_start','fao_hitl_get','fao_hitl_decide','fao_ledger_correct',
                         'fao_admin_set_threshold','fao_admin_set_agent','fao_admin_set_role','fao_admin_set_owner_active')
-      AND NOT EXISTS (SELECT 1 FROM unnest(p.proargtypes::oid[]) t WHERE t <> 'text'::regtype::oid)
+    GROUP BY p.proname
+    HAVING count(*) = 1
+       AND bool_and(p.pronargs = 1 AND p.proargtypes[0] = 'json'::regtype::oid AND p.pronargdefaults = 0
+                    AND (p.proargnames IS NULL OR p.proargnames = ARRAY['']::text[]))
     ORDER BY 1$$,
   $$VALUES ('fao_admin_set_agent'), ('fao_admin_set_owner_active'), ('fao_admin_set_role'), ('fao_admin_set_threshold'),
            ('fao_hitl_decide'), ('fao_hitl_get'), ('fao_ledger_correct'), ('fao_run_start'), ('fao_whoami')$$,
-  'every client RPC exists and takes only text arguments');
+  'every client RPC exists once and takes exactly one unnamed json argument with no default');
 SELECT results_eq(
   $$SELECT f.obj FROM fin_fn f WHERE has_function_privilege('anon', f.oid, 'EXECUTE') ORDER BY 1$$,
   $$VALUES ('fao_hitl_decide'), ('fao_run_start')$$,
@@ -170,8 +176,8 @@ SELECT is_empty(
 SELECT throws_ok($$SELECT tests.do_as('anon', 'SELECT 1 FROM public.agent_registry LIMIT 1')$$, '42501', NULL, 'anon cannot read agent_registry');
 SELECT throws_ok($$SELECT tests.do_as('anon', 'SELECT 1 FROM public.shadow_ledger LIMIT 1')$$, '42501', NULL, 'anon cannot read shadow_ledger');
 SELECT throws_ok($$SELECT tests.do_as('anon', 'SELECT 1 FROM public.fao_run_summary LIMIT 1')$$, '42501', NULL, 'anon cannot read fao_run_summary');
-SELECT throws_ok($$SELECT tests.do_as('anon', 'SELECT public.fao_hitl_get(''1'')')$$, '42501', NULL, 'anon cannot execute fao_hitl_get');
-SELECT throws_ok($$SELECT tests.do_as('anon', 'SELECT public.fao_whoami()')$$, '42501', NULL, 'anon cannot execute fao_whoami');
+SELECT throws_ok($$SELECT tests.do_as('anon', 'SELECT public.fao_hitl_get(json_build_object(''p_hitl_id'', ''1''))')$$, '42501', NULL, 'anon cannot execute fao_hitl_get');
+SELECT throws_ok($$SELECT tests.do_as('anon', 'SELECT public.fao_whoami(json_build_object())')$$, '42501', NULL, 'anon cannot execute fao_whoami');
 SELECT throws_ok($$SELECT tests.do_as('sarah.chen@finagent-os.demo',
   'INSERT INTO public.shadow_ledger (correlation_id, execution_id, agent_id, risk_tier, policy_outcome, policy_rationale, status) VALUES (gen_random_uuid(), gen_random_uuid(), ''fao_reserve_recon_v1'', ''RED'', ''ALLOW'', ''x'', ''SUCCESS'')')$$,
   '42501', NULL, 'authenticated cannot insert into shadow_ledger');
@@ -179,7 +185,7 @@ SELECT throws_ok($$SELECT tests.do_as('marcus.patel@finagent-os.demo', 'UPDATE p
 SELECT throws_ok($$SELECT tests.do_as('sarah.chen@finagent-os.demo', 'DELETE FROM public.hitl_queue')$$, '42501', NULL, 'authenticated cannot delete from hitl_queue');
 SELECT throws_ok($$SELECT tests.do_as('sarah.chen@finagent-os.demo', 'SELECT 1 FROM fao_private.run_tokens LIMIT 1')$$, '42501', NULL, 'authenticated cannot read run_tokens');
 SELECT throws_ok($$SELECT tests.do_as('sarah.chen@finagent-os.demo', 'SELECT fao_private.clock()')$$, '42501', NULL, 'authenticated cannot execute private helpers other than has_role');
-SELECT throws_ok($$SELECT tests.do_as('sarah.chen@finagent-os.demo', 'SELECT public.fao_run_claim(''x'', ''y'')')$$, '42501', NULL, 'authenticated cannot execute fao_run_claim');
+SELECT throws_ok($$SELECT tests.do_as('sarah.chen@finagent-os.demo', 'SELECT public.fao_run_claim(''x'', ''y'', ''fao_reserve_recon_v1'')')$$, '42501', NULL, 'authenticated cannot execute fao_run_claim');
 SELECT throws_ok($$SELECT tests.do_as('marcus.patel@finagent-os.demo', 'SELECT public.fao_maintenance_sweep()')$$, '42501', NULL, 'authenticated cannot execute fao_maintenance_sweep');
 SELECT throws_ok($$SELECT tests.do_as('sarah.chen@finagent-os.demo', 'SELECT public.fao_hitl_resolve(1, ''APPROVED'', NULL, NULL)')$$, '42501', NULL, 'authenticated cannot execute fao_hitl_resolve');
 SELECT throws_ok($$SELECT tests.do_as('sarah.chen@finagent-os.demo', 'SELECT nextval(''public.fao_refusal_journal_refusal_id_seq'')')$$, '42501', NULL, 'authenticated cannot use a FinAgent sequence');
@@ -189,14 +195,14 @@ SELECT throws_ok($$SELECT tests.do_as('fao_workflow', 'SELECT 1 FROM public.hitl
 SELECT throws_ok($$SELECT tests.do_as('fao_workflow',
   'INSERT INTO public.materiality_thresholds (asset_symbol, scope, asset_class, materiality_usd, ratio_floor, ratio_band_lower, ratio_band_upper) VALUES (''ZZZ'', ''Spot'', ''Major'', 1, 1, 1, 1)')$$,
   '42501', NULL, 'fao_workflow cannot write materiality_thresholds');
-SELECT throws_ok($$SELECT tests.do_as('fao_workflow', 'SELECT public.fao_whoami()')$$, '42501', NULL, 'fao_workflow cannot execute fao_whoami');
-SELECT throws_ok($$SELECT tests.do_as('fao_workflow', 'SELECT public.fao_hitl_decide(''1'', ''APPROVED'')')$$, '42501', NULL, 'fao_workflow cannot execute fao_hitl_decide');
+SELECT throws_ok($$SELECT tests.do_as('fao_workflow', 'SELECT public.fao_whoami(json_build_object())')$$, '42501', NULL, 'fao_workflow cannot execute fao_whoami');
+SELECT throws_ok($$SELECT tests.do_as('fao_workflow', 'SELECT public.fao_hitl_decide(json_build_object(''p_hitl_id'', ''1'', ''p_decision'', ''APPROVED''))')$$, '42501', NULL, 'fao_workflow cannot execute fao_hitl_decide');
 SELECT throws_ok($$SELECT tests.do_as('fao_workflow', 'SELECT 1 FROM fao_private.test_clock LIMIT 1')$$, '42501', NULL, 'fao_workflow cannot read test_clock');
 SELECT throws_ok($$SELECT tests.do_as('fao_workflow', 'CREATE TABLE public.pgtap_probe (x int)')$$, '42501', NULL, 'fao_workflow cannot create in schema public');
 SELECT throws_ok($$SELECT tests.do_as('service_role', 'SELECT 1 FROM public.hitl_queue LIMIT 1')$$, '42501', NULL, 'service_role cannot read hitl_queue');
 SELECT throws_ok($$SELECT tests.do_as('service_role', 'SELECT 1 FROM public.materiality_thresholds LIMIT 1')$$, '42501', NULL, 'service_role cannot read materiality_thresholds');
 SELECT throws_ok($$SELECT tests.do_as('service_role', 'SELECT 1 FROM public.fao_run_summary LIMIT 1')$$, '42501', NULL, 'service_role cannot read fao_run_summary');
-SELECT throws_ok($$SELECT tests.do_as('service_role', 'SELECT public.fao_run_start(''fao_reserve_recon_v1'', ''x'', ''abcdefgh'')')$$, '42501', NULL, 'service_role cannot execute fao_run_start');
+SELECT throws_ok($$SELECT tests.do_as('service_role', 'SELECT public.fao_run_start(json_build_object(''p_agent_id'', ''fao_reserve_recon_v1'', ''p_reason'', ''x'', ''p_idempotency_key'', ''abcdefgh''))')$$, '42501', NULL, 'service_role cannot execute fao_run_start');
 SELECT throws_ok($$SELECT tests.do_as('service_role', 'SELECT public.fao_maintenance_sweep()')$$, '42501', NULL, 'service_role cannot execute fao_maintenance_sweep');
 
 -- 44 to 48. temp tables named like FinAgent tables change nothing

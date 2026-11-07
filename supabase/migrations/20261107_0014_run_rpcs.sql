@@ -3,11 +3,13 @@
 -- ============================================================================
 -- The functions that start, claim, record, finish and fail a run.
 --
--- Client RPCs (PostgREST, every parameter text):
---   fao_whoami()      the caller's identity and honoured roles
---   fao_run_start()   records the invoker from the session, checks the
---                     registry, role, idempotency key and rate limit, and
---                     returns a single-use run token (stored only as a hash)
+-- Client RPCs (PostgREST; one unnamed json body each, IC-18, decoded by
+-- fao_private.client_args; body keys are the argument names of spec 2.7):
+--   fao_whoami(json)     the caller's identity and honoured roles (body {})
+--   fao_run_start(json)  records the invoker from the session, checks the
+--                        registry, role, idempotency key and rate limit, and
+--                        returns a single-use run token (stored only as a
+--                        hash)
 -- Workflow RPCs (n8n over the fao_workflow connection, typed parameters):
 --   fao_run_claim()            consumes the run token; the run starts
 --   fao_ledger_append_batch()  Writer events, all or none
@@ -26,8 +28,9 @@
 --                state machine, correlation threading
 --   FAO-REC-001  one rollup (fao_private.run_rollup) decides commit or review
 --
--- Validation pattern for client RPCs: session check, then every input check
--- with a fixed message, then authorization. Expected refusals never raise:
+-- Validation pattern for client RPCs: decode the body with client_args first
+-- (it never raises), then the session check, then the body result with every
+-- input check (fixed message), then authorization. Expected refusals never raise:
 -- they journal, set the HTTP status and return ok:false with the fixed
 -- message for the code. No database error text reaches a caller.
 --
@@ -46,14 +49,17 @@
 -- ----------------------------------------------------------------------------
 -- The signed-in caller, their owner row (when any) and the role grants that
 -- has_role honours. The aal value is read from the session claims and is
--- informational only.
-CREATE FUNCTION public.fao_whoami()
+-- informational only. The body must be {} (IC-18): any key, or a body that
+-- client_args refuses, is INVALID_INPUT, checked after the session and before
+-- the role check.
+CREATE FUNCTION public.fao_whoami(json)
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
+  v_in    jsonb := fao_private.client_args($1, ARRAY[]::text[], '{}'::jsonb);
   v_uid   uuid;
   v_owner public.process_owners%ROWTYPE;
   v_aal   text;
@@ -65,7 +71,11 @@ BEGIN
     v_uid := NULL;
   END;
   IF v_uid IS NULL THEN
-    RETURN fao_private.refuse('rpc:fao_whoami', NULL, NULL, '{}'::jsonb, 'NO_SESSION');
+    RETURN fao_private.refuse('rpc:fao_whoami', NULL, NULL, v_in->'note', 'NO_SESSION');
+  END IF;
+
+  IF (v_in->>'ok')::boolean IS NOT TRUE THEN
+    RETURN fao_private.refuse('rpc:fao_whoami', NULL, NULL, v_in->'note', 'INVALID_INPUT');
   END IF;
 
   IF NOT fao_private.has_any_role(v_uid) THEN
@@ -99,30 +109,29 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.fao_whoami() IS
-  'FAO-GOV-004: the signed-in caller (from auth.uid() only), their owner row and the role grants has_role honours. Refuses NO_SESSION and NOT_AUTHORISED (no role).';
+COMMENT ON FUNCTION public.fao_whoami(json) IS
+  'FAO-GOV-004, FAO-GOV-008: the signed-in caller (from auth.uid() only), their owner row and the role grants has_role honours. One json body, {} (IC-18). Refuses NO_SESSION, INVALID_INPUT (any key, or a body client_args refuses) and NOT_AUTHORISED (no role).';
 
 -- ----------------------------------------------------------------------------
 -- fao_run_start (FAO-GOV-008, FAO-GOV-002, FAO-GOV-003, FAO-GOV-004)
 -- ----------------------------------------------------------------------------
--- In order:
+-- Body (IC-18): required p_agent_id, p_reason, p_idempotency_key; optional
+-- p_invoked_via (default "mcp"); every value a JSON string or null. In order,
+-- after client_args:
 --   1. session (anonymous callers are refused NO_SESSION)
---   2. inputs (INVALID_INPUT)
+--   2. the body result and the inputs (INVALID_INPUT)
 --   3. active owner row (NOT_AN_OWNER)
 --   4. per-invoker advisory lock (serializes the idempotency and rate checks)
 --   5. agent exists (UNKNOWN_AGENT); invoker role for it (NOT_AUTHORISED)
---   6. idempotency replay
+--   6. idempotency replay (fix round 2 R04: a REQUESTED run whose agent is
+--      no longer ACTIVE expires, gets no new token and the call goes on to
+--      the step 7 gate)
 --   7. agent ACTIVE, else a committed RUN_REFUSED row and AGENT_NOT_ACTIVE
 --      (RATE_LIMITED with no ledger row once the invoker has
 --      max_runs_per_hour RUN_REFUSED rows for the agent in the last hour)
 --   8. rate limit (RATE_LIMITED)
 --   9. new run and single-use token (only its SHA-256 hash is stored)
-CREATE FUNCTION public.fao_run_start(
-  p_agent_id        text,
-  p_reason          text,
-  p_idempotency_key text,
-  p_invoked_via     text DEFAULT 'mcp'
-)
+CREATE FUNCTION public.fao_run_start(json)
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -130,6 +139,14 @@ SET search_path = ''
 AS $$
 DECLARE
   c_entry    constant text := 'rpc:fao_run_start';
+  v_in       jsonb := fao_private.client_args($1,
+                        ARRAY['p_agent_id', 'p_reason', 'p_idempotency_key'],
+                        '{"p_invoked_via": "mcp"}'::jsonb);
+  -- Decoded body fields under the old argument names (IC-18).
+  p_agent_id        text := v_in->'args'->>'p_agent_id';
+  p_reason          text := v_in->'args'->>'p_reason';
+  p_idempotency_key text := v_in->'args'->>'p_idempotency_key';
+  p_invoked_via     text := v_in->'args'->>'p_invoked_via';
   v_uid      uuid;
   v_attempt  jsonb;
   v_key      text;
@@ -145,7 +162,7 @@ BEGIN
     'agent_id',        left(p_agent_id, 200),
     'reason',          left(p_reason, 200),
     'idempotency_key', left(p_idempotency_key, 200),
-    'invoked_via',     left(p_invoked_via, 200));
+    'invoked_via',     left(p_invoked_via, 200)) || (v_in->'note');
   v_key := left(p_agent_id, 64);
 
   -- 1. Session
@@ -158,8 +175,9 @@ BEGIN
     RETURN fao_private.refuse(c_entry, 'run_invocations', v_key, v_attempt, 'NO_SESSION');
   END IF;
 
-  -- 2. Inputs
-  IF coalesce(p_agent_id ~ '^[a-z0-9_]{1,64}$', false) IS NOT TRUE
+  -- 2. Body and inputs
+  IF (v_in->>'ok')::boolean IS NOT TRUE
+     OR coalesce(p_agent_id ~ '^[a-z0-9_]{1,64}$', false) IS NOT TRUE
      OR NOT fao_private.text_ok(p_reason, 1, 500)
      OR coalesce(p_idempotency_key ~ '^[A-Za-z0-9_-]{8,64}$', false) IS NOT TRUE
      OR coalesce(p_invoked_via IN ('mcp', 'cli', 'test'), false) IS NOT TRUE THEN
@@ -194,7 +212,17 @@ BEGIN
       RETURN fao_private.refuse(c_entry, 'run_invocations', v_key, v_attempt, 'INVALID_INPUT');
     END IF;
 
-    IF v_run.state = 'REQUESTED'::public.fao_run_state THEN
+    -- Lock order (fix round 2 R06): the run row, then its token row, in
+    -- every function that locks both (fao_run_claim does the same).
+    IF v_run.state = 'REQUESTED'::public.fao_run_state
+       AND v_agent.status <> 'ACTIVE'::public.agent_status THEN
+      -- FAO-GOV-002 (fix round 2 R04): no new token for an agent that is no
+      -- longer ACTIVE. The run expires; the registry status gate below then
+      -- refuses the call (RUN_REFUSED row, AGENT_NOT_ACTIVE).
+      UPDATE public.run_invocations
+         SET state = 'EXPIRED', finished_at = now(), last_error = 'agent not ACTIVE at replay'
+       WHERE correlation_id = v_run.correlation_id;
+    ELSIF v_run.state = 'REQUESTED'::public.fao_run_state THEN
       SELECT * INTO v_tok
         FROM fao_private.run_tokens t
        WHERE t.correlation_id = v_run.correlation_id
@@ -227,14 +255,14 @@ BEGIN
         'token_expires_at', NULL,
         'state',            'EXPIRED',
         'replayed',         true));
+    ELSE
+      RETURN fao_private.ok_result(jsonb_build_object(
+        'correlation_id',   v_run.correlation_id,
+        'run_token',        NULL,
+        'token_expires_at', NULL,
+        'state',            v_run.state::text,
+        'replayed',         true));
     END IF;
-
-    RETURN fao_private.ok_result(jsonb_build_object(
-      'correlation_id',   v_run.correlation_id,
-      'run_token',        NULL,
-      'token_expires_at', NULL,
-      'state',            v_run.state::text,
-      'replayed',         true));
   END IF;
 
   -- 7. Registry status gate. The RUN_REFUSED row is inserted directly (there
@@ -309,17 +337,36 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.fao_run_start(text, text, text, text) IS
-  'FAO-GOV-008, FAO-GOV-002, FAO-GOV-003, FAO-GOV-004: starts a run for the signed-in invoker (identity from auth.uid() only): input checks, active owner, invoker role, idempotency replay, registry status gate with a committed RUN_REFUSED row (RATE_LIMITED with no row once the invoker has max_runs_per_hour of them in the last hour), rate limit, then a single-use run token stored only as its hash.';
+COMMENT ON FUNCTION public.fao_run_start(json) IS
+  'FAO-GOV-008, FAO-GOV-002, FAO-GOV-003, FAO-GOV-004: starts a run for the signed-in invoker (identity from auth.uid() only). One json body (IC-18): p_agent_id, p_reason, p_idempotency_key, optional p_invoked_via (default mcp). Body and input checks, active owner, invoker role, idempotency replay (no new token once the agent is not ACTIVE), registry status gate with a committed RUN_REFUSED row (RATE_LIMITED with no row once the invoker has max_runs_per_hour of them in the last hour), rate limit, then a single-use run token stored only as its hash.';
 
 -- ----------------------------------------------------------------------------
--- fao_run_claim (FAO-GOV-008)
+-- fao_run_claim (FAO-GOV-008, FAO-GOV-002, FAO-GOV-004)
 -- ----------------------------------------------------------------------------
 -- The workflow consumes the run token and the run moves to RUNNING. The token
 -- is looked up by its hash, and the hash is kept after consumption, so a
 -- replayed token is recognised (409). Every refusal is journaled with the
--- execution id attempted, never the token.
-CREATE FUNCTION public.fao_run_claim(p_run_token text, p_n8n_execution_id text)
+-- execution id and agent attempted, never the token. In order:
+--   1. inputs (INVALID_INPUT)
+--   2. the token by hash, unlocked, then the run row FOR UPDATE, then the
+--      token row FOR UPDATE with its hash checked again (fix round 2 R06: run
+--      row before token row, the same order as the fao_run_start replay, so
+--      the two cannot deadlock; a replay that rotated the hash in between
+--      leaves INVALID_TOKEN)
+--   3. the run's agent equals p_agent_id, the agent the calling workflow
+--      serves (fix round 2 R08), else INVALID_TOKEN; nothing changes, so the
+--      token stays claimable by its own workflow
+--   4. consumed or not REQUESTED (ALREADY_CLAIMED)
+--   5. expired (TOKEN_EXPIRED; the run expires)
+--   6. the agent is still ACTIVE (fix round 2 R04, FAO-GOV-002), else
+--      AGENT_NOT_ACTIVE and the run expires
+--   7. the invoker still holds the invoker role for the agent with an active
+--      owner row (fix round 2 R03, FAO-GOV-004), else NOT_AUTHORISED and the
+--      run expires
+--   8. RUNNING with the execution id. The id must be unique only among
+--      RUNNING runs (fix round 2 R09): n8n numbers executions per instance,
+--      so a new n8n database reuses ids that finished runs hold.
+CREATE FUNCTION public.fao_run_claim(p_run_token text, p_n8n_execution_id text, p_agent_id text)
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -328,48 +375,90 @@ AS $$
 DECLARE
   c_entry   constant text := 'rpc:fao_run_claim';
   v_attempt jsonb;
+  v_hash    bytea;
+  v_corr    uuid;
   v_tok     fao_private.run_tokens%ROWTYPE;
   v_run     public.run_invocations%ROWTYPE;
+  v_status  public.agent_status;
+  v_code    text;
   v_name    text;
 BEGIN
-  v_attempt := jsonb_build_object('n8n_execution_id', left(p_n8n_execution_id, 200));
+  v_attempt := jsonb_build_object(
+    'n8n_execution_id', left(p_n8n_execution_id, 200),
+    'agent_id',         left(p_agent_id, 200));
 
+  -- 1. Inputs
   IF coalesce(p_run_token ~ '^[A-Za-z0-9_-]{43}$', false) IS NOT TRUE
-     OR coalesce(p_n8n_execution_id ~ '^[A-Za-z0-9_-]{1,64}$', false) IS NOT TRUE THEN
+     OR coalesce(p_n8n_execution_id ~ '^[A-Za-z0-9_-]{1,64}$', false) IS NOT TRUE
+     OR coalesce(p_agent_id ~ '^[a-z0-9_]{1,64}$', false) IS NOT TRUE THEN
     RETURN fao_private.refuse(c_entry, 'run_invocations', NULL, v_attempt, 'INVALID_INPUT');
   END IF;
 
-  SELECT * INTO v_tok
+  -- 2. Token, then run row, then token row (one lock order)
+  v_hash := extensions.digest(p_run_token, 'sha256');
+  SELECT t.correlation_id INTO v_corr
     FROM fao_private.run_tokens t
-   WHERE t.token_hash = extensions.digest(p_run_token, 'sha256')
-     FOR UPDATE;
+   WHERE t.token_hash = v_hash;
   IF NOT FOUND THEN
     RETURN fao_private.refuse(c_entry, 'run_invocations', NULL, v_attempt, 'INVALID_TOKEN');
   END IF;
 
   SELECT * INTO v_run
     FROM public.run_invocations ri
-   WHERE ri.correlation_id = v_tok.correlation_id
+   WHERE ri.correlation_id = v_corr
      FOR UPDATE;
 
+  SELECT * INTO v_tok
+    FROM fao_private.run_tokens t
+   WHERE t.correlation_id = v_corr
+     FOR UPDATE;
+  IF NOT FOUND OR v_run.correlation_id IS NULL OR v_tok.token_hash IS DISTINCT FROM v_hash THEN
+    RETURN fao_private.refuse(c_entry, 'run_invocations', NULL, v_attempt, 'INVALID_TOKEN');
+  END IF;
+
+  -- 3. The token belongs to the calling workflow's agent
+  IF v_run.agent_id IS DISTINCT FROM p_agent_id THEN
+    RETURN fao_private.refuse(c_entry, 'run_invocations', NULL, v_attempt, 'INVALID_TOKEN');
+  END IF;
+
+  -- 4. Single use
   IF v_tok.consumed_at IS NOT NULL OR v_run.state IS DISTINCT FROM 'REQUESTED'::public.fao_run_state THEN
     RETURN fao_private.refuse(c_entry, 'run_invocations', v_run.correlation_id::text, v_attempt, 'ALREADY_CLAIMED');
   END IF;
 
+  -- 5. Expiry. The run expires and the refusal is journaled; both commit.
   IF v_tok.expires_at <= fao_private.clock() THEN
-    -- The run expires and the refusal is journaled; both commit.
     UPDATE public.run_invocations
        SET state = 'EXPIRED', finished_at = now()
      WHERE correlation_id = v_run.correlation_id;
     RETURN fao_private.refuse(c_entry, 'run_invocations', v_run.correlation_id::text, v_attempt, 'TOKEN_EXPIRED');
   END IF;
 
+  -- 6 and 7. Authorization is checked again at claim: an agent made inactive,
+  -- or an invoker revoked or deactivated, after fao_run_start cannot still
+  -- run. The run expires and the refusal is journaled; both commit.
+  SELECT ar.status INTO v_status FROM public.agent_registry ar WHERE ar.agent_id = v_run.agent_id;
+  IF v_status IS DISTINCT FROM 'ACTIVE'::public.agent_status THEN
+    v_code := 'AGENT_NOT_ACTIVE';
+  ELSIF NOT fao_private.has_role(v_run.invoker_id, 'invoker'::public.fao_app_role, v_run.agent_id) THEN
+    v_code := 'NOT_AUTHORISED';
+  END IF;
+  IF v_code IS NOT NULL THEN
+    UPDATE public.run_invocations
+       SET state = 'EXPIRED', finished_at = now(),
+           last_error = CASE v_code WHEN 'AGENT_NOT_ACTIVE' THEN 'agent not ACTIVE at claim'
+                                    ELSE 'invoker no longer authorised at claim' END
+     WHERE correlation_id = v_run.correlation_id;
+    RETURN fao_private.refuse(c_entry, 'run_invocations', v_run.correlation_id::text, v_attempt, v_code);
+  END IF;
+
+  -- 8. RUNNING
   BEGIN
     UPDATE public.run_invocations
        SET state = 'RUNNING', claimed_at = now(), n8n_execution_id = p_n8n_execution_id
      WHERE correlation_id = v_run.correlation_id;
   EXCEPTION WHEN unique_violation THEN
-    -- The execution id already claimed another run.
+    -- The execution id is held by another RUNNING run.
     RETURN fao_private.refuse(c_entry, 'run_invocations', v_run.correlation_id::text, v_attempt, 'ALREADY_CLAIMED');
   END;
 
@@ -391,8 +480,8 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION public.fao_run_claim(text, text) IS
-  'FAO-GOV-008: consumes a single-use run token (looked up by its SHA-256 hash) and moves the run to RUNNING with the n8n execution id. INVALID_INPUT, INVALID_TOKEN, ALREADY_CLAIMED and TOKEN_EXPIRED are journaled without the token.';
+COMMENT ON FUNCTION public.fao_run_claim(text, text, text) IS
+  'FAO-GOV-008, FAO-GOV-002, FAO-GOV-004: consumes a single-use run token (looked up by its SHA-256 hash) for the calling workflow''s agent and moves the run to RUNNING with the n8n execution id (unique among RUNNING runs). Locks the run row before the token row. INVALID_INPUT, INVALID_TOKEN (unknown token or another agent''s), ALREADY_CLAIMED, TOKEN_EXPIRED, AGENT_NOT_ACTIVE and NOT_AUTHORISED (invoker revoked or deactivated) are journaled without the token; the last three expire the run.';
 
 -- ----------------------------------------------------------------------------
 -- fao_ledger_append_batch (FAO-GOV-001)
@@ -404,10 +493,15 @@ COMMENT ON FUNCTION public.fao_run_claim(text, text) IS
 -- supplied values must match the run. STARTED fixes the run asset scope and
 -- gets the invoker, channel, reason and execution id from the run record.
 -- A Writer FAILED gets source 'writer', stage 'before_request' and the run's
--- n8n execution id from the database. inputs keys the database alone writes
--- (invoker_id, invoked_via, reason, approver_id, approvers, agent_invoker_id,
--- hitl_id, decision, decided_at) are refused, except the three STARTED
--- overwrites.
+-- n8n execution id from the database. inputs keys the database writes on any
+-- event type (identity, approval, request, notification, rollup, failure and
+-- refusal facts: c_reserved) are refused, except the keys the database
+-- overwrites on STARTED (invoker_id, invoked_via, reason, n8n_execution_id)
+-- and on a Writer FAILED (source, stage, n8n_execution_id), and failed_node,
+-- which a Writer FAILED names itself (fix round 2 R07).
+-- ASSET_RECONCILED status must agree with the outcome (fix round 2 R05):
+-- PARTIAL and ROLLED_BACK are refused, and ALLOW or ALLOW_WITH_OBLIGATIONS
+-- need SUCCESS.
 -- AI advisory fields are refused when not null: AI advisory is off for every
 -- agent (FAO-GOV-014) and wave 1 records none.
 CREATE FUNCTION public.fao_ledger_append_batch(p_events jsonb)
@@ -424,12 +518,23 @@ DECLARE
     'policy_rationale', 'obligations', 'status', 'error_details', 'ai_prompt',
     'ai_output', 'ai_confidence', 'fractional_cost_usd', 'hitl_status',
     'execution_id', 'agent_id', 'risk_tier'];
-  -- inputs keys reserved to the database (FAO-GOV-001, FAO-GOV-004)
+  -- inputs keys reserved to the database (FAO-GOV-001, FAO-GOV-004): every
+  -- key the database itself writes into inputs on some event type
   c_reserved  constant text[] := ARRAY[
     'invoker_id', 'invoked_via', 'reason', 'approver_id', 'approvers',
-    'agent_invoker_id', 'hitl_id', 'decision', 'decided_at'];
+    'agent_invoker_id', 'hitl_id', 'decision', 'decided_at', 'decision_notes',
+    'source', 'stage', 'failed_node', 'n8n_execution_id',
+    'approval_url', 'timeout_at', 'expired_at', 'sub_tier',
+    'configured_approvals', 'enforced_approvals', 'escalated_assets',
+    'notification_channel', 'slack_channel_id', 'notification_id', 'kind',
+    'level', 'attempt', 'channel', 'external_ref', 'target_owner_id',
+    'per_asset_summary', 'counts', 'problems', 'committed_ledger_id',
+    'corrects_ledger_id', 'corrected_by', 'code', 'agent_status'];
   -- reserved keys that STARTED may carry because the database overwrites them
-  c_started_set constant text[] := ARRAY['invoker_id', 'invoked_via', 'reason'];
+  c_started_set constant text[] := ARRAY['invoker_id', 'invoked_via', 'reason', 'n8n_execution_id'];
+  -- reserved keys a Writer FAILED may carry: the database overwrites the
+  -- first three; failed_node is the Writer's own fact on FAILED
+  c_failed_set  constant text[] := ARRAY['source', 'stage', 'n8n_execution_id', 'failed_node'];
   v_n         int;
   v_i         int;
   v_item      jsonb;
@@ -573,13 +678,14 @@ BEGIN
         USING ERRCODE = '22023';
     END IF;
 
-    -- Evidence keys only the database writes (identity, approval and
-    -- request facts) are refused in Writer inputs, so a Writer row can never
-    -- look as if the database set them. On STARTED, invoker_id, invoked_via
-    -- and reason are instead overwritten from the run record below (2.10).
+    -- Evidence keys only the database writes are refused in Writer inputs,
+    -- so a Writer row can never look as if the database set them. On
+    -- STARTED and on a Writer FAILED the overwritten keys are instead set
+    -- from the run record below (2.10).
     FOR v_key IN SELECT k FROM jsonb_object_keys(v_inputs) AS k LOOP
       IF v_key = ANY (c_reserved)
-         AND NOT (v_et = 'STARTED' AND v_key = ANY (c_started_set)) THEN
+         AND NOT (v_et = 'STARTED' AND v_key = ANY (c_started_set))
+         AND NOT (v_et = 'FAILED' AND v_key = ANY (c_failed_set)) THEN
         RAISE EXCEPTION 'FAO-GOV-001 ledger_append: item %: inputs.% is set only by the database', v_i, v_key
           USING ERRCODE = '22023';
       END IF;
@@ -772,6 +878,16 @@ BEGIN
         RAISE EXCEPTION 'FAO-GOV-001 ledger_append: item %: ALLOW and ALLOW_WITH_OBLIGATIONS need a numeric inputs.ratio', v_i
           USING ERRCODE = '22023';
       END IF;
+      -- Status and outcome agree (fix round 2 R05): an asset row never says
+      -- its own reconciliation failed while the rollup counts it as clean.
+      IF v_status IN ('PARTIAL', 'ROLLED_BACK') THEN
+        RAISE EXCEPTION 'FAO-GOV-001 ledger_append: item %: ASSET_RECONCILED status must be SUCCESS or FAILURE', v_i
+          USING ERRCODE = '22023';
+      END IF;
+      IF v_outcome IN ('ALLOW', 'ALLOW_WITH_OBLIGATIONS') AND v_status <> 'SUCCESS' THEN
+        RAISE EXCEPTION 'FAO-GOV-001 ledger_append: item %: ALLOW and ALLOW_WITH_OBLIGATIONS need status SUCCESS', v_i
+          USING ERRCODE = '22023';
+      END IF;
       v_seen := v_seen || v_asset;
 
     ELSE
@@ -817,13 +933,14 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.fao_ledger_append_batch(jsonb) IS
-  'FAO-GOV-001: the Writer route into the Shadow Ledger. All or none; STARTED, ASSET_RECONCILED and FAILED only; database-set timestamps and context (Writer FAILED source, stage and execution id included); forbidden keys and database-only inputs keys refused; asset scope fixed by STARTED; one ASSET_RECONCILED per asset in scope. Raises FAO-GOV-001 ledger_append: item <i>: <reason>.';
+  'FAO-GOV-001: the Writer route into the Shadow Ledger. All or none; STARTED, ASSET_RECONCILED and FAILED only; database-set timestamps and context (Writer FAILED source, stage and execution id included); forbidden keys and every inputs key the database writes on any event type refused (except the STARTED and FAILED overwrites); asset scope fixed by STARTED; one ASSET_RECONCILED per asset in scope, status SUCCESS or FAILURE and SUCCESS for ALLOW and ALLOW_WITH_OBLIGATIONS. Raises FAO-GOV-001 ledger_append: item <i>: <reason>.';
 
 -- ----------------------------------------------------------------------------
 -- fao_run_finalize (FAO-REC-001, FAO-GOV-004, FAO-GOV-001)
 -- ----------------------------------------------------------------------------
--- One transaction. The run must be RUNNING (else raise). The one rollup
--- decides:
+-- One transaction. The run must be RUNNING and its agent ACTIVE (else raise;
+-- fix round 2 R04: the registry status gate holds at commit too, on both the
+-- COMMITTED and the review branch). The one rollup decides:
 --   chain not intact -> COMMIT_BLOCKED, run FAILED, AUDIT_CHAIN_MISMATCH
 --                       (ok:true, nothing committed)
 --   review needed    -> request plus HITL_REQUESTED (create_request), run
@@ -850,6 +967,13 @@ BEGIN
      FOR UPDATE;
   IF NOT FOUND OR v_run.state IS DISTINCT FROM 'RUNNING'::public.fao_run_state THEN
     RAISE EXCEPTION 'FAO-GOV-008 run_finalize: run % is not RUNNING', coalesce(p_correlation_id::text, '<null>')
+      USING ERRCODE = '42501';
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM public.agent_registry ar
+                  WHERE ar.agent_id = v_run.agent_id
+                    AND ar.status = 'ACTIVE'::public.agent_status) THEN
+    RAISE EXCEPTION 'FAO-GOV-002 run_finalize: agent % is not ACTIVE', v_run.agent_id
       USING ERRCODE = '42501';
   END IF;
 
@@ -959,14 +1083,19 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.fao_run_finalize(uuid) IS
-  'FAO-REC-001, FAO-GOV-004, FAO-GOV-001: finishes a RUNNING run in one transaction from the one rollup: COMMITTED; or the HITL request, HITL_REQUESTED and AWAITING_HITL; or COMMIT_BLOCKED and FAILED (AUDIT_CHAIN_MISMATCH) when the audit chain is incomplete.';
+  'FAO-REC-001, FAO-GOV-004, FAO-GOV-001, FAO-GOV-002: finishes a RUNNING run of an ACTIVE agent (else raises) in one transaction from the one rollup: COMMITTED; or the HITL request, HITL_REQUESTED and AWAITING_HITL; or COMMIT_BLOCKED and FAILED (AUDIT_CHAIN_MISMATCH) when the audit chain is incomplete.';
 
 -- ----------------------------------------------------------------------------
 -- fao_run_fail (FAO-GOV-008)
 -- ----------------------------------------------------------------------------
--- Called by the error workflow with the n8n execution id. An unknown
--- execution writes nothing (UNKNOWN_EXECUTION, not journaled); a finished run
--- writes nothing (ALREADY_TERMINAL). Otherwise FAILED is appended:
+-- Called by the error workflow with the n8n execution id. n8n execution ids
+-- are unique only within one n8n instance (fix round 2 R09), so the id
+-- resolves to the run not yet finished that claimed it most recently: the
+-- RUNNING holder when there is one (at most one, and any AWAITING_HITL run
+-- with the same id claimed it earlier), else the latest claim; only
+-- when no such run exists does a finished run with the id answer
+-- ALREADY_TERMINAL (writes nothing). An unknown execution writes nothing
+-- (UNKNOWN_EXECUTION, not journaled). Otherwise FAILED is appended:
 --   RUNNING        stage before_request; the run moves to FAILED
 --   AWAITING_HITL  stage after_request; the PENDING request stands and the
 --                  run state is unchanged (the sweep handles the request)
@@ -987,7 +1116,17 @@ BEGIN
   SELECT * INTO v_run
     FROM public.run_invocations ri
    WHERE ri.n8n_execution_id = p_n8n_execution_id
+     AND ri.state IN ('RUNNING'::public.fao_run_state, 'AWAITING_HITL'::public.fao_run_state)
+   ORDER BY (ri.state = 'RUNNING'::public.fao_run_state) DESC, ri.claimed_at DESC NULLS LAST, ri.correlation_id
+   LIMIT 1
      FOR UPDATE;
+  IF NOT FOUND THEN
+    SELECT * INTO v_run
+      FROM public.run_invocations ri
+     WHERE ri.n8n_execution_id = p_n8n_execution_id
+     ORDER BY ri.claimed_at DESC NULLS LAST, ri.correlation_id
+     LIMIT 1;
+  END IF;
   IF NOT FOUND THEN
     RETURN fao_private.refuse('rpc:fao_run_fail', 'run_invocations', left(p_n8n_execution_id, 64),
                               jsonb_build_object('n8n_execution_id', left(p_n8n_execution_id, 200)),
@@ -1037,16 +1176,16 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.fao_run_fail(text, text, text) IS
-  'FAO-GOV-008: records a workflow failure by n8n execution id: FAILED event (stage before_request or after_request); a RUNNING run moves to FAILED, an AWAITING_HITL run keeps its PENDING request for the sweep. UNKNOWN_EXECUTION and ALREADY_TERMINAL write nothing.';
+  'FAO-GOV-008: records a workflow failure by n8n execution id (the unfinished run that claimed it most recently): FAILED event (stage before_request or after_request); a RUNNING run moves to FAILED, an AWAITING_HITL run keeps its PENDING request for the sweep. UNKNOWN_EXECUTION and ALREADY_TERMINAL write nothing.';
 
 -- ----------------------------------------------------------------------------
 -- Revoke every function in this file from every client role. 0017 grants:
--- fao_whoami to authenticated; fao_run_start to anon and authenticated; the
--- four workflow RPCs to fao_workflow.
+-- fao_whoami(json) to authenticated; fao_run_start(json) to anon and
+-- authenticated; the four workflow RPCs to fao_workflow.
 -- ----------------------------------------------------------------------------
-REVOKE ALL ON FUNCTION public.fao_whoami()                        FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
-REVOKE ALL ON FUNCTION public.fao_run_start(text, text, text, text) FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
-REVOKE ALL ON FUNCTION public.fao_run_claim(text, text)           FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
+REVOKE ALL ON FUNCTION public.fao_whoami(json)                    FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
+REVOKE ALL ON FUNCTION public.fao_run_start(json)                 FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
+REVOKE ALL ON FUNCTION public.fao_run_claim(text, text, text)     FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION public.fao_ledger_append_batch(jsonb)      FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION public.fao_run_finalize(uuid)              FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION public.fao_run_fail(text, text, text)      FROM PUBLIC, anon, authenticated, service_role, fao_workflow;

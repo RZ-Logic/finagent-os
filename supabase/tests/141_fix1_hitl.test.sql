@@ -6,13 +6,14 @@
 -- target and reported in item_errors as NO_ESCALATION_TARGET, once),
 -- FAO-GOV-007 (the notifier context never names the invoker as the target
 -- and the invoker is never recorded as the recipient), and for B2
--- FAO-GOV-004 (fao_hitl_decide over HTTP accepts only a JSON body).
+-- FAO-GOV-004 (fao_hitl_decide over HTTP accepts only a JSON body; since
+-- IC-18 the media-type check is in fao_private.client_args).
 -- Flagship agent fao_reserve_recon_v1 is owned by Sarah; seed escalation_to
 -- for Sarah is Marcus. Each case sets Sarah's escalation_to before the sweep
 -- that decides its target.
 -- ============================================================================
 BEGIN;
-SELECT plan(39);
+SELECT plan(40);
 
 CREATE TEMP TABLE v (k text PRIMARY KEY, j jsonb);
 CREATE FUNCTION pg_temp.g(p_k text) RETURNS jsonb LANGUAGE sql AS $$ SELECT j FROM v WHERE k = p_k $$;
@@ -50,43 +51,21 @@ CREATE FUNCTION pg_temp.uidj(p_email text) RETURNS jsonb LANGUAGE sql AS $$ SELE
 
 -- Requests at different clock times so each deadline (24 hours) falls in its
 -- own sweep: A, E, F, G at 0; B at 10000; C at 20000; D at 30000.
+-- Fix round 2 R12: a request with no SENT REQUESTED notice is escalated
+-- (NOTIFICATION_FAILED) once the notice window (20 minutes at the default
+-- notify_max_attempts) has passed since it was created. The TIMEOUT cases
+-- (A, B, C, D) and the planted case G therefore get a SENT notice when they
+-- are created, and the NOTIFICATION_FAILED cases E and F run at clock 600:
+-- past the 5 minute renotify mark, inside the window, so each target is
+-- still decided by the sweep of its own case.
 SELECT tests.set_clock(0);
 INSERT INTO v VALUES ('rA', to_jsonb(tests.make_request('aisha.okonkwo@finagent-os.demo')));
 INSERT INTO v VALUES ('rE', to_jsonb(tests.make_request('aisha.okonkwo@finagent-os.demo')));
 INSERT INTO v VALUES ('rF', to_jsonb(tests.make_request('sarah.chen@finagent-os.demo')));
 INSERT INTO v VALUES ('rG', to_jsonb(tests.make_request('aisha.okonkwo@finagent-os.demo')));
-SELECT tests.set_clock(10000);
-INSERT INTO v VALUES ('rB', to_jsonb(tests.make_request('sarah.chen@finagent-os.demo')));
-SELECT tests.set_clock(20000);
-INSERT INTO v VALUES ('rC', to_jsonb(tests.make_request('sarah.chen@finagent-os.demo')));
-SELECT tests.set_clock(30000);
-INSERT INTO v VALUES ('rD', to_jsonb(tests.make_request('sarah.chen@finagent-os.demo')));
-
--- B2: over HTTP fao_hitl_decide accepts only a JSON body. PostgREST cuts a
--- form-encoded value at a NUL (%00) before the call, so form bodies are
--- refused; request.headers is set here as PostgREST sets it.
-INSERT INTO v VALUES ('rH', to_jsonb(tests.make_request('aisha.okonkwo@finagent-os.demo')));
-CREATE FUNCTION pg_temp.decide_hdr(p_headers text, p_id text, p_notes text) RETURNS jsonb LANGUAGE plpgsql AS $$
-DECLARE r jsonb;
-BEGIN
-  PERFORM set_config('request.headers', p_headers, true);
-  r := tests.decide_raw('sarah.chen@finagent-os.demo', p_id, 'APPROVED', p_notes);
-  PERFORM set_config('request.headers', '', true);
-  RETURN r;
-END $$;
-INSERT INTO v VALUES ('ii_before', to_jsonb(tests.journal_count('INVALID_INPUT')));
-INSERT INTO v VALUES ('hForm', pg_temp.decide_hdr('{"content-type": "application/x-www-form-urlencoded"}', pg_temp.id('rH')::text, 'a'));
-SELECT ok(pg_temp.g('hForm')->>'code' = 'INVALID_INPUT' AND pg_temp.g('hForm')->>'http_status' = '400', 'B2: a form-encoded decide is INVALID_INPUT');
-SELECT is((SELECT decision::text || '/' || coalesce(decision_notes, '<null>') FROM public.hitl_queue WHERE hitl_id = pg_temp.id('rH')), 'PENDING/<null>',
-  'B2: the form-encoded decide leaves the row unchanged');
-SELECT is(tests.journal_count('INVALID_INPUT') - (pg_temp.g('ii_before')::text)::bigint, 1::bigint, 'B2: the refusal is journaled');
-SELECT is(pg_temp.decide_hdr('{"content-type": "text/plain"}', pg_temp.id('rH')::text, 'a')->>'code', 'INVALID_INPUT', 'B2: a text/plain decide is INVALID_INPUT');
-SELECT is(pg_temp.decide_hdr('not json', pg_temp.id('rH')::text, 'a')->>'code', 'INVALID_INPUT', 'B2: unreadable request headers fail closed');
-SELECT is(pg_temp.decide_hdr('{}', '999999999', 'a')->>'code', 'NOT_FOUND', 'B2: no content-type header passes the input check');
-INSERT INTO v VALUES ('hJson', pg_temp.decide_hdr('{"content-type": "Application/JSON; charset=utf-8"}', pg_temp.id('rH')::text, 'b2 json notes'));
-SELECT ok(pg_temp.g('hJson')->>'ok' = 'true' AND pg_temp.g('hJson')->>'decision' = 'APPROVED'
-          AND (SELECT decision_notes FROM public.hitl_queue WHERE hitl_id = pg_temp.id('rH')) = 'b2 json notes',
-  'B2: a JSON body (any case, with charset) is decided as before');
+INSERT INTO v VALUES ('nA', pg_temp.rec(pg_temp.id('rA'), 'REQUESTED', 0, 'SENT'));
+INSERT INTO v VALUES ('nG', pg_temp.rec(pg_temp.id('rG'), 'REQUESTED', 0, 'SENT'));
+SELECT tests.set_clock(600);
 
 -- Case E (NOTIFICATION_FAILED): escalation_to is the invoker (Aisha); falls back to the owner (Sarah)
 SELECT pg_temp.esc_to('aisha.okonkwo@finagent-os.demo');
@@ -134,6 +113,44 @@ INSERT INTO v VALUES ('recG', pg_temp.rec(pg_temp.id('rG'), 'ESCALATED', 1, 'FAI
 SELECT ok(pg_temp.g('recG')->>'ok' = 'true'
           AND (SELECT recipient_owner_id FROM public.fao_notifications WHERE notification_id = (pg_temp.g('recG')->>'notification_id')::bigint) IS NULL,
   'G: the invoker is never recorded as the recipient');
+
+SELECT tests.set_clock(10000);
+INSERT INTO v VALUES ('rB', to_jsonb(tests.make_request('sarah.chen@finagent-os.demo')));
+INSERT INTO v VALUES ('nB', pg_temp.rec(pg_temp.id('rB'), 'REQUESTED', 0, 'SENT'));
+SELECT tests.set_clock(20000);
+INSERT INTO v VALUES ('rC', to_jsonb(tests.make_request('sarah.chen@finagent-os.demo')));
+INSERT INTO v VALUES ('nC', pg_temp.rec(pg_temp.id('rC'), 'REQUESTED', 0, 'SENT'));
+SELECT tests.set_clock(30000);
+INSERT INTO v VALUES ('rD', to_jsonb(tests.make_request('sarah.chen@finagent-os.demo')));
+INSERT INTO v VALUES ('nD', pg_temp.rec(pg_temp.id('rD'), 'REQUESTED', 0, 'SENT'));
+
+-- B2: over HTTP fao_hitl_decide accepts only a JSON body. PostgREST cuts a
+-- form-encoded value at a NUL (%00) before the call, so form bodies are
+-- refused; request.headers is set here as PostgREST sets it.
+INSERT INTO v VALUES ('rH', to_jsonb(tests.make_request('aisha.okonkwo@finagent-os.demo')));
+CREATE FUNCTION pg_temp.decide_hdr(p_headers text, p_id text, p_notes text) RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE r jsonb;
+BEGIN
+  PERFORM set_config('request.headers', p_headers, true);
+  r := tests.decide_raw('sarah.chen@finagent-os.demo', p_id, 'APPROVED', p_notes);
+  PERFORM set_config('request.headers', '', true);
+  RETURN r;
+END $$;
+INSERT INTO v VALUES ('ii_before', to_jsonb(tests.journal_count('INVALID_INPUT')));
+INSERT INTO v VALUES ('hForm', pg_temp.decide_hdr('{"content-type": "application/x-www-form-urlencoded"}', pg_temp.id('rH')::text, 'a'));
+SELECT ok(pg_temp.g('hForm')->>'code' = 'INVALID_INPUT' AND pg_temp.g('hForm')->>'http_status' = '400', 'B2: a form-encoded decide is INVALID_INPUT');
+SELECT is((SELECT decision::text || '/' || coalesce(decision_notes, '<null>') FROM public.hitl_queue WHERE hitl_id = pg_temp.id('rH')), 'PENDING/<null>',
+  'B2: the form-encoded decide leaves the row unchanged');
+SELECT is(tests.journal_count('INVALID_INPUT') - (pg_temp.g('ii_before')::text)::bigint, 1::bigint, 'B2: the refusal is journaled');
+SELECT is(tests.journal_row((pg_temp.g('hForm')->>'ref')::bigint)->'attempted'->>'invalid_body', 'media_type',
+  'B2 (IC-18): the Content-Type check now sits in fao_private.client_args and is journaled as media_type');
+SELECT is(pg_temp.decide_hdr('{"content-type": "text/plain"}', pg_temp.id('rH')::text, 'a')->>'code', 'INVALID_INPUT', 'B2: a text/plain decide is INVALID_INPUT');
+SELECT is(pg_temp.decide_hdr('not json', pg_temp.id('rH')::text, 'a')->>'code', 'INVALID_INPUT', 'B2: unreadable request headers fail closed');
+SELECT is(pg_temp.decide_hdr('{}', '999999999', 'a')->>'code', 'NOT_FOUND', 'B2: no content-type header passes the input check');
+INSERT INTO v VALUES ('hJson', pg_temp.decide_hdr('{"content-type": "Application/JSON; charset=utf-8"}', pg_temp.id('rH')::text, 'b2 json notes'));
+SELECT ok(pg_temp.g('hJson')->>'ok' = 'true' AND pg_temp.g('hJson')->>'decision' = 'APPROVED'
+          AND (SELECT decision_notes FROM public.hitl_queue WHERE hitl_id = pg_temp.id('rH')) = 'b2 json notes',
+  'B2: a JSON body (any case, with charset) is decided as before');
 
 -- Case A (TIMEOUT): escalation_to is the invoker (Aisha); falls back to the owner (Sarah)
 SELECT pg_temp.esc_to('aisha.okonkwo@finagent-os.demo');

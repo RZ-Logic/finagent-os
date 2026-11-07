@@ -3,5 +3,5 @@
   "supabase_cli": "2.122.0",
   "node": "22",
   "python": "3.12",
-  "n8n": "unset (informational; the integrator fills it from LIVE-FACTS)"
+  "n8n": "2.46.6"
 }

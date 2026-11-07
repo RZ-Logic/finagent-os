@@ -16,6 +16,8 @@
 //   pytest   python -m pytest mcp/tests -q --junitxml=.local/reports/pytest.xml
 //   pgtap    supabase test db --workdir .local/supabase
 //   api      node --test --test-concurrency=1 --test-reporter=tap "test/api/*.test.mjs"
+//   e2e      node scripts/e2e-n8n.mjs (fresh n8n in Docker, real executions,
+//            TAP from node --test test/e2e/*.test.mjs)
 //
 // Flags:
 //   --offline       layers exports, node and pytest only (no Docker needed)
@@ -36,9 +38,9 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const REPORTS = join(ROOT, '.local', 'reports');
 const WORKDIR_REL = '.local/supabase';
 const STAGED_CONFIG = join(ROOT, '.local', 'supabase', 'supabase', 'config.toml');
-const ALL_LAYERS = ['exports', 'node', 'pytest', 'pgtap', 'api'];
+const ALL_LAYERS = ['exports', 'node', 'pytest', 'pgtap', 'api', 'e2e'];
 const OFFLINE_LAYERS = ['exports', 'node', 'pytest'];
-const DB_LAYERS = new Set(['pgtap', 'api']);
+const DB_LAYERS = new Set(['pgtap', 'api', 'e2e']);
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
 
 // ---------------------------------------------------------------------------
@@ -58,7 +60,7 @@ export function parseArgs(argv) {
   }
   let selected = opts.layers.length ? ALL_LAYERS.filter((l) => opts.layers.includes(l)) : [...ALL_LAYERS];
   if (opts.offline) selected = selected.filter((l) => OFFLINE_LAYERS.includes(l));
-  if (selected.length === 0) throw new Error('no layers selected (--offline excludes pgtap and api)');
+  if (selected.length === 0) throw new Error('no layers selected (--offline excludes pgtap, api and e2e)');
   return { ...opts, selected };
 }
 
@@ -260,6 +262,8 @@ function layerCommand(name, python) {
       return { cmd: process.execPath, args: [SUPABASE_JS, 'test', 'db', '--workdir', WORKDIR_REL], need: STAGED_CONFIG };
     case 'api':
       return { cmd: process.execPath, args: ['--test', '--test-concurrency=1', '--test-reporter=tap', 'test/api/*.test.mjs'], need: join(ROOT, 'test', 'api') };
+    case 'e2e':
+      return { cmd: process.execPath, args: [join('scripts', 'e2e-n8n.mjs')], need: join(ROOT, 'test', 'e2e') };
     default:
       return null;
   }

@@ -166,4 +166,4 @@ In wave 1 the harnesses are kept valid but are not run; the workflows are checke
 
 - **Naming:** production workflows use `fao_<area>_<purpose>_v<N>`. The Writer is exported as `writer.json`; its name inside n8n is `Writer`.
 - **Notes:** each workflow has a sticky note (`Architecture Note`, `Writer Note` or `Harness Note`) summarizing its role and control IDs. They render only inside n8n.
-- **Sub-workflow triggers:** the Writer and the notifier start with an Execute Workflow Trigger whose input schema is a JSON example; fields outside the schema are dropped before the first node runs.
+- **Sub-workflow triggers:** the Writer and the notifier start with an Execute Workflow Trigger whose input schema is a JSON example; fields outside the schema are dropped before the first node runs. Every caller maps each trigger field explicitly by expression (`={{ $json.<field> }}`) with a matching schema, never by pass-through; `scripts/check-exports.mjs` rule `execute_workflow_inputs` enforces it.

@@ -327,9 +327,10 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
   v jsonb;
+  v_key text := coalesce(p_key, tests.new_key());  -- built as the owner, before the switch
 BEGIN
   PERFORM tests.as_user(p_email);
-  v := public.fao_run_start(p_agent_id, 'pgtap run', coalesce(p_key, tests.new_key()), 'test');
+  v := public.fao_run_start(p_agent_id, 'pgtap run', v_key, 'test');
   PERFORM tests.as_owner();
   RETURN v;
 END;
@@ -550,12 +551,16 @@ AS $$
 $$;
 
 -- --- Grants on schema tests ------------------------------------------------------
+-- FAO-GOV-015: every helper is called by the owner. While a probe runs, the
+-- switched role (anon, authenticated, service_role or fao_workflow) only has
+-- to resolve schema tests and call tests.as_owner() to come back, so that is
+-- the only EXECUTE it gets. PUBLIC loses the default EXECUTE, so no client
+-- role can reach tests.do_as (any SQL as any role), tests.uid (email to id)
+-- or any other helper, even if schema tests were ever exposed to an API.
+-- Re-running this file re-applies the same grants (CREATE OR REPLACE keeps
+-- the ACL of an existing function; a new one starts with PUBLIC EXECUTE and
+-- loses it here).
 
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA tests FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 GRANT USAGE ON SCHEMA tests TO anon, authenticated, service_role, fao_workflow;
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA tests TO anon, authenticated, service_role, fao_workflow;
-
--- When a test runner that recurses into _helpers/ executes this file as a
--- test, it still reports valid TAP. Harmless when local-setup runs it.
-SELECT plan(1);
-SELECT pass('FinAgent pgTAP helpers installed');
-SELECT * FROM finish();
+GRANT EXECUTE ON FUNCTION tests.as_owner() TO anon, authenticated, service_role, fao_workflow;

@@ -24,6 +24,14 @@ concurrency:
 env:
   FORCE_COLOR: "0"
 
+# Every run step uses `bash --noprofile --norc -eo pipefail {0}`. Without an
+# explicit shell GitHub runs `bash -e {0}` with no pipefail, so a piped step
+# takes the exit code of its last command (for example tee) and a failing test
+# command would pass the step.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   static:
     name: static (exports and Node unit tests)
@@ -116,14 +124,14 @@ jobs:
       - run: npm run stage
       - run: npm run sb:start
       - run: npm run db:reset
-      - name: pgTAP
-        run: |
-          mkdir -p .local/reports
-          npm run test:db 2>&1 | tee .local/reports/pgtap.log
-      - name: API tests
-        run: |
-          mkdir -p .local/reports
-          npm run test:api 2>&1 | tee .local/reports/api.log
+      # pgTAP (supabase test db) and the API tests (node --test test/api) run
+      # through test-all.mjs, which applies the strict pass rule: the process
+      # exits 0, at least one test ran, and nothing was skipped or todo. It
+      # writes .local/reports/pgtap.log, api.log and summary.json and exits
+      # non-zero unless both layers pass. db:reset above already reset the
+      # database and ran local-setup, so --no-reset.
+      - name: pgTAP and API tests
+        run: node scripts/test-all.mjs --no-reset --layer pgtap --layer api
       - name: Upload reports
         if: failure()
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3

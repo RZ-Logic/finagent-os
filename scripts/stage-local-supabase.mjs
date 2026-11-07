@@ -20,13 +20,21 @@
 //   node scripts/stage-local-supabase.mjs --until 0011 stop after the last file
 //                                                      whose name contains _0011
 //
-// Also copies supabase/tests/ to .local/supabase/supabase/tests/ and writes
+// Also copies supabase/tests/ to .local/supabase/supabase/tests/ (without
+// supabase/tests/_helpers/, see below) and writes
 // .local/supabase/supabase/config.toml. Idempotent: the staged migrations and
 // tests folders are wiped first on every run.
+//
+// supabase/tests/_helpers/ is left out of the staged tests folder because
+// `supabase test db` runs every .sql file it finds there as a test, outside a
+// transaction. The helpers are installed once per reset by
+// scripts/local-setup.mjs straight from the repo copy of
+// supabase/tests/_helpers/install.sql (FAO-GOV-015: the runner never
+// re-creates helpers or re-applies their grants).
 // ============================================================================
 
 import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, copyFileSync, existsSync, cpSync } from 'node:fs';
-import { join, dirname, resolve } from 'node:path';
+import { join, dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -36,6 +44,7 @@ const WORKDIR = join(ROOT, '.local', 'supabase');
 const STAGED = join(WORKDIR, 'supabase');
 const STAGED_MIGRATIONS = join(STAGED, 'migrations');
 const STAGED_TESTS = join(STAGED, 'tests');
+const SRC_HELPERS = join(SRC_TESTS, '_helpers');
 const VERSION_BASE = 20260101000000n; // first staged version is ...000001
 
 function parseArgs(argv) {
@@ -76,6 +85,15 @@ export function selectMigrations(files, until) {
   files.forEach((f, i) => { if (re.test(f)) last = i; });
   if (last < 0) throw new Error(`--until ${until}: no migration file name contains _${until}`);
   return files.slice(0, last + 1);
+}
+
+// cpSync filter: true for every path under supabase/tests/ except the
+// _helpers folder and anything inside it.
+export function stageTestPath(src, testsDir = SRC_TESTS) {
+  const rel = relative(testsDir, src);
+  if (rel === '') return true;
+  const first = rel.split(/[\\/]/)[0];
+  return first !== '_helpers';
 }
 
 export function stagedName(index, file) {
@@ -176,14 +194,15 @@ function main() {
   });
 
   if (existsSync(SRC_TESTS)) {
-    cpSync(SRC_TESTS, STAGED_TESTS, { recursive: true });
+    cpSync(SRC_TESTS, STAGED_TESTS, { recursive: true, filter: (src) => stageTestPath(src) });
+    if (existsSync(join(STAGED_TESTS, '_helpers'))) throw new Error('staged tests folder still contains _helpers/');
   }
 
   writeFileSync(join(STAGED, 'config.toml'), configToml(major));
 
   console.log(`Staged ${map.length} of ${all.length} migrations into ${STAGED_MIGRATIONS}${until ? ` (until _${until})` : ''}:`);
   for (const m of map) console.log(`  ${m}`);
-  console.log(existsSync(SRC_TESTS) ? `Copied supabase/tests/ to ${STAGED_TESTS}` : 'No supabase/tests/ folder yet; nothing copied');
+  console.log(existsSync(SRC_TESTS) ? `Copied supabase/tests/ to ${STAGED_TESTS} (without _helpers/; local-setup installs ${SRC_HELPERS})` : 'No supabase/tests/ folder yet; nothing copied');
   console.log(`Wrote ${join(STAGED, 'config.toml')} (Postgres ${major})`);
 }
 

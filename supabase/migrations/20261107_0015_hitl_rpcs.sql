@@ -213,7 +213,14 @@ COMMENT ON FUNCTION public.fao_hitl_get(text) IS
 -- ----------------------------------------------------------------------------
 -- The only way a decision is recorded. All in one transaction:
 --   1. session (NO_SESSION; the anonymous path)
---   2. id, decision (APPROVED or REJECTED only) and notes (INVALID_INPUT)
+--   2. id, decision (APPROVED or REJECTED only) and notes (INVALID_INPUT);
+--      over HTTP the body must be JSON (INVALID_INPUT): PostgREST decodes an
+--      application/x-www-form-urlencoded body itself and cuts each value at
+--      a NUL (%00), so notes would be stored cut short with no control
+--      character left for text_ok to refuse. Calls with no request.headers
+--      (direct SQL; anon and authenticated cannot log in) are not affected.
+--      A JSON \u0000 never reaches this function: PostgREST's argument
+--      conversion raises 22P05 first (KNOWN-LIMITS).
 --   3. caller holds some honoured role (NOT_AUTHORISED)
 --   4. lock the request without waiting (BUSY when another session holds it)
 --   5. NOT_FOUND, EXPIRED, ALREADY_DECIDED; at or after the deadline EXPIRED
@@ -254,6 +261,7 @@ DECLARE
   v_ledger    bigint;
   v_obl       text[];
   v_symbols   jsonb;
+  v_ctype     text;
 BEGIN
   v_key     := left(p_hitl_id, 20);
   v_attempt := jsonb_build_object('decision', left(p_decision, 200));
@@ -268,9 +276,17 @@ BEGIN
     RETURN fao_private.refuse(c_entry, 'hitl_queue', v_key, v_attempt, 'NO_SESSION');
   END IF;
 
-  -- 2. Inputs
+  -- 2. Inputs. Media type of the request body, '' when no header was sent or
+  --    the call did not come through PostgREST; unreadable headers fail closed.
+  BEGIN
+    v_ctype := lower(btrim(split_part(coalesce(
+                 nullif(current_setting('request.headers', true), '')::jsonb->>'content-type', ''), ';', 1)));
+  EXCEPTION WHEN others THEN
+    v_ctype := 'unreadable';
+  END;
   v_id := fao_private.parse_id(p_hitl_id);
-  IF v_id IS NULL
+  IF v_ctype NOT IN ('', 'application/json')
+     OR v_id IS NULL
      OR coalesce(p_decision IN ('APPROVED', 'REJECTED'), false) IS NOT TRUE
      OR (p_notes IS NOT NULL AND NOT fao_private.text_ok(p_notes, 0, 2000)) THEN
     RETURN fao_private.refuse(c_entry, 'hitl_queue', v_key, v_attempt, 'INVALID_INPUT');
@@ -502,7 +518,9 @@ BEGIN
     IF NOT FOUND THEN
       RETURN fao_private.ok_result(v_base, 'NOT_PENDING');
     END IF;
-    SELECT po.name INTO v_target_nm FROM public.process_owners po WHERE po.id = v_target;
+    -- FAO-GOV-004: the invoker is never named, even as an escalation target.
+    SELECT po.name INTO v_target_nm FROM public.process_owners po
+     WHERE po.id = v_target AND po.id <> v_req.agent_invoker_id;
   END IF;
 
   IF EXISTS (
@@ -636,6 +654,10 @@ BEGIN
        AND l.inputs->>'level' = '1'
      ORDER BY l.ledger_id DESC
      LIMIT 1;
+    -- FAO-GOV-004: the invoker is never recorded as the recipient.
+    IF v_recipient = v_req.agent_invoker_id THEN
+      v_recipient := NULL;
+    END IF;
   END IF;
 
   v_ref   := left(regexp_replace(p_external_ref, '[[:cntrl:]]', ' ', 'g'), 200);
@@ -712,6 +734,15 @@ COMMENT ON FUNCTION public.fao_notification_record(bigint, text, int, text, text
 --      requests are not listed)
 -- Deadlines are compared with fao_private.clock(). Escalations go to the
 -- agent process owner's escalation_to, else the process owner.
+-- FAO-GOV-004: the escalation target is never the invoker (the request's
+-- agent_invoker_id or the run's invoker_id). When escalation_to is the
+-- invoker, the target falls back to the process owner; when the owner is
+-- also the invoker (or no owner is found), the target is NULL. The escalation
+-- event is still written with target_owner_id NULL and still listed, so the
+-- channel notice goes out naming no one, and the item is reported in
+-- item_errors with sqlstate NO_ESCALATION_TARGET (fail closed: the sweeper
+-- then raises FAO-GOV-008 for an operator). This is reported once per
+-- request, since the escalation is written only once.
 CREATE FUNCTION public.fao_maintenance_sweep()
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -735,6 +766,8 @@ DECLARE
   v_req         public.hitl_queue%ROWTYPE;
   v_run         public.run_invocations%ROWTYPE;
   v_target      uuid;
+  v_excl        uuid[];
+  v_no_target   boolean;
   v_has_esc     boolean;
   v_last        text;
   v_failed      int;
@@ -932,12 +965,20 @@ BEGIN
            AND l.inputs->>'event_type' = 'HITL_ESCALATED'
            AND l.inputs->>'hitl_id' = v_req.hitl_id::text
            AND l.inputs->>'level' = '1');
+      v_no_target := false;
       IF NOT v_has_esc THEN
-        SELECT coalesce(po.escalation_to, po.id)
+        -- FAO-GOV-004: the escalation target is never the invoker.
+        v_excl := ARRAY[v_req.agent_invoker_id, v_run.invoker_id];
+        SELECT CASE
+                 WHEN po.escalation_to IS NOT NULL
+                  AND po.escalation_to <> ALL (array_remove(v_excl, NULL)) THEN po.escalation_to
+                 WHEN po.id <> ALL (array_remove(v_excl, NULL)) THEN po.id
+               END
           INTO v_target
           FROM public.agent_registry ar
           JOIN public.process_owners po ON po.id = ar.process_owner_id
          WHERE ar.agent_id = v_req.agent_id;
+        v_no_target := v_target IS NULL;
 
         PERFORM fao_private.append_event(
           v_req.correlation_id,
@@ -1009,6 +1050,11 @@ BEGIN
         v_escalations := v_escalations || jsonb_build_array(jsonb_build_object(
           'hitl_id', v_req.hitl_id, 'level', 1, 'reason', 'TIMEOUT'));
       END IF;
+      -- Added last, so it is reported only when the item's changes stand.
+      IF v_no_target THEN
+        v_errors := v_errors || jsonb_build_array(jsonb_build_object(
+          'step', 'expire_request', 'id', v_hid::text, 'sqlstate', 'NO_ESCALATION_TARGET'));
+      END IF;
     EXCEPTION WHEN others THEN
       v_errors := v_errors || jsonb_build_array(jsonb_build_object('step', 'expire_request', 'id', v_hid::text, 'sqlstate', SQLSTATE));
     END;
@@ -1070,7 +1116,15 @@ BEGIN
                AND l.inputs->>'hitl_id' = v_req.hitl_id::text
                AND l.inputs->>'level' = '1'
           ) THEN
-            SELECT coalesce(po.escalation_to, po.id)
+            -- FAO-GOV-004: the escalation target is never the invoker.
+            v_excl := ARRAY[v_req.agent_invoker_id,
+                            (SELECT ri.invoker_id FROM public.run_invocations ri
+                              WHERE ri.correlation_id = v_req.correlation_id)];
+            SELECT CASE
+                     WHEN po.escalation_to IS NOT NULL
+                      AND po.escalation_to <> ALL (array_remove(v_excl, NULL)) THEN po.escalation_to
+                     WHEN po.id <> ALL (array_remove(v_excl, NULL)) THEN po.id
+                   END
               INTO v_target
               FROM public.agent_registry ar
               JOIN public.process_owners po ON po.id = ar.process_owner_id
@@ -1095,6 +1149,10 @@ BEGIN
 
             v_escalations := v_escalations || jsonb_build_array(jsonb_build_object(
               'hitl_id', v_req.hitl_id, 'level', 1, 'reason', 'NOTIFICATION_FAILED'));
+            IF v_target IS NULL THEN
+              v_errors := v_errors || jsonb_build_array(jsonb_build_object(
+                'step', 'renotify', 'id', c.hitl_id::text, 'sqlstate', 'NO_ESCALATION_TARGET'));
+            END IF;
           END IF;
         END IF;
       END IF;

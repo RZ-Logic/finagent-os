@@ -92,7 +92,7 @@ SELECT tests.as_owner();
 -- History is kept when an owner leaves
 DO $$ BEGIN PERFORM set_config('fao.change_reason', 'pgtap 030 delete probe', true); END $$;
 SELECT throws_ok($$DELETE FROM public.process_owners WHERE email = 'aisha.okonkwo@finagent-os.demo'$$, '23503', NULL, 'a referenced process owner cannot be deleted');
-SELECT throws_ok(format($$DELETE FROM auth.users WHERE id = %L$$, tests.uid('aisha.okonkwo@finagent-os.demo')), NULL, NULL, 'the auth user of a referenced owner cannot be deleted');
+SELECT throws_ok(format($$DELETE FROM auth.users WHERE id = %L$$, tests.uid('aisha.okonkwo@finagent-os.demo')), '23503', NULL, 'the auth user of a referenced owner cannot be deleted (23503, history FK)');
 
 INSERT INTO v VALUES ('hitl_before', to_jsonb((SELECT count(*) FROM public.hitl_queue WHERE agent_invoker_id = tests.uid('aisha.okonkwo@finagent-os.demo') OR approver_id = tests.uid('aisha.okonkwo@finagent-os.demo'))));
 INSERT INTO v VALUES ('ledger_before', to_jsonb((SELECT count(*) FROM public.shadow_ledger WHERE inputs->>'invoker_id' = tests.uid('aisha.okonkwo@finagent-os.demo')::text OR inputs->>'agent_invoker_id' = tests.uid('aisha.okonkwo@finagent-os.demo')::text)));

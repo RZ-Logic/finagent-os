@@ -39,6 +39,24 @@ test('identity in headers changes nothing', async () => {
   assert.equal(g.status, 403);
   assert.equal(g.body.code, 'NOT_AUTHORISED');
   assert.equal(g.body.request, undefined);
+  // Callers who could not decide on their own account (Outsider: no role;
+  // the reader: read-only) send headers naming Sarah, an approver. If any
+  // header became the identity, the decision would succeed as Sarah.
+  for (const key of ['outsider', 'reader']) {
+    const token = await signIn(key);
+    const r = await rpc('fao_hitl_decide', { p_hitl_id: String(hitlId), p_decision: 'APPROVED' }, { token, headers: forged });
+    assert.equal(r.status, 403, `${key}: status ${r.status}`);
+    assert.equal(r.body.code, 'NOT_AUTHORISED', `${key}: code ${r.body && r.body.code}`);
+    assert.notEqual(r.body.ok, true);
+    assert.ok(r.body.ref, `${key}: journal reference returned`);
+    const row = await journalRow(r.body.ref);
+    assert.equal(row.actor_uid, uid(key), `${key}: journal names the signed-in caller`);
+    assert.notEqual(row.actor_uid, uid('sarah'));
+    assert.equal(row.code, 'NOT_AUTHORISED');
+    assert.equal(await decision(hitlId), 'PENDING', `${key}: request still PENDING`);
+  }
+  const h = await one('SELECT approver_id FROM public.hitl_queue WHERE hitl_id = $1', [hitlId]);
+  assert.equal(h.approver_id, null);
   const aisha = await signIn('aisha');
   const d = await rpc('fao_hitl_decide', { p_hitl_id: String(hitlId), p_decision: 'APPROVED' }, { token: aisha, headers: forged });
   assert.equal(d.status, 403);

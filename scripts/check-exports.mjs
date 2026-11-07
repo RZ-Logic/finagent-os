@@ -199,7 +199,8 @@ function queryReplacement(node) {
 
 // --- Rules ------------------------------------------------------------------
 // Each rule: (ctx) => array of violation strings (empty means pass).
-// ctx = { file, wf (parsed or null), raw, parseError, exportedIds }.
+// ctx = { file, wf (parsed or null), raw, parseError, exportedIds,
+//         exportedById (workflow id -> parsed workflow) }.
 
 export const RULES = [
   {
@@ -300,6 +301,21 @@ export const RULES = [
       }),
   },
   {
+    // FAO-GOV-001 / FAO-GOV-007: a sub-workflow call must not depend on
+    // pass-through of the parent item. n8n merges the mapped values over the
+    // parent item ({...json, ...value}), so a mapping the editor refills with
+    // nulls or fixed values would overwrite every Writer event or notifier
+    // input. Each field of the target trigger's jsonExample is mapped by the
+    // expression ={{ $json.<field> }}, with a schema entry of the type n8n
+    // infers from the example (no type for a null example value, which n8n
+    // reads as "any"), and attemptToConvertTypes off so nothing is cast.
+    id: 'execute_workflow_inputs',
+    text: 'every Execute Workflow node maps each target trigger field explicitly',
+    run: ({ wf, exportedById }) => nodesOf(wf)
+      .filter((n) => n.type === T.exec)
+      .flatMap((n) => checkWorkflowInputs(n, exportedById ? exportedById.get(targetId(n)) : null)),
+  },
+  {
     id: 'error_workflow',
     text: 'errorWorkflow set on the flagship and nothing else',
     run: ({ file, wf }) => {
@@ -373,6 +389,68 @@ export const RULES = [
   },
 ];
 
+// The fields a sub-workflow's Execute Workflow Trigger declares, in order,
+// with the type n8n infers for each (null means "any": no schema type).
+// Returns null when the trigger accepts all data (nothing to map).
+export function triggerFields(targetWf) {
+  const trig = nodesOf(targetWf).find((x) => x.type === T.execTrigger);
+  if (!trig) return { error: 'target has no Execute Workflow Trigger' };
+  const p = params(trig);
+  if (p.inputSource === 'passthrough') return null;
+  if (p.inputSource !== 'jsonExample') return { error: `target trigger inputSource ${p.inputSource || '(unset)'} is not jsonExample` };
+  let ex;
+  try { ex = JSON.parse(p.jsonExample); } catch (e) { return { error: `target trigger jsonExample does not parse: ${e.message}` }; }
+  if (!ex || typeof ex !== 'object' || Array.isArray(ex)) return { error: 'target trigger jsonExample is not an object' };
+  const typeOf = (v) => (v === null ? null : Array.isArray(v) ? 'array' : typeof v);
+  return { fields: Object.entries(ex).map(([name, v]) => ({ name, type: typeOf(v) })) };
+}
+
+function checkWorkflowInputs(n, targetWf) {
+  const label = `node "${n.name}"`;
+  if (!targetWf) return [`${label}: target is not an exported workflow, inputs not checked`];
+  const tf = triggerFields(targetWf);
+  if (tf === null) return [];
+  if (tf.error) return [`${label}: ${tf.error}`];
+  const wi = params(n).workflowInputs;
+  if (!wi || typeof wi !== 'object') return [`${label}: workflowInputs is missing`];
+  const v = [];
+  if (wi.mappingMode !== 'defineBelow') v.push(`${label}: workflowInputs.mappingMode is ${wi.mappingMode || '(unset)'}, expected defineBelow`);
+  if (wi.attemptToConvertTypes !== false) v.push(`${label}: workflowInputs.attemptToConvertTypes is not false`);
+  const value = wi.value && typeof wi.value === 'object' && !Array.isArray(wi.value) ? wi.value : null;
+  if (!value) v.push(`${label}: workflowInputs.value is not an object`);
+  const schema = Array.isArray(wi.schema) ? wi.schema : null;
+  if (!schema) v.push(`${label}: workflowInputs.schema is not an array`);
+  const want = new Map(tf.fields.map((f) => [f.name, f]));
+  if (value) {
+    for (const f of tf.fields) {
+      if (!Object.prototype.hasOwnProperty.call(value, f.name)) { v.push(`${label}: field ${f.name} is not mapped`); continue; }
+      const expr = value[f.name];
+      if (typeof expr !== 'string' || squash(expr) !== `={{$json.${f.name}}}`) {
+        v.push(`${label}: field ${f.name} is mapped to ${JSON.stringify(expr)}, expected "={{ $json.${f.name} }}"`);
+      }
+    }
+    for (const k of Object.keys(value)) if (!want.has(k)) v.push(`${label}: mapped field ${k} is not in the target trigger`);
+  }
+  if (schema) {
+    const seen = new Set();
+    for (const e of schema) {
+      const id = e && e.id;
+      if (!want.has(id)) { v.push(`${label}: schema entry ${JSON.stringify(id)} is not in the target trigger`); continue; }
+      if (seen.has(id)) v.push(`${label}: schema entry ${id} appears twice`);
+      seen.add(id);
+      const f = want.get(id);
+      if (e.displayName !== id) v.push(`${label}: schema entry ${id} displayName is ${JSON.stringify(e.displayName)}`);
+      if (e.removed === true) v.push(`${label}: schema entry ${id} is removed`);
+      if (e.display !== true) v.push(`${label}: schema entry ${id} is not displayed`);
+      if (f.type === null ? e.type !== undefined : e.type !== f.type) {
+        v.push(`${label}: schema entry ${id} type is ${e.type === undefined ? '(none)' : e.type}, expected ${f.type === null ? '(none, any type)' : f.type}`);
+      }
+    }
+    for (const f of tf.fields) if (!seen.has(f.name)) v.push(`${label}: schema has no entry for ${f.name}`);
+  }
+  return v;
+}
+
 function checkInvokeWebhook(n) {
   if (!n) return [];
   const p = params(n);
@@ -413,6 +491,7 @@ export function checkExports({ workflowsDir = WORKFLOWS_DIR } = {}) {
     return { file, raw, wf, parseError };
   });
   const exportedIds = new Set(loaded.filter((l) => l.wf && l.wf.id).map((l) => String(l.wf.id)));
+  const exportedById = new Map(loaded.filter((l) => l.wf && l.wf.id).map((l) => [String(l.wf.id), l.wf]));
 
   const checks = [];
   // Global check: the exported set is exactly the section 4 set.
@@ -429,7 +508,7 @@ export function checkExports({ workflowsDir = WORKFLOWS_DIR } = {}) {
         violations = ['not checked: workflow does not parse'];
       } else {
         try {
-          violations = rule.run({ ...l, exportedIds });
+          violations = rule.run({ ...l, exportedIds, exportedById });
         } catch (e) {
           violations = [`rule error: ${e.message}`];
         }

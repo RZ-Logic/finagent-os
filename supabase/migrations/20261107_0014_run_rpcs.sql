@@ -113,6 +113,8 @@ COMMENT ON FUNCTION public.fao_whoami() IS
 --   5. agent exists (UNKNOWN_AGENT); invoker role for it (NOT_AUTHORISED)
 --   6. idempotency replay
 --   7. agent ACTIVE, else a committed RUN_REFUSED row and AGENT_NOT_ACTIVE
+--      (RATE_LIMITED with no ledger row once the invoker has
+--      max_runs_per_hour RUN_REFUSED rows for the agent in the last hour)
 --   8. rate limit (RATE_LIMITED)
 --   9. new run and single-use token (only its SHA-256 hash is stored)
 CREATE FUNCTION public.fao_run_start(
@@ -238,7 +240,23 @@ BEGIN
   -- 7. Registry status gate. The RUN_REFUSED row is inserted directly (there
   --    is no run record for append_event to read) and commits with the
   --    refusal, because nothing here raises.
+  --    FAO-GOV-003 also bounds the append-only refusal rows: once this
+  --    invoker has max_runs_per_hour RUN_REFUSED rows for the agent in the
+  --    last hour, the call is refused RATE_LIMITED and no ledger row is
+  --    written (the journal row stays under the journal flood cap). The
+  --    per-invoker advisory lock above makes the count exact.
   IF v_agent.status <> 'ACTIVE'::public.agent_status THEN
+    SELECT count(*)
+      INTO v_recent
+      FROM public.shadow_ledger l
+     WHERE l.agent_id = v_agent.agent_id
+       AND l.inputs ->> 'event_type' = 'RUN_REFUSED'
+       AND l.inputs ->> 'invoker_id' = v_uid::text
+       AND l.event_timestamp > fao_private.clock() - interval '1 hour';
+    IF v_recent >= v_agent.max_runs_per_hour THEN
+      RETURN fao_private.refuse(c_entry, 'agent_registry', v_key, v_attempt, 'RATE_LIMITED');
+    END IF;
+
     INSERT INTO public.shadow_ledger (
       correlation_id, execution_id, agent_id, risk_tier, inputs,
       policy_outcome, policy_sub_tier, policy_rationale, obligations,
@@ -292,7 +310,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.fao_run_start(text, text, text, text) IS
-  'FAO-GOV-008, FAO-GOV-002, FAO-GOV-003, FAO-GOV-004: starts a run for the signed-in invoker (identity from auth.uid() only): input checks, active owner, invoker role, idempotency replay, registry status gate with a committed RUN_REFUSED row, rate limit, then a single-use run token stored only as its hash.';
+  'FAO-GOV-008, FAO-GOV-002, FAO-GOV-003, FAO-GOV-004: starts a run for the signed-in invoker (identity from auth.uid() only): input checks, active owner, invoker role, idempotency replay, registry status gate with a committed RUN_REFUSED row (RATE_LIMITED with no row once the invoker has max_runs_per_hour of them in the last hour), rate limit, then a single-use run token stored only as its hash.';
 
 -- ----------------------------------------------------------------------------
 -- fao_run_claim (FAO-GOV-008)
@@ -385,6 +403,11 @@ COMMENT ON FUNCTION public.fao_run_claim(text, text) IS
 -- FAILED. Timestamps, execution id, agent and tier come from the database;
 -- supplied values must match the run. STARTED fixes the run asset scope and
 -- gets the invoker, channel, reason and execution id from the run record.
+-- A Writer FAILED gets source 'writer', stage 'before_request' and the run's
+-- n8n execution id from the database. inputs keys the database alone writes
+-- (invoker_id, invoked_via, reason, approver_id, approvers, agent_invoker_id,
+-- hitl_id, decision, decided_at) are refused, except the three STARTED
+-- overwrites.
 -- AI advisory fields are refused when not null: AI advisory is off for every
 -- agent (FAO-GOV-014) and wave 1 records none.
 CREATE FUNCTION public.fao_ledger_append_batch(p_events jsonb)
@@ -401,6 +424,12 @@ DECLARE
     'policy_rationale', 'obligations', 'status', 'error_details', 'ai_prompt',
     'ai_output', 'ai_confidence', 'fractional_cost_usd', 'hitl_status',
     'execution_id', 'agent_id', 'risk_tier'];
+  -- inputs keys reserved to the database (FAO-GOV-001, FAO-GOV-004)
+  c_reserved  constant text[] := ARRAY[
+    'invoker_id', 'invoked_via', 'reason', 'approver_id', 'approvers',
+    'agent_invoker_id', 'hitl_id', 'decision', 'decided_at'];
+  -- reserved keys that STARTED may carry because the database overwrites them
+  c_started_set constant text[] := ARRAY['invoker_id', 'invoked_via', 'reason'];
   v_n         int;
   v_i         int;
   v_item      jsonb;
@@ -543,6 +572,18 @@ BEGIN
       RAISE EXCEPTION 'FAO-GOV-001 ledger_append: item %: inputs.event_type differs from event_type', v_i
         USING ERRCODE = '22023';
     END IF;
+
+    -- Evidence keys only the database writes (identity, approval and
+    -- request facts) are refused in Writer inputs, so a Writer row can never
+    -- look as if the database set them. On STARTED, invoker_id, invoked_via
+    -- and reason are instead overwritten from the run record below (2.10).
+    FOR v_key IN SELECT k FROM jsonb_object_keys(v_inputs) AS k LOOP
+      IF v_key = ANY (c_reserved)
+         AND NOT (v_et = 'STARTED' AND v_key = ANY (c_started_set)) THEN
+        RAISE EXCEPTION 'FAO-GOV-001 ledger_append: item %: inputs.% is set only by the database', v_i, v_key
+          USING ERRCODE = '22023';
+      END IF;
+    END LOOP;
 
     -- Enum fields
     v_outcome := NULL;
@@ -739,6 +780,13 @@ BEGIN
         RAISE EXCEPTION 'FAO-GOV-001 ledger_append: item %: FAILED must have status FAILURE', v_i
           USING ERRCODE = '22023';
       END IF;
+      -- The database, not the workflow, names where a Writer failure came
+      -- from: the run is RUNNING, so no request exists yet (before_request),
+      -- and the execution id is the one that claimed the run.
+      v_inputs := v_inputs || jsonb_build_object(
+        'source',           'writer',
+        'stage',            'before_request',
+        'n8n_execution_id', v_run.n8n_execution_id);
       v_failed   := true;
       v_last_err := v_err;
     END IF;
@@ -769,7 +817,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.fao_ledger_append_batch(jsonb) IS
-  'FAO-GOV-001: the Writer route into the Shadow Ledger. All or none; STARTED, ASSET_RECONCILED and FAILED only; database-set timestamps and context; forbidden keys refused; asset scope fixed by STARTED; one ASSET_RECONCILED per asset in scope. Raises FAO-GOV-001 ledger_append: item <i>: <reason>.';
+  'FAO-GOV-001: the Writer route into the Shadow Ledger. All or none; STARTED, ASSET_RECONCILED and FAILED only; database-set timestamps and context (Writer FAILED source, stage and execution id included); forbidden keys and database-only inputs keys refused; asset scope fixed by STARTED; one ASSET_RECONCILED per asset in scope. Raises FAO-GOV-001 ledger_append: item <i>: <reason>.';
 
 -- ----------------------------------------------------------------------------
 -- fao_run_finalize (FAO-REC-001, FAO-GOV-004, FAO-GOV-001)

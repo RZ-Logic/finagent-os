@@ -320,6 +320,8 @@ COMMENT ON FUNCTION fao_private.set_http_status(int) IS
 -- journaled in the same transaction as the refusal. A per-actor cap per
 -- minute bounds the journal; the first refusal over the cap writes one
 -- JOURNAL_SUPPRESSED row for that bucket. Every attempt is still refused.
+-- The sweep's GRANTS_DRIFT and TEST_CLOCK_SET rows are exempt from the cap
+-- and do not count toward it (FAO-GOV-001, fix round 1 A3).
 -- ----------------------------------------------------------------------------
 
 CREATE FUNCTION fao_private.journal_allowed(p_actor uuid, p_db_role text)
@@ -349,7 +351,7 @@ BEGIN
     FROM public.fao_refusal_journal j
    WHERE j.actor_uid IS NOT DISTINCT FROM p_actor
      AND j.db_role = p_db_role
-     AND j.code <> 'JOURNAL_SUPPRESSED'
+     AND j.code NOT IN ('JOURNAL_SUPPRESSED', 'GRANTS_DRIFT', 'TEST_CLOCK_SET')
      AND j.at > clock_timestamp() - interval '1 minute';
 
   IF v_n < v_cap THEN
@@ -376,7 +378,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION fao_private.journal_allowed(uuid, text) IS
-  'FAO-GOV-001: refusal journal flood cap per actor and database role per minute (setting journal_cap_per_minute, default 20). Writes one JOURNAL_SUPPRESSED row per bucket when the cap is first exceeded.';
+  'FAO-GOV-001: refusal journal flood cap per actor and database role per minute (setting journal_cap_per_minute, default 20). Writes one JOURNAL_SUPPRESSED row per bucket when the cap is first exceeded. GRANTS_DRIFT and TEST_CLOCK_SET rows do not count toward the cap.';
 
 CREATE FUNCTION fao_private.journal_refusal(
   p_entry_point  text,
@@ -410,7 +412,12 @@ BEGIN
   END;
   v_role := fao_private.caller_role();
 
-  IF NOT fao_private.journal_allowed(v_actor, v_role) THEN
+  -- The sweep's GRANTS_DRIFT and TEST_CLOCK_SET rows share the fao_workflow
+  -- bucket with every claim refusal, so the flood cap could suppress them.
+  -- They are exempt from the cap (and not counted toward it); the sweep
+  -- itself writes each at most once per 24 hours per distinct diff_md5.
+  IF p_code NOT IN ('GRANTS_DRIFT', 'TEST_CLOCK_SET')
+     AND NOT fao_private.journal_allowed(v_actor, v_role) THEN
     RETURN NULL;
   END IF;
 
@@ -431,7 +438,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION fao_private.journal_refusal(text, text, text, jsonb, text) IS
-  'FAO-GOV-001: journals one refusal in the current transaction (actor from auth.uid(), role, session role, target, attempt, code, fixed message). Returns the refusal_id, or NULL when the flood cap applies.';
+  'FAO-GOV-001: journals one refusal in the current transaction (actor from auth.uid(), role, session role, target, attempt, code, fixed message). Returns the refusal_id, or NULL when the flood cap applies. GRANTS_DRIFT and TEST_CLOCK_SET (sweep) are exempt from the cap.';
 
 -- The ok:false envelope. Journals when p_journal, sets the HTTP status from
 -- the code, and returns the fixed message for the code.

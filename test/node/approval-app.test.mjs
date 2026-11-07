@@ -307,3 +307,72 @@ test('serve.json redirects every docs and config file away from the page (B8)', 
   for (const r of sv.redirects) assert.equal(r.destination, '/', `${r.source} goes to /`);
   assert.equal(sv.directoryListing, false);
 });
+
+// --- Round 4 (P2, KNOWN-LIMITS U16 (a)) ---------------------------------------------
+// fao_hitl_decide APPROVED when the agent is no longer ACTIVE: the decision
+// stands, the run is COMMIT_BLOCKED and FAILED, and the envelope is the
+// journaled AGENT_NOT_ACTIVE refusal carrying the decision fields.
+function blockedResult() {
+  return {
+    ok: false, code: 'AGENT_NOT_ACTIVE', http_status: 409, message: 'server text <b>x</b>', ref: 41,
+    hitl_id: 12, decision: 'APPROVED', decided_at: '2026-11-07T11:22:33Z',
+    committed: false, committed_ledger_id: null,
+  };
+}
+const BLOCKED_TEXT = 'Decision recorded. The run was not committed because the agent is no longer active.';
+
+test('buildViewModel shows the recorded decision when the commit was blocked (P2)', () => {
+  assert.equal(app.PAGE_TEXT.decidedNotCommitted, BLOCKED_TEXT, 'fixed text in the page text list');
+  const vm = app.buildViewModel(blockedResult());
+  assert.equal(vm.kind, 'decided', 'result view, not a generic error');
+  assert.equal(vm.ok, false);
+  assert.equal(vm.code, 'AGENT_NOT_ACTIVE');
+  assert.equal(vm.message, BLOCKED_TEXT);
+  assert.equal(vm.retry, false, 'no retry: the decision is final');
+  assert.equal(vm.needsSignIn, false);
+  assert.equal(vm.title, 'Request 12');
+  assert.equal(vm.reference, 'Reference id: 41', 'journal reference shown');
+  assert.deepEqual(vm.fields, [
+    { label: 'Request id', value: '12' },
+    { label: 'Decision', value: 'APPROVED' },
+    { label: 'Decided at', value: '2026-11-07T11:22:33Z' },
+    { label: 'Committed', value: 'No' },
+  ]);
+  const strings = leaves(vm).filter((x) => typeof x === 'string');
+  assert.ok(!strings.some((s) => s.includes('server text')), 'server message text is never shown');
+});
+
+test('buildViewModel keeps a missing decided_at out of the blocked view (P2, B4)', () => {
+  const r = blockedResult();
+  r.decided_at = null;
+  const vm = app.buildViewModel(r);
+  assert.equal(vm.kind, 'decided');
+  assert.ok(!JSON.stringify(vm.fields).includes('Decided at'));
+});
+
+test('AGENT_NOT_ACTIVE without the decision fields stays a plain refusal (P2)', () => {
+  const plain = { ok: false, code: 'AGENT_NOT_ACTIVE', http_status: 409, message: 'x', ref: 9 };
+  const vm = app.buildViewModel(plain);
+  assert.equal(vm.kind, 'message');
+  assert.equal(vm.message, 'The agent is not active.');
+  assert.equal(vm.reference, 'Reference id: 9');
+  for (const variant of [
+    { ...blockedResult(), committed: true },
+    { ...blockedResult(), committed: undefined },
+    { ...blockedResult(), decision: '' },
+    { ...blockedResult(), decision: null },
+    { ...blockedResult(), code: 'NOT_AUTHORISED', http_status: 403 },
+  ]) {
+    assert.notEqual(app.buildViewModel(variant).message, BLOCKED_TEXT, JSON.stringify(variant));
+  }
+});
+
+test('the blocked view carries markup in decision fields unchanged as plain text (P2)', () => {
+  const r = blockedResult();
+  r.decision = `APPROVED${M}`;
+  r.decided_at = `t${M}`;
+  const vm = app.buildViewModel(r);
+  const values = vm.fields.map((f) => f.value);
+  assert.ok(values.includes(`APPROVED${M}`) && values.includes(`t${M}`));
+  for (const x of leaves(vm)) assert.ok(!(x && typeof x === 'object' && (x.fn || x.dom)));
+});

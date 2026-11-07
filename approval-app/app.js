@@ -59,6 +59,11 @@ export const PAGE_TEXT = Object.freeze({
   viewOnly: 'You can view this request but not decide it.',
   signInFailed: 'Sign-in failed. Check your email and password.',
   decided: 'Decision recorded.',
+  // APPROVED recorded, but fao_hitl_decide found the agent no longer ACTIVE
+  // at commit (FAO-GOV-002): COMMIT_BLOCKED, run FAILED, envelope
+  // AGENT_NOT_ACTIVE with the decision fields (KNOWN-LIMITS U16 (a), P2).
+  decidedNotCommitted:
+    'Decision recorded. The run was not committed because the agent is no longer active.',
   committedYes: 'Yes',
   committedNo: 'No',
   signedInAs: 'Signed in as ',
@@ -258,6 +263,31 @@ export function buildViewModel(result) {
       field('Decided at', result.decided_at),
       field('Committed', result.committed === true ? PAGE_TEXT.committedYes : PAGE_TEXT.committedNo),
       field('Committed ledger id', result.committed_ledger_id),
+    ]);
+    return model;
+  }
+
+  // The decision stands but the run was blocked at commit: show the recorded
+  // decision and its time, not a bare refusal, so the approver does not think
+  // the approval failed (U16 (a), P2). Only the decide envelope carries
+  // committed false with a decision; pre-decision AGENT_NOT_ACTIVE refusals
+  // have neither and fall through to the plain message.
+  if (
+    !result.ok &&
+    code === 'AGENT_NOT_ACTIVE' &&
+    result.committed === false &&
+    typeof result.decision === 'string' &&
+    result.decision !== ''
+  ) {
+    model.kind = 'decided';
+    model.hitlId = toText(result.hitl_id);
+    model.title = `Request ${model.hitlId}`;
+    model.message = PAGE_TEXT.decidedNotCommitted;
+    model.fields = filled([
+      field('Request id', result.hitl_id),
+      field('Decision', result.decision),
+      field('Decided at', result.decided_at),
+      field('Committed', PAGE_TEXT.committedNo),
     ]);
     return model;
   }

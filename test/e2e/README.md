@@ -12,7 +12,7 @@ node scripts/e2e-n8n.mjs test                      # rerun the tests against the
 npm run e2e:down                                   # remove the containers and the volume
 ```
 
-`npm test` includes the layer (it runs after `api`). It needs Docker and the local stack (`npm run sb:start`, `npm run db:reset` once). One run takes about 55 seconds: about 35 to build, import, publish and start n8n, about 20 for the twelve tests.
+`npm test` includes the layer (it runs after `api`). It needs Docker and the local stack (`npm run sb:start`, `npm run db:reset` once). One run takes about 55 seconds: about 35 to build, import, publish and start n8n, about 40 for the fourteen tests (S14 waits 15 seconds inside its run).
 
 ## What `scripts/e2e-n8n.mjs up` builds
 
@@ -33,6 +33,7 @@ The five production exports in `workflows/` are imported unchanged. `variants.mj
 - **Flagship fixture variants** (`inband`, `blocked`, `badinput`, `markup`, `failnode`). The flagship keeps its fixtures as literals in the Init Execution Code node, so other balances need another copy. Each variant replaces exactly the `wallet_data`, `ledger_data` and `fixture_metadata` blocks and gets its own id, name and webhook path; every other node and setting, `errorWorkflow` included, is the export's, except that the `markup` copy's Claim Run names the local-only agent `fao_e2e_markup_v1` instead of the flagship's, because a claim must name the agent its workflow serves (fix round 2 R08). Review scenarios (S02 to S04, S07, S08) use the unchanged flagship and its own fixtures.
 - **On-demand sweeper.** The production sweeper is imported but not published: its five-minute schedule would sweep the shared local stack under other test runs, and `n8n execute` cannot start a schedule-triggered workflow. The copy swaps only the Schedule Trigger for a header-auth Webhook (`responseMode: lastNode`).
 - **Failing notifier stand-in plus sweeper copy** (fix round 3 item 2). `failingNotifier()` (id `FaoE2eNotifFail1`) is the notifier's own trigger node plus one Code node that throws `FAO e2e: forced notifier failure`; `sweeperNotifierFails()` (id `FaoE2eSweepNfal1`, path `fao-e2e-sweep-notifier-fails`) is the on-demand sweeper copy with only the HITL Gateway target swapped to that stand-in. Only S13 uses them.
+- **Deprecate-before-finalize variant** (patch P1). `deprecate` (id `FaoE2eReconDepr1`, path `fao-e2e-recon-deprecate`) has the in-band balances, Claim Run names the local-only agent `fao_e2e_deprecate_v1`, and one extra Code node, `E2E Pause Before Finalize`, sits between Check Writer Count and Finalize Run and only waits 15 seconds (`setTimeout`), so S14 can deprecate the agent after the claim and the asset writes and before `fao_run_finalize`. Every other node, Check Finalize Result included, is the export's. Only S14 uses it.
 - Execution ids are not moved: each fresh instance numbers its executions from 1, so a rerun without a reset reuses ids that earlier runs on the stack hold. Since fix round 2 R09 the database allows that (finding 1), so every rerun exercises the fix; `.local/e2e/state.json` records the highest id already claimed (`execution_ids_already_claimed_up_to`).
 
 ## Scenarios (`n8n.e2e.test.mjs`)
@@ -54,6 +55,7 @@ Each run starts with `fao_run_start` as the signed-in invoker through PostgREST,
 | S11 | BLOCKED (one-sided) plus two CRITICAL assets route to review, sub-tier CRITICAL |
 | S12 | a NaN wallet balance and a missing ledger balance are BLOCKED; the run waits for review and never commits on its own |
 | S13 | the notifier fails and the same sweep also returns an item error (NO_ESCALATION_TARGET): request and run EXPIRED, HITL_ESCALATED with target null, COMMITTED FAILURE; the sweeper execution fails at Check Sweep Errors with one message naming FAO-GOV-007 (notifier) before FAO-GOV-008 (item errors); only REQUESTED/0/SENT recorded, one Slack message |
+| S14 | the agent is deprecated (`fao_admin_set_agent` as C) after the claim and the 7 asset writes, before Finalize Run: COMMIT_BLOCKED (`inputs.code` AGENT_NOT_ACTIVE, `agent_status` DEPRECATED) and run FAILED; the flagship execution fails at Check Finalize Result with the fixed FAO-GOV-008 message naming AGENT_NOT_ACTIVE and the correlation id, never reaching Human Review Required? or Run Complete; the error workflow runs once and its `fao_run_fail` answers ALREADY_TERMINAL; exactly one COMMIT_BLOCKED and no FAILED row for the execution id; the agent is put back to ACTIVE |
 
 ## Shared-stack effects
 
@@ -64,6 +66,7 @@ What it does leave or touch on the shared stack:
 - It commits its own runs, requests, ledger rows, notifications and journal rows, and one local-only agent row, `fao_e2e_markup_v1` (display name with markup, for S10), kept until the next `db:reset`.
 - S07's sweep re-sends any failed notification on the stack, not only its own.
 - **S08 test clock sweep.** S08 sets the owner-only test clock (`fao_private.test_clock`, offset past its request's deadline) for one sweep. It refuses to start if a clock row is already set, so it never overwrites someone else's clock, and its `finally` deletes only its own row (matched by reason), as soon as the sweep has committed the expiry. While the row is set, every sweep on the stack sees the moved clock, and S08's own sweep expires every overdue request and fails every stale run on the stack, as a real sweep would. Do not run other sweeping tests at the same time.
+- **S14 agent status.** S14 adds the local-only agent `fao_e2e_deprecate_v1` (process owner Sarah) once, kept until the next `db:reset`, and moves it ACTIVE, DEPRECATED, ACTIVE through `fao_admin_set_agent` as Marcus, so each run adds its admin audit and change rows. A run started for that agent by anything else during S14's 15-second window would be refused or blocked. `n8n-executions.cjs` now also prints `lastNodeOutput`, the first output item of the last node that ran.
 - **S13 escalation target.** S13 sets Sarah's `escalation_to` to NULL for the length of one sweep, together with the test clock (same rules as S08), so the sweep raises NO_ESCALATION_TARGET. It refuses to start unless it finds Marcus there, and its `finally` puts Marcus back. While it is NULL, any other sweep on the stack sees it.
 
 ## Findings from the first runs

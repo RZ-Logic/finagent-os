@@ -303,7 +303,7 @@ def _text_ok(value: str, lo: int, hi: int) -> bool:
 #     identifier, such as APPROVE_ALL_PENDING_NOW, is not enough);
 #   - a value that is not text: a number, an integer, a boolean;
 #   - a token the database generates or checks against a fixed shape: UUIDs,
-#     timestamps, agent ids, asset symbols, n8n execution ids.
+#     timestamps, agent ids, asset symbols, digit-only n8n execution ids.
 # Everything else moves under `untrusted_text` at the same path, so an MCP
 # client can tell data from instructions: unknown keys, free text, names,
 # notes, obligations, error text, nested strings at any depth, a listed key
@@ -322,8 +322,11 @@ _UUID_RE = re.compile(
 _TS_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}(?::?\d{2})?)?$"
 )
-# 0014 checks p_n8n_execution_id against this shape before a run is claimed.
-_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# 0014 accepts p_n8n_execution_id of shape ^[A-Za-z0-9_-]{1,64}$ before a
+# run is claimed, which a word such as APPROVE_ALL_PENDING_NOW also fits.
+# Real n8n execution ids are digits, so only a digit string stays structured
+# here; any other value goes under `untrusted_text` (patch P3).
+_N8N_EXEC_ID_RE = re.compile(r"^[0-9]{1,20}$")
 
 
 def _re_kind(pattern: re.Pattern) -> Callable[[Any], bool]:
@@ -349,7 +352,7 @@ def _is_bool(v: Any) -> bool:
 
 K_UUID = _re_kind(_UUID_RE)
 K_TS = _re_kind(_TS_RE)
-K_ID = _re_kind(_ID_RE)
+K_N8N_EXEC_ID = _re_kind(_N8N_EXEC_ID_RE)
 K_AGENT = _re_kind(AGENT_ID_RE)
 K_ASSET = _re_kind(ASSET_RE)
 K_INT = _is_int
@@ -450,7 +453,7 @@ LEDGER_INPUTS_SCHEMA = {
     "asset_scope": ListOf(K_ASSET),
     "invoked_via": K_INVOKED_VIA,
     "invoker_id": K_UUID,
-    "n8n_execution_id": K_ID,
+    "n8n_execution_id": K_N8N_EXEC_ID,
     "source": K_SOURCE,
     "stage": K_STAGE,
     "code": K_CODE,
@@ -973,8 +976,11 @@ def build_server(
         record and no COMMITTED row. Read `run_state` with it;
         `outcome` and `status` come from the newest COMMITTED row;
         `conflict` is true when more than one COMMITTED row exists;
-        `commit_blocked` is true when the audit chain check stopped the
-        commit; `corrected` is true when a CORRECTION references the run.
+        `commit_blocked` is true when a COMMIT_BLOCKED row exists for the
+        run: the audit chain check (AUDIT_CHAIN_MISMATCH) or the agent
+        status gate (AGENT_NOT_ACTIVE: the agent was no longer ACTIVE at
+        finalize or at an APPROVED decision) stopped the commit;
+        `corrected` is true when a CORRECTION references the run.
 
         Args:
             limit: integer 1 to 200 (default 10).

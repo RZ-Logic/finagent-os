@@ -57,6 +57,7 @@ Webhook: Invoke                       [header auth: FAO Invoke Header Auth]
   -> Writer: ASSET_RECONCILED         [execute workflow: Writer, once, all assets in one batch]
   -> Check Writer Count               [code: stored count must equal asset count]
   -> Finalize Run                     [postgres: fao_run_finalize($1::uuid)]
+  -> Check Finalize Result            [code: ok:false fails the execution (FAO-GOV-008)]
   -> Human Review Required?  -- no -->  Run Complete (COMMITTED or COMMIT_BLOCKED already written)
   -> Notify Input                     [code: exactly {hitl_id, kind:'REQUESTED', level:0}]
   -> HITL Gateway                     [execute workflow: notifier, once]
@@ -67,6 +68,7 @@ Where to look first:
 - **Per-Asset Reconcile.** Fail-closed input rules, then the deterministic 7-rule matrix (first match wins). An asset present on one side only is BLOCKED with `band_status: ONE_SIDED`; a balance that is undefined, null, empty, non-numeric, NaN or infinite is BLOCKED with `band_status: INVALID_INPUT` and an `input_problem` naming the side and the value class; an asset with no usable threshold is BLOCKED with `NO_THRESHOLD`. Every BLOCKED item carries `hitl_status: PENDING` and `ratio: null`, so it routes the run to human review. Each rule's rationale names its FAO-REC control. No LLM in the policy path.
 - **Init Execution.** `correlation_id`, `execution_id`, `agent_id` and `risk_tier` come from the claim result. The asset scope is the sorted union of wallet and ledger keys. Inline fixtures (3 Kraken Dec 2025 PoR anchors, 1 clean baseline, 3 synthetic anomalies) with per-asset provenance on the STARTED row. Items cross the n8n task runner as JSON, which turns NaN and infinities into null, so Init Execution passes them to Per-Asset Reconcile as the strings `NaN`, `Infinity` and `-Infinity`; the asset is still BLOCKED and its `input_problem` says `nan` or `infinite`.
 - **Finalize Run.** The rollup (worst-asset rule, counts, escalated assets, review sub-tier) and the request are computed in SQL from the stored events, not by n8n. A run is never AWAITING_HITL without its request and its HITL_REQUESTED event.
+- **Check Finalize Result.** `fao_run_finalize` can refuse with `ok:false` after its own writes commit: when the agent is no longer ACTIVE at commit it writes COMMIT_BLOCKED (`inputs.code` AGENT_NOT_ACTIVE) and moves the run to FAILED in the same transaction (IC-24). Any result other than one item with `r.ok === true` fails the execution here with one fixed message, `FAO-GOV-008 recon: fao_run_finalize refused with <code> for run <correlation_id>; the run was not committed` (a code or id outside its format reads `UNKNOWN` / `unknown`), so the error workflow and n8n failure alerting run. The error workflow's `fao_run_fail` then finds the run already FAILED and answers ALREADY_TERMINAL, writing nothing, so the ledger keeps exactly one COMMIT_BLOCKED and no FAILED row. `check-exports` (`checkFinalizeGate`) refuses a layout in which a finalize result can reach Human Review Required? any other way, an error output or continue-on-fail on either node, or a check that does not throw on `r.ok !== true`. An `ok:true` result with `state` FAILED (AUDIT_CHAIN_MISMATCH, unreachable behind Check Writer Count) still ends at Run Complete.
 
 **Controls:** FAO-REC-001, 002, 004 (per-asset floor), 006, 007; FAO-GOV-001 (through the Writer), FAO-GOV-004, FAO-GOV-007, FAO-GOV-008, FAO-GOV-013.
 
@@ -132,7 +134,7 @@ Error Trigger
   -> Record Run Failure        [postgres: fao_run_fail($1, $2, $3)]
 ```
 
-Set as `errorWorkflow` on the flagship only, and published before the flagship (n8n 2.x skips an unpublished error workflow). A failing Writer or notifier call (a database error, or an unpublished sub-workflow) fails the flagship's Execute Workflow node, so the error workflow receives the flagship's execution id, which `fao_run_claim` recorded on the run. The database writes FAILED and moves the run to FAILED; after a request exists, the request stands and the sweep handles it. An execution that matches no run returns `UNKNOWN_EXECUTION` and nothing is written.
+Set as `errorWorkflow` on the flagship only, and published before the flagship (n8n 2.x skips an unpublished error workflow). A failing Writer or notifier call (a database error, or an unpublished sub-workflow) fails the flagship's Execute Workflow node, so the error workflow receives the flagship's execution id, which `fao_run_claim` recorded on the run. The database writes FAILED and moves the run to FAILED; after a request exists, the request stands and the sweep handles it. A failure raised by Check Finalize Result reaches a run that the database already moved to FAILED, so `fao_run_fail` answers ALREADY_TERMINAL and writes nothing. An execution that matches no run returns `UNKNOWN_EXECUTION` and nothing is written.
 
 ---
 

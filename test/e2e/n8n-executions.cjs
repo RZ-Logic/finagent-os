@@ -4,7 +4,8 @@
 // Run with: docker exec finagent-e2e-n8n node /e2e/n8n-executions.cjs [after]
 // Prints one JSON array: every execution with id greater than `after`
 // (default 0): id, workflowId, mode, status, startedAt, stoppedAt, and for a
-// failed execution the error message and node. Reads n8n's own SQLite file
+// failed execution the error message and node, and the first output item of
+// the last node that ran (lastNodeOutput). Reads n8n's own SQLite file
 // read-only with the sqlite3 and flatted modules n8n ships; writes nothing.
 // ============================================================================
 'use strict';
@@ -43,6 +44,13 @@ function summarise(raw) {
     }
   }
   if (nodeErrors.length) out.nodeErrors = nodeErrors;
+  // Patch P1 (S14): the first output item of the last node that ran, so a
+  // test can read what the error handler's Record Run Failure returned.
+  const lastRuns = out.lastNodeExecuted ? runData[out.lastNodeExecuted] : null;
+  const lastRun = Array.isArray(lastRuns) && lastRuns.length ? lastRuns[lastRuns.length - 1] : null;
+  const first = lastRun && lastRun.data && Array.isArray(lastRun.data.main) && Array.isArray(lastRun.data.main[0])
+    ? lastRun.data.main[0][0] : null;
+  if (first && first.json && typeof first.json === 'object') out.lastNodeOutput = first.json;
   return out;
 }
 

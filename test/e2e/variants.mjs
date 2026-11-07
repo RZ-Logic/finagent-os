@@ -23,6 +23,13 @@
 //    together. That copy differs from the export only in its trigger (as in
 //    2) and its HITL Gateway target; the stand-in keeps the notifier's
 //    Execute Workflow Trigger node and adds one throwing Code node.
+// 4. Patch P1 (S14, FAO-GOV-008 / FAO-GOV-002): the "deprecate" flagship
+//    variant runs under the local-only agent fao_e2e_deprecate_v1 and has one
+//    extra Code node, E2E Pause Before Finalize, between Check Writer Count
+//    and Finalize Run. It only waits (setTimeout in the task runner) so the
+//    test can deprecate the agent after the claim and the asset writes and
+//    before fao_run_finalize. Every other node, Check Finalize Result
+//    included, is the export's.
 // ============================================================================
 
 import { randomUUID } from 'node:crypto';
@@ -54,6 +61,11 @@ export const SWEEP_NFAIL_ID = 'FaoE2eSweepNfal1';
 // re-exports both).
 export const FLAGSHIP_AGENT = 'fao_reserve_recon_v1';
 export const MARKUP_AGENT = 'fao_e2e_markup_v1';
+// Patch P1 (S14): the local-only agent the deprecate variant claims for, and
+// how long that variant waits before Finalize Run.
+export const DEPRECATE_AGENT = 'fao_e2e_deprecate_v1';
+export const PAUSE_NODE = 'E2E Pause Before Finalize';
+export const PAUSE_BEFORE_FINALIZE_MS = 15000;
 
 // JS source for each variant's three literal blocks. JS, not JSON, so NaN and
 // markup survive exactly as a fixture author would write them.
@@ -167,6 +179,18 @@ export const VARIANTS = {
   },
 };
 
+// Patch P1 (S14): the in-band balances under the deprecate agent, with a
+// pause before Finalize Run so S14 can deprecate the agent in between.
+VARIANTS.deprecate = {
+  id: 'FaoE2eReconDepr1',
+  path: 'fao-e2e-recon-deprecate',
+  agent: DEPRECATE_AGENT,
+  wallet: VARIANTS.inband.wallet,
+  ledger: VARIANTS.inband.ledger,
+  meta: VARIANTS.inband.meta.replace(/e2e_inband/g, 'e2e_deprecate'),
+  pauseBeforeFinalizeMs: PAUSE_BEFORE_FINALIZE_MS,
+};
+
 function readExport(root, key) {
   return JSON.parse(readFileSync(join(root, 'workflows', EXPORTS[key].file), 'utf8'));
 }
@@ -200,12 +224,41 @@ export function flagshipVariant(root, name) {
     if (hits !== 1) throw new Error(`variants: ${name}: expected Claim Run to name ${FLAGSHIP_AGENT} once (fao_run_claim agent argument), found ${hits}`);
     claim.parameters = JSON.parse(text.replace(FLAGSHIP_AGENT, v.agent));
   }
+  if (v.pauseBeforeFinalizeMs) insertPauseBeforeFinalize(wf, v.pauseBeforeFinalizeMs, name);
   hook.webhookId = randomUUID();
   wf.id = v.id;
   wf.name = `fao_reserve_recon_v1 [e2e ${name}]`;
   wf.versionId = randomUUID();
   wf.tags = [];
   return wf;
+}
+
+// S14: Check Writer Count -> E2E Pause Before Finalize -> Finalize Run. The
+// export must have exactly that one edge; anything else fails the build.
+function insertPauseBeforeFinalize(wf, ms, name) {
+  const from = 'Check Writer Count';
+  const to = 'Finalize Run';
+  const outs = (((wf.connections || {})[from] || {}).main || []);
+  const fin = wf.nodes.find((n) => n.name === to);
+  if (!fin || outs.length !== 1 || (outs[0] || []).length !== 1 || outs[0][0].node !== to) {
+    throw new Error(`variants: ${name}: expected exactly one edge ${from} -> ${to}`);
+  }
+  if (!Number.isSafeInteger(ms) || ms < 1000 || ms > 60000) throw new Error(`variants: ${name}: pause ${ms} ms out of range`);
+  wf.nodes.push({
+    parameters: {
+      mode: 'runOnceForAllItems',
+      jsCode: `// E2E ONLY (test/e2e/variants.mjs): wait ${ms} ms, then pass the items on.
+await new Promise((resolve) => setTimeout(resolve, ${ms}));
+return $input.all();`,
+    },
+    type: 'n8n-nodes-base.code',
+    typeVersion: 2,
+    position: [fin.position[0], fin.position[1] + 200],
+    id: randomUUID(),
+    name: PAUSE_NODE,
+  });
+  wf.connections[from] = { main: [[{ node: PAUSE_NODE, type: 'main', index: 0 }]] };
+  wf.connections[PAUSE_NODE] = { main: [[{ node: to, type: 'main', index: 0 }]] };
 }
 
 export function sweeperOnDemand(root, { id = SWEEP_ID, path = SWEEP_PATH, label = 'e2e on-demand trigger' } = {}) {

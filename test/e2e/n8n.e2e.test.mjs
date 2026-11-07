@@ -17,7 +17,10 @@ import { test, after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import * as L from './lib.mjs';
-import { MARKUP_NOTE, MARKUP_NOTE_2, FAILING_NOTIFIER_ID, FAILING_NOTIFIER_MESSAGE, SWEEP_NFAIL_ID, SWEEP_NFAIL_PATH } from './variants.mjs';
+import {
+  MARKUP_NOTE, MARKUP_NOTE_2, FAILING_NOTIFIER_ID, FAILING_NOTIFIER_MESSAGE, SWEEP_NFAIL_ID, SWEEP_NFAIL_PATH,
+  DEPRECATE_AGENT, PAUSE_NODE, PAUSE_BEFORE_FINALIZE_MS,
+} from './variants.mjs';
 
 const P = L.state.variant_paths;
 const FLAGSHIP_PATH = L.state.flagship_path;
@@ -617,5 +620,144 @@ test('S13 a notifier failure and a sweep item error in the same sweep both fail 
   record(t, 'S13', {
     corr, hitl_id: req.hitl_id, offset_seconds: offset, sweep_http: s.status, sweep_error: msg,
     executions: `${L.brief(ex)} | ${L.brief(ex2)}`,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S14 (patch P1, KNOWN-LIMITS U16 (a)): the agent is deprecated after the
+// claim and the asset writes, before Finalize Run. fao_run_finalize then
+// writes COMMIT_BLOCKED, moves the run to FAILED and returns the
+// AGENT_NOT_ACTIVE envelope (IC-24); Check Finalize Result must fail the
+// execution so the error workflow runs, and the error workflow's
+// fao_run_fail must answer ALREADY_TERMINAL and write nothing. The deprecate
+// variant (variants.mjs) runs under the local-only agent DEPRECATE_AGENT and
+// waits PAUSE_BEFORE_FINALIZE_MS in E2E Pause Before Finalize. The agent is
+// deprecated and re-activated through fao_admin_set_agent as Marcus (admin),
+// as an operator would; it is left ACTIVE.
+async function ensureDeprecateAgent() {
+  await L.ownerTx(async (c) => {
+    await c.query("SELECT set_config('fao.change_reason', 'e2e n8n: local-only agent for the deprecate-before-finalize scenario', true)");
+    await c.query(
+      `INSERT INTO public.agent_registry (agent_id, display_name, risk_tier, status, workflow_id, approval_threshold, sox_control_ids,
+         ai_advisory_enabled, rollback_procedure, data_sources, production_targets, sla_max_execution_seconds,
+         sla_max_hitl_resolution_hrs, process_owner_id, max_runs_per_hour)
+       SELECT $1, 'E2E deprecate-before-finalize agent', 'RED', 'ACTIVE', NULL, 2, ARRAY['FAO-GOV-002','FAO-GOV-008']::text[], FALSE,
+         'Local e2e test agent. Writes nothing outside the Shadow Ledger; an erroneous ledger row is corrected by a CORRECTION event that references the original ledger_id.',
+         '{"note": "local e2e agent; no data sources"}'::jsonb, '{"note": "local e2e agent; no production targets"}'::jsonb,
+         300, 24, po.id, 60
+         FROM public.process_owners po WHERE po.email = 'sarah.chen@finagent-os.demo'
+       ON CONFLICT (agent_id) DO NOTHING`,
+      [DEPRECATE_AGENT],
+    );
+  });
+}
+
+const agentStatus = async () => (await L.one('SELECT status::text AS s FROM public.agent_registry WHERE agent_id = $1', [DEPRECATE_AGENT])).s;
+async function setAgentStatus(token, status, why) {
+  const r = await L.rpc('fao_admin_set_agent', {
+    p_agent_id: DEPRECATE_AGENT, p_status: status, p_ai_advisory_enabled: null, p_max_runs_per_hour: null, p_reason: `e2e n8n S14: ${why}`,
+  }, { token });
+  assert.equal(r.status, 200, `fao_admin_set_agent ${status}: ${r.status} ${JSON.stringify(r.body)}`);
+  assert.equal(r.body.ok, true, JSON.stringify(r.body));
+  assert.equal(await agentStatus(), status);
+}
+
+test('S14 the agent deprecated between claim and finalize fails the execution at Check Finalize Result; the error handler writes nothing more', T, async (t) => {
+  await ensureDeprecateAgent();
+  const marcus = await L.signIn('marcus');
+  if (await agentStatus() !== 'ACTIVE') await setAgentStatus(marcus, 'ACTIVE', 'activate before the run');
+  await L.slack.reset();
+
+  const before = L.lastExecutionId();
+  const { corr, token } = await L.startRun('sarah', { agent: DEPRECATE_AGENT, reason: 'e2e S14 agent deprecated before finalize' });
+  let r;
+  let ex;
+  try {
+    const w = await L.webhook(P.deprecate, { run_token: token });
+    assert.equal(w.status, 202, `webhook answered ${w.status} ${w.text}`);
+    assert.deepEqual(w.json, { accepted: true, correlation_id: corr });
+
+    // Claimed and every asset row written: the execution is now inside the pause.
+    const started = Date.now();
+    await L.waitUntil('7 ASSET_RECONCILED rows', async () => assets(await L.ledger(corr)).length === 7,
+      { timeoutMs: PAUSE_BEFORE_FINALIZE_MS, everyMs: 200 });
+    await setAgentStatus(marcus, 'DEPRECATED', 'deprecate between claim and finalize');
+    const mid = await L.run(corr);
+    assert.equal(mid.state, 'RUNNING', 'the agent was deprecated before Finalize Run ran (pause long enough)');
+    assert.ok(!(await L.types(corr)).some((x) => x.startsWith('COMMIT')), 'no COMMIT row before the deprecation');
+    t.diagnostic(`S14 deprecated ${Date.now() - started} ms after the 202 (pause ${PAUSE_BEFORE_FINALIZE_MS} ms)`);
+
+    r = await L.waitSettled(corr, { timeoutMs: PAUSE_BEFORE_FINALIZE_MS + 60000 });
+    // The flagship execution, both Writer calls and the error handler, all stopped.
+    ex = await L.waitUntil('flagship, two Writer calls and the error handler to stop', async () => {
+      const all = L.executions(before);
+      return all.length >= 4 && all.every((e) => e.stoppedAt) && byWorkflow(all, ERROR_WF).length >= 1 ? all : null;
+    }, { timeoutMs: 60000, everyMs: 750 });
+  } finally {
+    if (await agentStatus() !== 'ACTIVE') await setAgentStatus(marcus, 'ACTIVE', 'restore after the run');
+  }
+
+  // The database side: run FAILED, exactly one COMMIT_BLOCKED, no FAILED row.
+  assert.equal(r.state, 'FAILED');
+  assert.equal(r.last_error, 'agent not ACTIVE at commit');
+  assert.ok(r.finished_at, 'finished_at set');
+  const rows = await L.ledger(corr);
+  assert.deepEqual(rows.map((x) => x.t), ['STARTED', ...Array(7).fill('ASSET_RECONCILED'), 'COMMIT_BLOCKED']);
+  const blocked = rows.at(-1);
+  assert.equal(blocked.inputs.code, 'AGENT_NOT_ACTIVE');
+  assert.equal(blocked.inputs.agent_status, 'DEPRECATED');
+  assert.equal(blocked.inputs.hitl_id, null);
+  assert.equal(blocked.outcome, 'BLOCKED');
+  assert.equal(blocked.status, 'FAILURE');
+  assert.equal(blocked.hitl_status, 'NOT_REQUIRED');
+  assert.match(blocked.policy_rationale, /^FAO-GOV-002 agent fao_e2e_deprecate_v1 status DEPRECATED at commit; run not committed/);
+  assert.equal((await L.requests(corr)).length, 0, 'no request');
+  // No FAILED row anywhere for this execution id after the run's first row
+  // (fao_run_fail resolves by execution id; KNOWN-LIMITS U14 (a)).
+  const stray = await L.q(
+    `SELECT ledger_id, correlation_id FROM public.shadow_ledger
+      WHERE inputs->>'event_type' = 'FAILED' AND inputs->>'n8n_execution_id' = $1 AND ledger_id > $2`,
+    [String(r.n8n_execution_id), rows[0].ledger_id],
+  );
+  assert.deepEqual(stray, [], 'the error handler wrote no FAILED row');
+
+  // The n8n side: the flagship failed at Check Finalize Result, after Finalize
+  // Run and never on to Human Review Required?, Run Complete or the notifier.
+  const flag = ex.find((e) => e.id === String(r.n8n_execution_id));
+  assert.ok(flag, `flagship execution ${r.n8n_execution_id} in ${L.brief(ex)}`);
+  assert.equal(flag.workflowId, 'FaoE2eReconDepr1');
+  assert.equal(flag.status, 'error', L.brief([flag]));
+  assert.equal(flag.lastNodeExecuted, 'Check Finalize Result', L.brief([flag]));
+  assert.deepEqual((flag.nodeErrors || []).map((e) => e.node), ['Check Finalize Result'], L.brief([flag]));
+  const expected = `FAO-GOV-008 recon: fao_run_finalize refused with AGENT_NOT_ACTIVE for run ${corr}; the run was not committed`;
+  // The fixed text, plus at most the " [line N]" suffix n8n may add to a Code node error.
+  const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  assert.match(flag.error.message, new RegExp(`^${reEsc(expected)}( \\[line \\d+\\])?$`), flag.error.message);
+  assert.equal(flag.nodeErrors[0].message, flag.error.message);
+  const nodesRun = flag.nodes || [];
+  for (const n of ['Claim Run', PAUSE_NODE, 'Finalize Run', 'Check Finalize Result']) assert.ok(nodesRun.includes(n), `${n} ran: ${nodesRun.join(', ')}`);
+  for (const n of ['Human Review Required?', 'Run Complete', 'Notify Input', 'HITL Gateway']) assert.ok(!nodesRun.includes(n), `${n} did not run: ${nodesRun.join(', ')}`);
+  const writers = byWorkflow(ex, WRITER_WF);
+  assert.equal(writers.length, 2, L.brief(ex));
+  assert.ok(writers.every((e) => e.status === 'success'), L.brief(writers));
+  assert.equal(byWorkflow(ex, GATEWAY_WF).length, 0, 'the notifier was never called');
+
+  // The error handler ran once and fao_run_fail wrote nothing.
+  const handler = byWorkflow(ex, ERROR_WF);
+  assert.equal(handler.length, 1, `error workflow ran once: ${L.brief(ex)}`);
+  assert.equal(handler[0].status, 'success', L.brief(handler));
+  assert.equal(handler[0].lastNodeExecuted, 'Record Run Failure');
+  const failRes = (handler[0].lastNodeOutput || {}).r || {};
+  assert.equal(failRes.ok, true, JSON.stringify(handler[0].lastNodeOutput));
+  assert.equal(failRes.code, 'ALREADY_TERMINAL', JSON.stringify(failRes));
+  assert.equal(failRes.ledger_id, null);
+  assert.equal(failRes.correlation_id, corr);
+  assert.equal(failRes.state, 'FAILED');
+  assert.deepEqual((await L.ledger(corr)).map((x) => x.ledger_id), rows.map((x) => x.ledger_id), 'nothing appended after the handler');
+  assert.equal((await L.slack.requests()).length, 0, 'no Slack message');
+  assert.equal(await agentStatus(), 'ACTIVE', 'agent restored');
+  record(t, 'S14', {
+    corr, state: r.state, last_error: r.last_error, flagship_error: flag.error.message,
+    fail_result: failRes.code, executions: L.brief(ex),
   });
 });

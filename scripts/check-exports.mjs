@@ -135,6 +135,7 @@ export const SECTION4 = {
       { name: 'Writer: ASSET_RECONCILED', type: T.exec, mode: 'once', target: WRITER_ID },
       { name: 'Check Writer Count', type: T.code, mode: ALL_ITEMS },
       { name: 'Finalize Run', type: T.postgres, query: 'public.fao_run_finalize($1::uuid)' },
+      { name: 'Check Finalize Result', type: T.code, mode: ALL_ITEMS },
       { name: 'Human Review Required?', type: T.if },
       { name: 'Run Complete', type: T.noop },
       { name: 'Notify Input', type: T.code, mode: ALL_ITEMS },
@@ -142,6 +143,13 @@ export const SECTION4 = {
       { name: 'Architecture Note', type: T.sticky },
     ],
     absent: ['Manual Trigger', 'Aggregate Rollup', 'Any HITL Required?', 'Writer: COMMITTED', 'Compose HITL Gateway Payload'],
+    // FAO-GOV-008 (patch P1): every finalize result passes Check Finalize
+    // Result, which fails the execution on ok:false (checkFinalizeGate).
+    edges: [
+      ['Check Writer Count', 0, 'Finalize Run'],
+      ['Finalize Run', 0, 'Check Finalize Result'],
+      ['Check Finalize Result', 0, 'Human Review Required?'],
+    ],
   },
   'fao_hitl_gateway_v1.json': {
     present: [
@@ -457,6 +465,7 @@ export const RULES = [
         if (!targets.includes(to)) v.push(`no connection "${from}" output ${out} -> "${to}"`);
       }
       if (file === FLAGSHIP_FILE) v.push(...checkInvokeWebhook(byName.get('Webhook: Invoke')));
+      if (file === FLAGSHIP_FILE) v.push(...checkFinalizeGate(wf, byName));
       if (file === 'fao_hitl_gateway_v1.json') v.push(...checkSlackPost(byName.get('Slack: Post Message')));
       if (file === 'fao_hitl_sweeper_v1.json') v.push(...checkSweeperOrder(wf, byName));
       return v;
@@ -643,6 +652,47 @@ function checkSweeperOrder(wf, byName) {
     if (/\bthrow\b/.test(code)) {
       v.push(`sweeper: Code node "${n.name}" throws; only Check Sweep Errors may fail the execution (it names both kinds of failure)`);
     }
+  }
+  return v;
+}
+
+// FAO-GOV-008 (patch P1): fao_run_finalize can return ok:false with its
+// writes committed (IC-24 AGENT_NOT_ACTIVE: COMMIT_BLOCKED, run FAILED). The
+// flagship must then fail the execution, so the error workflow and n8n
+// failure alerting run. Finalize Run leads only to Check Finalize Result
+// (no error output, no continue-on-fail), which leads only to Human Review
+// Required?; nothing else reaches Human Review Required?; and the check
+// throws unless r.ok === true.
+const stripComments = (code) => String(code || '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+function checkFinalizeGate(wf, byName) {
+  const v = [];
+  const outs = (name) => (((wf.connections || {})[name] || {}).main || []);
+  const fin = byName.get('Finalize Run');
+  const gate = byName.get('Check Finalize Result');
+  if (!fin || !gate) return v;
+  const finOuts = outs('Finalize Run');
+  const finTargets = (finOuts[0] || []).map((c) => c && c.node);
+  if (finOuts.length !== 1 || finTargets.length !== 1 || finTargets[0] !== 'Check Finalize Result') {
+    v.push(`flagship: Finalize Run must lead only to Check Finalize Result, found ${JSON.stringify(finOuts.map((o) => (o || []).map((c) => c && c.node)))}`);
+  }
+  for (const n of [fin, gate]) {
+    if (n.onError !== undefined && n.onError !== 'stopWorkflow') v.push(`flagship: node "${n.name}" onError is ${n.onError}, a failure must stop the execution`);
+    if (n.continueOnFail === true) v.push(`flagship: node "${n.name}" has continueOnFail`);
+  }
+  const gateOuts = outs('Check Finalize Result');
+  const gateTargets = (gateOuts[0] || []).map((c) => c && c.node);
+  if (gateOuts.length !== 1 || gateTargets.length !== 1 || gateTargets[0] !== 'Human Review Required?') {
+    v.push(`flagship: Check Finalize Result must lead only to Human Review Required?, found ${JSON.stringify(gateOuts.map((o) => (o || []).map((c) => c && c.node)))}`);
+  }
+  const into = Object.entries(wf.connections || {})
+    .filter(([, c]) => ((c || {}).main || []).some((o) => (o || []).some((x) => x && x.node === 'Human Review Required?')))
+    .map(([from]) => from);
+  if (into.length !== 1 || into[0] !== 'Check Finalize Result') {
+    v.push(`flagship: only Check Finalize Result may lead to Human Review Required?, found ${JSON.stringify(into)}`);
+  }
+  const code = stripComments(params(gate).jsCode);
+  if (!/\.ok\s*!==\s*true/.test(code) || !/\bthrow\b/.test(code)) {
+    v.push('flagship: Check Finalize Result must throw unless r.ok === true');
   }
   return v;
 }

@@ -734,6 +734,20 @@
     },
     {
       "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ============================================================================\n// FAO Reserve Recon - Check Finalize Result\n// ----------------------------------------------------------------------------\n// FAO-GOV-008 / FAO-GOV-002: fao_run_finalize can refuse with ok:false while\n// its own writes commit (IC-24: agent not ACTIVE at commit, COMMIT_BLOCKED\n// written and the run FAILED in the same transaction). Without this check\n// the execution would end normally at Run Complete and no error workflow or\n// failure alert would run. Any result other than exactly one item with\n// r.ok === true fails the execution here with one fixed message naming the\n// code and the correlation id, so the error workflow and n8n failure\n// alerting fire. The error workflow then calls fao_run_fail on a run that is\n// already FAILED, which answers ALREADY_TERMINAL and writes nothing, so no\n// second ledger row is written. A passing result goes through unchanged.\n// The code and the id come from the database; anything outside their\n// formats is reported as UNKNOWN / unknown, never echoed.\n// ============================================================================\n\nconst UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;\nconst CODE_RE = /^[A-Z][A-Z0-9_]{0,63}$/;\n\nconst items = $input.all();\nconst first = items.length === 1 && items[0] && items[0].json ? items[0].json : {};\nconst r = first.r && typeof first.r === 'object' && !Array.isArray(first.r) ? first.r : null;\n\nif (!r || r.ok !== true) {\n  const claim = (($('Claim Run').first() || {}).json || {}).r || {};\n  const cid = typeof claim.correlation_id === 'string' && UUID_RE.test(claim.correlation_id) ? claim.correlation_id : 'unknown';\n  const code = r && typeof r.code === 'string' && CODE_RE.test(r.code) ? r.code : 'UNKNOWN';\n  throw new Error(`FAO-GOV-008 recon: fao_run_finalize refused with ${code} for run ${cid}; the run was not committed`);\n}\n\nreturn items;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3080,
+        320
+      ],
+      "id": "b7e0c2d4-3f61-4a8e-9c15-6d2a8f4e1b90",
+      "name": "Check Finalize Result"
+    },
+    {
+      "parameters": {
         "conditions": {
           "options": {
             "caseSensitive": true,
@@ -760,7 +774,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        3080,
+        3300,
         320
       ],
       "id": "134e7a20-6dd4-5b3b-aae8-f07d510f98ba",
@@ -771,7 +785,7 @@
       "type": "n8n-nodes-base.noOp",
       "typeVersion": 1,
       "position": [
-        3300,
+        3520,
         540
       ],
       "id": "455eab57-8f9f-58b9-abcb-cfe969e1ac26",
@@ -785,7 +799,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3300,
+        3520,
         320
       ],
       "id": "185d10ce-ae1f-52be-ac7e-523188188b1b",
@@ -849,7 +863,7 @@
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.3,
       "position": [
-        3520,
+        3740,
         320
       ],
       "id": "a176d377-c050-4c3a-9505-5f69e419e383",
@@ -857,8 +871,8 @@
     },
     {
       "parameters": {
-        "content": "## FAO Reserve Reconciliation Agent v1\n\n**Risk tier:** RED (registry approval threshold 2; one approval enforced today)\n**Process owner:** Sarah Chen (Controller)\n**Controls:** FAO-REC-001, FAO-REC-002, FAO-REC-004, FAO-REC-006, FAO-REC-007, FAO-GOV-001, FAO-GOV-004, FAO-GOV-007, FAO-GOV-008, FAO-GOV-013\n\n### How a run starts\n\nA signed-in human calls `fao_run_start` with their own session. The database records the invoker, checks the registry, tier and rate limit, and returns a single-use run token. The caller posts only `{run_token}` to this webhook (header auth). **Claim Run** (`fao_run_claim`) consumes the token and returns the run's ids, agent and tier from the database. Nothing in the request names a person.\n\n### Flow\n\n1. Webhook: Invoke, Validate Invoke Body, Claim Run; refusals answer 400, 401, 403, 409 or 410; a claimed run answers 202 and continues\n2. **STARTED** through the Writer (one batch call)\n3. Thresholds, then **Check Thresholds** (no rows is a hard error)\n4. **Per-Asset Reconcile**: fail-closed input checks, then the 7-rule matrix; one **ASSET_RECONCILED** per asset, all sent in one Writer call and counted\n5. **Finalize Run** (`fao_run_finalize`): the database rolls up the stored events, then either writes COMMITTED, or creates the request plus HITL_REQUESTED in one transaction, or writes COMMIT_BLOCKED\n6. When review is needed, the notifier is called with `{hitl_id, kind, level}`\n\nDecisions happen on the approval page through `fao_hitl_decide`, never in n8n. A failed execution reaches `fao_error_handler_v1`, which records FAILED through `fao_run_fail`.\n\n**Publish (n8n 2.x):** step 5 of 5 (Writer, notifier, error handler, sweeper, flagship). Publish last, after the Writer, the notifier and the error handler it calls: n8n refuses to publish it, or fails its runs, while they are unpublished.",
-        "height": 640,
+        "content": "## FAO Reserve Reconciliation Agent v1\n\n**Risk tier:** RED (registry approval threshold 2; one approval enforced today)\n**Process owner:** Sarah Chen (Controller)\n**Controls:** FAO-REC-001, FAO-REC-002, FAO-REC-004, FAO-REC-006, FAO-REC-007, FAO-GOV-001, FAO-GOV-004, FAO-GOV-007, FAO-GOV-008, FAO-GOV-013\n\n### How a run starts\n\nA signed-in human calls `fao_run_start` with their own session. The database records the invoker, checks the registry, tier and rate limit, and returns a single-use run token. The caller posts only `{run_token}` to this webhook (header auth). **Claim Run** (`fao_run_claim`) consumes the token and returns the run's ids, agent and tier from the database. Nothing in the request names a person.\n\n### Flow\n\n1. Webhook: Invoke, Validate Invoke Body, Claim Run; refusals answer 400, 401, 403, 409 or 410; a claimed run answers 202 and continues\n2. **STARTED** through the Writer (one batch call)\n3. Thresholds, then **Check Thresholds** (no rows is a hard error)\n4. **Per-Asset Reconcile**: fail-closed input checks, then the 7-rule matrix; one **ASSET_RECONCILED** per asset, all sent in one Writer call and counted\n5. **Finalize Run** (`fao_run_finalize`): the database rolls up the stored events, then either writes COMMITTED, or creates the request plus HITL_REQUESTED in one transaction, or writes COMMIT_BLOCKED\n   **Check Finalize Result**: any `ok:false` (for example AGENT_NOT_ACTIVE, the agent deprecated after the claim) fails the execution with one fixed FAO-GOV-008 message naming the code and the correlation id, so the error workflow runs (its `fao_run_fail` answers ALREADY_TERMINAL and writes nothing)\n6. When review is needed, the notifier is called with `{hitl_id, kind, level}`\n\nDecisions happen on the approval page through `fao_hitl_decide`, never in n8n. A failed execution reaches `fao_error_handler_v1`, which records FAILED through `fao_run_fail`.\n\n**Publish (n8n 2.x):** step 5 of 5 (Writer, notifier, error handler, sweeper, flagship). Publish last, after the Writer, the notifier and the error handler it calls: n8n refuses to publish it, or fails its runs, while they are unpublished.",
+        "height": 720,
         "width": 620,
         "color": 4
       },
@@ -1032,6 +1046,17 @@
       ]
     },
     "Finalize Run": {
+      "main": [
+        [
+          {
+            "node": "Check Finalize Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Finalize Result": {
       "main": [
         [
           {

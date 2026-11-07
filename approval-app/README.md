@@ -31,8 +31,9 @@ The page holds no authority of its own. The database takes the approver's identi
 - Notes are optional, at most 2000 characters, counted like the database (Unicode characters, so an emoji counts once). A longer note is refused on the page with no call, and the note is kept.
 - A refused decision that can be retried (`INVALID_INPUT`, `BUSY`, a network or server failure) keeps the request, the form and the typed note on screen; other results replace the form.
 - Sign-out, and every sign-in, clear the draft note, the email field, the request fields, the asset list and the result, so nothing carries over to the next person in the same tab.
+- An approval recorded when the agent is no longer ACTIVE is never committed (`fao_hitl_decide` returns `AGENT_NOT_ACTIVE` with the decision fields). The page shows the result view with `Decision recorded. The run was not committed because the agent is no longer active.`, the decision, the time it was recorded and `Committed: No`, plus the reference id.
 - After each view change, focus moves to the status line, which is also announced (`aria-live`).
-- Only fixed texts are shown: the messages of section 2.6 of the build spec, chosen by result code, plus a few page texts (sign-in failed, decision recorded). Database error text is never displayed. When a refusal was journaled, the page shows its reference id.
+- Only fixed texts are shown: the messages of section 2.6 of the build spec, chosen by result code, plus a few page texts (sign-in failed, decision recorded, decision recorded but not committed). Database error text is never displayed. When a refusal was journaled, the page shows its reference id.
 - Every DOM update uses `textContent`. Request fields (agent name, rationale and so on) are shown as plain text.
 - The session lives in `sessionStorage` (closed with the tab); Sign out clears it.
 

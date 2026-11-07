@@ -5,7 +5,8 @@ Runs against the LOCAL Supabase stack only. Settings come from
 SUPABASE_URL or N8N_INVOKE_WEBHOOK_URL whose host is not 127.0.0.1 or
 localhost, builds the server exactly as production does (including the reader
 role check), calls the six read tools and exits non-zero when any of them
-does not return status 'ok'. It never calls invoke_reserve_recon.
+does not return status 'ok' (get_recent_executions must also return its
+workflow_failures list). It never calls invoke_reserve_recon.
 
 Usage (repository root):  python mcp/scripts/smoke_local.py
 """
@@ -85,8 +86,13 @@ async def run() -> int:
         for name, args in READ_TOOLS:
             result = (await client.call_tool(name, args)).structured_content or {}
             ok = result.get("status") == "ok"
+            if name == "get_recent_executions":
+                # Round 5 (K1): the workflow_failures rows come with the runs.
+                ok = ok and isinstance(result.get("workflow_failures"), list)
             failures += 0 if ok else 1
             summary = {k: result.get(k) for k in ("status", "count", "has_more", "kind", "http_status")}
+            if isinstance(result.get("workflow_failures"), list):
+                summary["workflow_failures"] = len(result["workflow_failures"])
             print(f"{'PASS' if ok else 'FAIL'}  {name}  {json.dumps(summary)}")
     print("smoke_local:", "PASS" if failures == 0 else f"FAIL ({failures})")
     return 0 if failures == 0 else 1

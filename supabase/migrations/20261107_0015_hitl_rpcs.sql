@@ -111,6 +111,14 @@ COMMENT ON FUNCTION public.fao_hitl_resolve(bigint, public.hitl_decision, text, 
 --   6. decided: ALREADY_DECIDED; expired or past the deadline: EXPIRED (both
 --      not journaled, carrying request{hitl_id, decision, decided_at} only)
 --   7. the request with the viewer flags
+-- K3 (fix round 5): steps 6 and 7 also carry two top-level keys (never
+-- inside request): committed and commit_blocked_reason. For ALREADY_DECIDED
+-- committed is true only when the run is COMMITTED, and
+-- commit_blocked_reason is coalesce(inputs.reason, inputs.code) of the
+-- newest COMMIT_BLOCKED row for this request when that is AGENT_NOT_ACTIVE
+-- or INVOKER_NOT_ACTIVE, else null (an audit chain block gives null). EXPIRED
+-- and the full form (a PENDING request) carry false and null. So a reload of
+-- an approved request whose run was not committed can say why.
 -- A read never changes the request or the ledger.
 -- Scope of step 5 (R02, build spec 2.12 and 6.6 110_rls): this function
 -- decides who gets the decision view model (viewer_can_decide,
@@ -138,6 +146,8 @@ DECLARE
   v_agent    text;
   v_invoker  text;
   v_short    jsonb;
+  v_committed boolean := false;
+  v_blocked  text;
 BEGIN
   v_key     := left(p_hitl_id, 20);
   v_attempt := jsonb_build_object('hitl_id', left(p_hitl_id, 200)) || (v_in->'note');
@@ -193,11 +203,32 @@ BEGIN
     'decided_at', v_req.decided_at));
 
   IF v_req.decision IN ('APPROVED'::public.hitl_decision, 'REJECTED'::public.hitl_decision) THEN
-    RETURN fao_private.refuse(c_entry, 'hitl_queue', v_key, v_attempt, 'ALREADY_DECIDED', p_journal => false) || v_short;
+    -- K3: whether the decided run was committed, and the named reason when
+    -- the commit gate blocked it.
+    v_committed := EXISTS (
+      SELECT 1 FROM public.run_invocations ri
+       WHERE ri.correlation_id = v_req.correlation_id
+         AND ri.state = 'COMMITTED'::public.fao_run_state);
+    SELECT coalesce(l.inputs->>'reason', l.inputs->>'code')
+      INTO v_blocked
+      FROM public.shadow_ledger l
+     WHERE l.correlation_id = v_req.correlation_id
+       AND l.inputs->>'event_type' = 'COMMIT_BLOCKED'
+       AND l.inputs->>'hitl_id' = v_req.hitl_id::text
+     ORDER BY l.ledger_id DESC
+     LIMIT 1;
+    IF v_blocked IS NULL OR v_blocked NOT IN ('AGENT_NOT_ACTIVE', 'INVOKER_NOT_ACTIVE') THEN
+      v_blocked := NULL;
+    END IF;
+    RETURN fao_private.refuse(c_entry, 'hitl_queue', v_key, v_attempt, 'ALREADY_DECIDED', p_journal => false)
+      || v_short
+      || jsonb_build_object('committed', v_committed, 'commit_blocked_reason', v_blocked);
   END IF;
   IF v_req.decision = 'EXPIRED'::public.hitl_decision
      OR coalesce(fao_private.clock() >= v_req.timeout_at, true) THEN
-    RETURN fao_private.refuse(c_entry, 'hitl_queue', v_key, v_attempt, 'EXPIRED', p_journal => false) || v_short;
+    RETURN fao_private.refuse(c_entry, 'hitl_queue', v_key, v_attempt, 'EXPIRED', p_journal => false)
+      || v_short
+      || jsonb_build_object('committed', false, 'commit_blocked_reason', NULL);
   END IF;
 
   -- 7. The request
@@ -221,12 +252,15 @@ BEGIN
     'invoker_name',         v_invoker,
     'viewer_is_invoker',    v_uid = v_req.agent_invoker_id,
     'viewer_can_decide',    fao_private.has_role(v_uid, 'approver'::public.fao_app_role, v_req.agent_id)
-                            AND v_uid <> v_req.agent_invoker_id)));
+                            AND v_uid <> v_req.agent_invoker_id),
+    -- K3: a PENDING request is never committed or blocked.
+    'committed',             false,
+    'commit_blocked_reason', NULL));
 END;
 $$;
 
 COMMENT ON FUNCTION public.fao_hitl_get(json) IS
-  'FAO-GOV-004, FAO-GOV-007: the decision view of one request for the signed-in caller (identity from auth.uid() only); body {p_hitl_id}. An approver for the agent, the invoker or a global admin gets the request and viewer flags; another member gets NOT_AUTHORISED for an existing row (the row stays readable to every member through the hitl_queue read policy); a caller with no honoured role gets the same NOT_AUTHORISED body for existing, decided and missing ids. Never writes the request or the ledger.';
+  'FAO-GOV-004, FAO-GOV-007: the decision view of one request for the signed-in caller (identity from auth.uid() only); body {p_hitl_id}. An approver for the agent, the invoker or a global admin gets the request and viewer flags; another member gets NOT_AUTHORISED for an existing row (the row stays readable to every member through the hitl_queue read policy); a caller with no honoured role gets the same NOT_AUTHORISED body for existing, decided and missing ids. The OK, ALREADY_DECIDED and EXPIRED envelopes also carry top-level committed and commit_blocked_reason (K3, fix round 5): for ALREADY_DECIDED, committed is true only when the run is COMMITTED and the reason is AGENT_NOT_ACTIVE, INVOKER_NOT_ACTIVE or null from the newest COMMIT_BLOCKED row; OK and EXPIRED carry false and null. Never writes the request or the ledger.';
 
 -- ----------------------------------------------------------------------------
 -- 3. fao_hitl_decide (FAO-GOV-004, FAO-GOV-001, FAO-REC-001)
@@ -260,6 +294,13 @@ COMMENT ON FUNCTION public.fao_hitl_get(json) IS
 --        agent status and the rollup problems, run FAILED, and the refusal
 --        envelope AGENT_NOT_ACTIVE (409, journaled) carrying the decision
 --        fields; the decision and HITL_RESOLVED stand
+--      APPROVED, the agent ACTIVE, and the run's invoker no longer active or
+--        no longer holding the invoker grant for the agent (fix round 5, K2,
+--        FAO-GOV-004): the same pattern with inputs.code and inputs.reason
+--        INVOKER_NOT_ACTIVE and the envelope INVOKER_NOT_ACTIVE (409,
+--        journaled). The invoker's owner row and grant rows are read FOR
+--        SHARE, so fao_admin_set_owner_active and fao_admin_set_role are
+--        ordered against the commit. AGENT_NOT_ACTIVE is checked first.
 --      chain not intact: COMMIT_BLOCKED and run FAILED (AUDIT_CHAIN_MISMATCH,
 --        ok:true, not journaled)
 --      otherwise COMMITTED and run COMMITTED (REJECTED commits with status
@@ -298,6 +339,7 @@ DECLARE
   v_obl       text[];
   v_symbols   jsonb;
   v_status    public.agent_status;
+  v_inv_ok    boolean;
 BEGIN
   v_key     := left(p_hitl_id, 20);
   v_attempt := jsonb_build_object('decision', left(p_decision, 200)) || (v_in->'note');
@@ -415,6 +457,19 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
+  -- FAO-GOV-004 (fix round 5, K2): the run's invoker must still be an active
+  -- owner holding the invoker grant for the agent. The share locks order
+  -- this decision against a deactivation or a revoke of that grant (both
+  -- update these rows); a new grant is not waited for, which can only turn
+  -- a refusal into an allow on a later decision, never the reverse.
+  PERFORM 1 FROM public.process_owners po WHERE po.id = v_run.invoker_id FOR SHARE;
+  PERFORM 1 FROM public.fao_user_roles ur
+    WHERE ur.user_id = v_run.invoker_id
+      AND ur.role = 'invoker'::public.fao_app_role
+      AND ur.revoked_at IS NULL
+    FOR SHARE;
+  v_inv_ok := fao_private.has_role(v_run.invoker_id, 'invoker'::public.fao_app_role, v_run.agent_id);
+
   -- FAO-GOV-002 (fix round 3): the registry status gate holds at commit. The
   -- share lock orders this decision against fao_admin_set_agent, which locks
   -- the row FOR UPDATE; a missing row reads as not ACTIVE (fail closed).
@@ -450,6 +505,40 @@ BEGIN
      WHERE correlation_id = v_req.correlation_id;
 
     RETURN fao_private.refuse(c_entry, 'hitl_queue', v_key, v_attempt, 'AGENT_NOT_ACTIVE')
+      || jsonb_build_object(
+           'hitl_id',             v_req.hitl_id,
+           'decision',            v_decision::text,
+           'decided_at',          v_decided,
+           'committed',           false,
+           'committed_ledger_id', NULL);
+  END IF;
+
+  IF v_decision = 'APPROVED'::public.hitl_decision AND v_inv_ok IS NOT TRUE THEN
+    PERFORM fao_private.append_event(
+      v_req.correlation_id,
+      'COMMIT_BLOCKED',
+      jsonb_build_object(
+        'hitl_id',      v_req.hitl_id,
+        'problems',     r->'problems',
+        'code',         'INVOKER_NOT_ACTIVE',
+        'reason',       'INVOKER_NOT_ACTIVE',
+        'agent_status', v_status::text),
+      'BLOCKED'::public.policy_outcome,
+      NULL,
+      format('FAO-GOV-004 invoker %s is no longer active or no longer an invoker for agent %s at commit; approved run not committed',
+             v_run.invoker_id, v_run.agent_id)
+        || CASE WHEN (r->>'chain_ok')::boolean IS NOT TRUE THEN '; FAO-GOV-001 audit chain incomplete' ELSE '' END,
+      NULL,
+      v_decision::text::public.hitl_status,
+      NULL,
+      'FAILURE'::public.execution_status,
+      NULL);
+
+    UPDATE public.run_invocations
+       SET state = 'FAILED', finished_at = now(), last_error = 'invoker no longer authorised at commit'
+     WHERE correlation_id = v_req.correlation_id;
+
+    RETURN fao_private.refuse(c_entry, 'hitl_queue', v_key, v_attempt, 'INVOKER_NOT_ACTIVE')
       || jsonb_build_object(
            'hitl_id',             v_req.hitl_id,
            'decision',            v_decision::text,
@@ -526,7 +615,76 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.fao_hitl_decide(json) IS
-  'FAO-GOV-004, FAO-GOV-001, FAO-REC-001: the only way a HITL decision is recorded; body {p_hitl_id, p_decision, p_notes?} decoded by fao_private.client_args. Approver from auth.uid() only; approver role required; the invoker is refused (SOD_SELF_APPROVAL); refused at or after the deadline; decision, HITL_RESOLVED, rollup and COMMITTED (or COMMIT_BLOCKED) in one transaction. An APPROVED decision for an agent that is not ACTIVE is never committed: COMMIT_BLOCKED (inputs.code AGENT_NOT_ACTIVE), run FAILED, envelope AGENT_NOT_ACTIVE with the decision fields. Refusals are journaled.';
+  'FAO-GOV-004, FAO-GOV-001, FAO-REC-001: the only way a HITL decision is recorded; body {p_hitl_id, p_decision, p_notes?} decoded by fao_private.client_args. Approver from auth.uid() only; approver role required; the invoker is refused (SOD_SELF_APPROVAL); refused at or after the deadline; decision, HITL_RESOLVED, rollup and COMMITTED (or COMMIT_BLOCKED) in one transaction. An APPROVED decision for an agent that is not ACTIVE is never committed: COMMIT_BLOCKED (inputs.code AGENT_NOT_ACTIVE), run FAILED, envelope AGENT_NOT_ACTIVE with the decision fields. Likewise, checked after the agent status, when the run''s invoker is no longer an active owner holding the invoker grant for the agent: COMMIT_BLOCKED (inputs.code and inputs.reason INVOKER_NOT_ACTIVE), run FAILED, envelope INVOKER_NOT_ACTIVE (K2, fix round 5). Refusals are journaled.';
+
+-- ----------------------------------------------------------------------------
+-- 3a. Escalation and notice targets (FAO-GOV-004, FAO-GOV-007; fix round 5,
+--     KNOWN-LIMITS U11)
+-- ----------------------------------------------------------------------------
+-- fao_private.escalation_target: who a level-1 escalation of the request goes
+-- to now. The agent process owner's escalation_to when that owner is active
+-- and not an invoker of the request (the request's agent_invoker_id or the
+-- run's invoker_id); else the process owner when active and not an invoker;
+-- else NULL (none eligible: the sweep reports NO_ESCALATION_TARGET and the
+-- sweeper alerts the operator). An inactive owner is never chosen.
+CREATE FUNCTION fao_private.escalation_target(p_hitl_id bigint)
+RETURNS uuid
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+  WITH q AS (
+    SELECT h.agent_id,
+           array_remove(ARRAY[h.agent_invoker_id, ri.invoker_id], NULL) AS excl
+      FROM public.hitl_queue h
+      LEFT JOIN public.run_invocations ri ON ri.correlation_id = h.correlation_id
+     WHERE h.hitl_id = p_hitl_id)
+  SELECT CASE
+           WHEN po.escalation_to IS NOT NULL
+            AND po.escalation_to <> ALL (q.excl)
+            AND fao_private.owner_active(po.escalation_to) THEN po.escalation_to
+           WHEN po.active
+            AND po.id <> ALL (q.excl) THEN po.id
+         END
+    FROM q
+    JOIN public.agent_registry ar ON ar.agent_id = q.agent_id
+    JOIN public.process_owners po ON po.id = ar.process_owner_id
+$$;
+
+COMMENT ON FUNCTION fao_private.escalation_target(bigint) IS
+  'FAO-GOV-004, FAO-GOV-007: the level-1 escalation target of a request now: the process owner''s escalation_to if active and not an invoker, else the process owner if active and not an invoker, else NULL. Never an inactive owner, never the invoker.';
+
+-- fao_private.notice_target: who an ESCALATED notice for the request names
+-- and records, given the target recorded on the HITL_ESCALATED event. NULL
+-- stays NULL (none was eligible at escalation; already reported). A
+-- recorded target that is an invoker of the request is never named (NULL,
+-- as before round 5). A recorded target that is still active is kept; one
+-- deactivated since the escalation is replaced by the next eligible target
+-- now (escalation_target), or NULL when none is.
+CREATE FUNCTION fao_private.notice_target(p_hitl_id bigint, p_recorded uuid)
+RETURNS uuid
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+  WITH q AS (
+    SELECT array_remove(ARRAY[h.agent_invoker_id, ri.invoker_id], NULL) AS excl
+      FROM public.hitl_queue h
+      LEFT JOIN public.run_invocations ri ON ri.correlation_id = h.correlation_id
+     WHERE h.hitl_id = p_hitl_id)
+  SELECT CASE
+           WHEN p_recorded IS NULL THEN NULL
+           WHEN p_recorded = ANY (q.excl) THEN NULL
+           WHEN fao_private.owner_active(p_recorded) THEN p_recorded
+           ELSE fao_private.escalation_target(p_hitl_id)
+         END
+    FROM q
+$$;
+
+COMMENT ON FUNCTION fao_private.notice_target(bigint, uuid) IS
+  'FAO-GOV-007: the target an ESCALATED notice names: NULL when none was recorded or the recorded target is an invoker; the recorded target while it is active; else the next eligible target now (escalation_target), else NULL.';
 
 -- ----------------------------------------------------------------------------
 -- 4. fao_notification_context (FAO-GOV-007)
@@ -589,9 +747,14 @@ BEGIN
     IF NOT FOUND THEN
       RETURN fao_private.ok_result(v_base, 'NOT_PENDING');
     END IF;
-    -- FAO-GOV-004: the invoker is never named, even as an escalation target.
+    -- FAO-GOV-007 (U11, fix round 5): a target deactivated since the
+    -- escalation is never named; the next eligible target is, or none (the
+    -- sweep then reports NO_ESCALATION_TARGET for the operator).
+    v_target := fao_private.notice_target(v_req.hitl_id, v_target);
+    -- FAO-GOV-004: the invoker is never named, even as an escalation target;
+    -- nor an inactive owner (belt and braces over notice_target).
     SELECT po.name INTO v_target_nm FROM public.process_owners po
-     WHERE po.id = v_target AND po.id <> v_req.agent_invoker_id;
+     WHERE po.id = v_target AND po.id <> v_req.agent_invoker_id AND po.active;
   END IF;
 
   IF EXISTS (
@@ -725,8 +888,12 @@ BEGIN
        AND l.inputs->>'level' = '1'
      ORDER BY l.ledger_id DESC
      LIMIT 1;
-    -- FAO-GOV-004: the invoker is never recorded as the recipient.
-    IF v_recipient = v_req.agent_invoker_id THEN
+    -- FAO-GOV-007 (U11): the recipient is the target the notice named.
+    v_recipient := fao_private.notice_target(v_req.hitl_id, v_recipient);
+    -- FAO-GOV-004: the invoker is never recorded as the recipient; U11 (fix
+    -- round 5): nor an owner deactivated after the escalation event, so the
+    -- record matches the notice context, which names no one.
+    IF v_recipient = v_req.agent_invoker_id OR NOT fao_private.owner_active(v_recipient) THEN
       v_recipient := NULL;
     END IF;
   END IF;
@@ -817,7 +984,14 @@ COMMENT ON FUNCTION public.fao_notification_record(bigint, text, int, text, text
 -- FAO-GOV-004: the escalation target is never the invoker (the request's
 -- agent_invoker_id or the run's invoker_id). When escalation_to is the
 -- invoker, the target falls back to the process owner; when the owner is
--- also the invoker (or no owner is found), the target is NULL. The escalation
+-- also the invoker (or no owner is found), the target is NULL. U11 (fix
+-- round 5): an inactive owner is never chosen either
+-- (fao_private.escalation_target): an inactive escalation_to falls back to
+-- the process owner, and an inactive process owner gives NULL, the same
+-- "none eligible (operator alerted)" path. A recorded target deactivated
+-- after the escalation is replaced in the notice by the next eligible owner
+-- (fao_private.notice_target); when there is none, step 5 reports the
+-- relisted item as NO_ESCALATION_TARGET too. The escalation
 -- event is still written with target_owner_id NULL and still listed, so the
 -- channel notice goes out naming no one, and the item is reported in
 -- item_errors with sqlstate NO_ESCALATION_TARGET (fail closed: the sweeper
@@ -848,7 +1022,6 @@ DECLARE
   v_req         public.hitl_queue%ROWTYPE;
   v_run         public.run_invocations%ROWTYPE;
   v_target      uuid;
-  v_excl        uuid[];
   v_no_target   boolean;
   v_has_esc     boolean;
   v_last        text;
@@ -1051,17 +1224,9 @@ BEGIN
            AND l.inputs->>'level' = '1');
       v_no_target := false;
       IF NOT v_has_esc THEN
-        -- FAO-GOV-004: the escalation target is never the invoker.
-        v_excl := ARRAY[v_req.agent_invoker_id, v_run.invoker_id];
-        SELECT CASE
-                 WHEN po.escalation_to IS NOT NULL
-                  AND po.escalation_to <> ALL (array_remove(v_excl, NULL)) THEN po.escalation_to
-                 WHEN po.id <> ALL (array_remove(v_excl, NULL)) THEN po.id
-               END
-          INTO v_target
-          FROM public.agent_registry ar
-          JOIN public.process_owners po ON po.id = ar.process_owner_id
-         WHERE ar.agent_id = v_req.agent_id;
+        -- FAO-GOV-004: the escalation target is never the invoker, and
+        -- never an inactive owner (U11, fix round 5): escalation_target.
+        v_target := fao_private.escalation_target(v_req.hitl_id);
         v_no_target := v_target IS NULL;
 
         PERFORM fao_private.append_event(
@@ -1204,19 +1369,9 @@ BEGIN
                AND l.inputs->>'hitl_id' = v_req.hitl_id::text
                AND l.inputs->>'level' = '1'
           ) THEN
-            -- FAO-GOV-004: the escalation target is never the invoker.
-            v_excl := ARRAY[v_req.agent_invoker_id,
-                            (SELECT ri.invoker_id FROM public.run_invocations ri
-                              WHERE ri.correlation_id = v_req.correlation_id)];
-            SELECT CASE
-                     WHEN po.escalation_to IS NOT NULL
-                      AND po.escalation_to <> ALL (array_remove(v_excl, NULL)) THEN po.escalation_to
-                     WHEN po.id <> ALL (array_remove(v_excl, NULL)) THEN po.id
-                   END
-              INTO v_target
-              FROM public.agent_registry ar
-              JOIN public.process_owners po ON po.id = ar.process_owner_id
-             WHERE ar.agent_id = v_req.agent_id;
+            -- FAO-GOV-004: the escalation target is never the invoker, and
+            -- never an inactive owner (U11, fix round 5): escalation_target.
+            v_target := fao_private.escalation_target(v_req.hitl_id);
 
             PERFORM fao_private.append_event(
               v_req.correlation_id,
@@ -1253,10 +1408,11 @@ BEGIN
   -- 5. ESCALATED notifications that are due (FAO-GOV-007)
   -- --------------------------------------------------------------------------
   FOR c IN
-    SELECT h.hitl_id, e.reason, e.event_timestamp
+    SELECT h.hitl_id, e.reason, e.event_timestamp, e.target_owner_id
       FROM public.hitl_queue h
       CROSS JOIN LATERAL (
-        SELECT l.inputs->>'reason' AS reason, l.event_timestamp
+        SELECT l.inputs->>'reason' AS reason, l.event_timestamp,
+               (l.inputs->>'target_owner_id')::uuid AS target_owner_id
           FROM public.shadow_ledger l
          WHERE l.correlation_id = h.correlation_id
            AND l.inputs->>'event_type' = 'HITL_ESCALATED'
@@ -1308,6 +1464,16 @@ BEGIN
          AND ((v_last = 'FAILED') OR (v_last IS NULL AND c.event_timestamp < v_now - interval '5 minutes')) THEN
         v_escalations := v_escalations || jsonb_build_array(jsonb_build_object(
           'hitl_id', c.hitl_id, 'level', 1, 'reason', c.reason));
+        -- U11 (fix round 5): the recorded target has been deactivated since
+        -- the escalation and no other owner is eligible, so the notice names
+        -- no one; reported like an escalation with no target (the sweeper
+        -- alerts the operator). A NULL recorded target was already reported
+        -- when the escalation was written and is not reported again.
+        IF c.target_owner_id IS NOT NULL
+           AND fao_private.notice_target(c.hitl_id, c.target_owner_id) IS NULL THEN
+          v_errors := v_errors || jsonb_build_array(jsonb_build_object(
+            'step', 'escalation_notice', 'id', c.hitl_id::text, 'sqlstate', 'NO_ESCALATION_TARGET'));
+        END IF;
       END IF;
     EXCEPTION WHEN others THEN
       v_errors := v_errors || jsonb_build_array(jsonb_build_object('step', 'escalation_notice', 'id', c.hitl_id::text, 'sqlstate', SQLSTATE));
@@ -1341,3 +1507,5 @@ REVOKE ALL ON FUNCTION public.fao_hitl_decide(json)                             
 REVOKE ALL ON FUNCTION public.fao_notification_context(bigint, text, int)                         FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION public.fao_notification_record(bigint, text, int, text, text, text, text)  FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION public.fao_maintenance_sweep()                                             FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
+REVOKE ALL ON FUNCTION fao_private.escalation_target(bigint)                                      FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
+REVOKE ALL ON FUNCTION fao_private.notice_target(bigint, uuid)                                    FROM PUBLIC, anon, authenticated, service_role, fao_workflow;

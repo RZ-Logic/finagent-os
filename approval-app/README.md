@@ -9,12 +9,14 @@ Each client function takes that one JSON body and validates it in the database (
 
 The page holds no authority of its own. The database takes the approver's identity from the session, refuses a decision on a run the person started (`SOD_SELF_APPROVAL`), refuses decisions after the deadline, and journals every refusal. There is no n8n step and no service key in the decision path.
 
+**Status:** built and unit-tested on the branch `phase2-5-core-2026-11-07`; not deployed. Live still uses the v1 n8n approval endpoints until the cutover. The page has not yet been checked end to end in a real browser against the local stack (the manual check below); there is no automated browser test.
+
 ## Files
 
 | File | Purpose |
 |---|---|
 | `index.html` | Static markup. Loads `config.js`, `vendor/supabase.js`, then `app.js` as a module. No inline script or style |
-| `app.js` | ES module. Exports the pure functions `parseHitlId`, `statusMessage` and `buildViewModel` for the Node tests; the browser bootstrap runs only when `window.document` exists |
+| `app.js` | ES module. Exports the fixed texts (`CODE_MESSAGES`, `FALLBACK_MESSAGES`, `PAGE_TEXT`) and the pure functions (`parseHitlId`, `statusMessage`, `buildViewModel` and small helpers) for the Node tests; the browser bootstrap runs only when `window.document` exists |
 | `styles.css` | Minimal styles |
 | `favicon.svg` | Page icon, served from the page's own origin (CSP `img-src 'self'`) |
 | `vendor/supabase.js`, `vendor/SHA256SUMS` | supabase-js UMD build copied from the exactly pinned devDependency by `npm run vendor` (`scripts/vendor-supabase-js.mjs`); `node scripts/vendor-supabase-js.mjs --check` verifies the hash. Currently `@supabase/supabase-js` 2.118.0 |
@@ -27,11 +29,14 @@ The page holds no authority of its own. The database takes the approver's identi
 
 - The link is `<approval_app_base_url>/?hitl_id=<id>`. Anything other than exactly one `hitl_id` of 1 to 12 digits with a value of at least 1 shows `The request is not valid.` and makes no network call.
 - With no session the page shows the sign-in form and no request data.
+- The request view shows the risk tier, review sub-tier, rationale, escalated assets, deadline, who started the run, and both approval counts (`Configured approvals` from the registry, `Enforced approvals`, which is 1 until dual approval is built).
 - Approve and Reject buttons appear only when `fao_hitl_get` reports `viewer_can_decide`. The invoker of the run sees the request and `You cannot decide a run you started.`
 - Notes are optional, at most 2000 characters, counted like the database (Unicode characters, so an emoji counts once). A longer note is refused on the page with no call, and the note is kept.
 - A refused decision that can be retried (`INVALID_INPUT`, `BUSY`, a network or server failure) keeps the request, the form and the typed note on screen; other results replace the form.
 - Sign-out, and every sign-in, clear the draft note, the email field, the request fields, the asset list and the result, so nothing carries over to the next person in the same tab.
 - An approval recorded when the agent is no longer ACTIVE is never committed (`fao_hitl_decide` returns `AGENT_NOT_ACTIVE` with the decision fields). The page shows the result view with `Decision recorded. The run was not committed because the agent is no longer active.`, the decision, the time it was recorded and `Committed: No`, plus the reference id.
+- An approval recorded when the run's invoker is no longer active or no longer holds the invoker grant for the agent is never committed either (`fao_hitl_decide` returns `INVOKER_NOT_ACTIVE` with the same decision fields; the agent check comes first). The page shows `Decision recorded. The run was not committed because the invoker is no longer authorised for this agent.`, the decision, its time and `Committed: No`, plus the reference id.
+- Reloading a decided request reads `committed` and `commit_blocked_reason` from the top level of the `fao_hitl_get` envelope. When the approval was blocked, the page shows the same not-committed text for the reason (`AGENT_NOT_ACTIVE` or `INVOKER_NOT_ACTIVE`); an approval not committed for a reason the database does not name shows `Decision recorded. The run was not committed.`; a committed approval or a rejection keeps `This request has already been decided.` The closed view adds a `Committed` row whenever `committed` is a boolean. A reason outside the closed set is never shown.
 - After each view change, focus moves to the status line, which is also announced (`aria-live`).
 - Only fixed texts are shown: the messages of section 2.6 of the build spec, chosen by result code, plus a few page texts (sign-in failed, decision recorded, decision recorded but not committed). Database error text is never displayed. When a refusal was journaled, the page shows its reference id.
 - Every DOM update uses `textContent`. Request fields (agent name, rationale and so on) are shown as plain text.

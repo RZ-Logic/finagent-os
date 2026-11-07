@@ -151,7 +151,7 @@
     },
     {
       "parameters": {
-        "content": "## FAO HITL Sweeper v1\n\n**Controls:** FAO-GOV-004, FAO-GOV-007, FAO-GOV-008\n\nEvery 5 minutes, **Run Sweep** calls `fao_maintenance_sweep`. In the database it expires unclaimed run tokens, fails stale runs, expires overdue requests (HITL_EXPIRED, then COMMITTED with FAILURE), writes escalation events, and lists the notifications that are due.\n\n- **Expand Notifications** turns the escalation and re-notify lists into notifier inputs; the notifier runs once per item and one failure does not stop the others\n- **Check Notifier Results** runs after every item was attempted and lists each failed notifier call; it does not stop the execution\n- **Check Sweep Errors** sits below Expand Notifications, so with execution order v1 it runs last, on every sweep. It fails the execution once, naming both the notifier failures (FAO-GOV-007) and the sweep item errors (FAO-GOV-008), and fails closed when notices were listed but no notifier results can be read\n\nDeadlines do not depend on this schedule: `fao_hitl_decide` refuses a decision at or after the deadline on its own.\n\n**Publish (n8n 2.x):** step 4 of 5 (Writer, notifier, error handler, sweeper, flagship). Publish after the notifier; its schedule starts sweeping as soon as it is published.",
+        "content": "## FAO HITL Sweeper v1\n\n**Controls:** FAO-GOV-004, FAO-GOV-007, FAO-GOV-008\n\nEvery 5 minutes, **Run Sweep** calls `fao_maintenance_sweep`. In the database it expires unclaimed run tokens, fails stale runs, expires overdue requests (HITL_EXPIRED, then COMMITTED with FAILURE), writes escalation events, and lists the notifications that are due.\n\n- **Expand Notifications** turns the escalation and re-notify lists into notifier inputs; the notifier runs once per item and one failure does not stop the others\n- **Check Notifier Results** runs after every item was attempted and lists each failed notifier call; it does not stop the execution\n- **Check Sweep Errors** sits below Expand Notifications, so with execution order v1 it runs last, on every sweep. It fails the execution once, naming both the notifier failures (FAO-GOV-007) and the sweep item errors (FAO-GOV-008), and fails closed when notices were listed but no notifier results can be read\n\nDeadlines do not depend on this schedule: `fao_hitl_decide` refuses a decision at or after the deadline on its own.\n\nA failed sweep (Run Sweep or Check Sweep Errors) reaches `fao_error_handler_v1` (`errorWorkflow`), which records one `workflow_failures` row with source `sweeper`.\n\n**Publish (n8n 2.x):** step 4 of 5 (Writer, error handler, notifier, sweeper, flagship). Publish after the error handler and the notifier; its schedule starts sweeping as soon as it is published.",
         "height": 460,
         "width": 620,
         "color": 4
@@ -222,7 +222,8 @@
   "settings": {
     "executionOrder": "v1",
     "binaryMode": "separate",
-    "availableInMCP": false
+    "availableInMCP": false,
+    "errorWorkflow": "FaoErrHandlerV01"
   },
   "versionId": "b4f2a5c1-0e57-4d0e-8a6b-25a000000004",
   "meta": {

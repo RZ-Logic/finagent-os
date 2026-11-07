@@ -9,14 +9,16 @@
 // ============================================================================
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { cfg, signIn, rpc, q, one, closeAll, uid, REPO_ROOT } from '../api/lib.mjs';
-import { assertLocalTargets, assertLocalEnv, N8N_CONTAINER } from './guard.mjs';
-import { FLAGSHIP_AGENT, MARKUP_AGENT } from './variants.mjs';
+import {
+  cfg, signIn, rpc, q, one, closeAll, uid, REPO_ROOT, claim, append, finalize, startedEvent, assetEvent,
+} from '../api/lib.mjs';
+import { assertLocalTargets, assertLocalEnv, N8N_CONTAINER, KONG_CONTAINER } from './guard.mjs';
+import { FLAGSHIP_AGENT, MARKUP_AGENT, FLAGSHIP_PATH } from './variants.mjs';
 
-export { cfg, signIn, rpc, q, one, closeAll, uid };
+export { cfg, signIn, rpc, q, one, closeAll, uid, claim, append, finalize, startedEvent, assetEvent, REPO_ROOT };
 
 const E2E_DIR = join(REPO_ROOT, '.local', 'e2e');
 function readJson(p, what) {
@@ -127,6 +129,82 @@ export const waitExecutions = (after, min = 1, opts) => waitUntil(`${min} n8n ex
   const ex = executions(after);
   return ex.length >= min && ex.every((e) => e.stoppedAt) ? ex : null;
 }, { timeoutMs: 60000, everyMs: 750, ...opts });
+
+// Round 5 (S16): the id n8n will give its next execution.
+export function nextExecutionId() {
+  const r = spawnSync('docker', ['exec', N8N_CONTAINER, 'node', '/e2e/n8n-executions.cjs', '--next'], { encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(`test/e2e: reading the next n8n execution id failed: ${r.stderr}`);
+  return Number(JSON.parse(r.stdout).next);
+}
+
+// The database clock, so "rows since" never depends on the host clock.
+export const dbNow = async () => (await one('SELECT clock_timestamp() AS t')).t;
+
+// Round 5 (K1): workflow_failures rows for one n8n execution id, recorded at
+// or after `since` (a fresh instance reuses execution ids, R09).
+export const workflowFailures = (executionId, since) => q(
+  `SELECT id, recorded_at, source, n8n_execution_id, failed_node, message, outcome, correlation_id
+     FROM public.workflow_failures WHERE n8n_execution_id = $1 AND recorded_at >= $2 ORDER BY id`,
+  [String(executionId), since],
+);
+
+// The error handler cleans node names and messages the same way the database
+// does (control characters to spaces, then cut).
+export const cleanText = (v, max) => String(v === undefined || v === null ? '' : v).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, max);
+
+// --- Harnesses (round 5, F-32) ---------------------------------------------
+// The harness exports run with `n8n execute` inside the e2e container, the
+// way a Manual Trigger workflow runs outside the editor. Only that one
+// process gets environment access (N8N_BLOCK_ENV_ACCESS_IN_NODE=false, as
+// KNOWN-LIMITS U1 says harnesses need) and the FAO_TEST_* values; the server
+// keeps its own settings. The process gets its own task broker port and
+// event log name so it shares nothing with the running server but the
+// database file. Values go through a 0600 env file under .local/e2e that is
+// removed afterwards, never on the command line.
+export const HARNESS_TARGETS = {
+  supabase: `http://${KONG_CONTAINER}:8000`,
+  invoke: `http://127.0.0.1:5678/webhook/${FLAGSHIP_PATH}`,
+};
+
+export function harnessEnv(invoker, overrides = {}) {
+  const u = cfg.users[invoker];
+  const env = {
+    FAO_ENV: 'test',
+    FAO_TEST_SUPABASE_URL: HARNESS_TARGETS.supabase,
+    FAO_TEST_PUBLIC_KEY: cfg.publicKey,
+    FAO_TEST_INVOKER_EMAIL: u.email,
+    FAO_TEST_INVOKER_PASSWORD: u.password,
+    FAO_TEST_INVOKE_URL: HARNESS_TARGETS.invoke,
+    FAO_TEST_INVOKE_KEY: secrets.invoke_key,
+    ...overrides,
+  };
+  return env;
+}
+
+export function runHarness(workflowId, env, { timeoutMs = 170000 } = {}) {
+  const lines = {
+    ...env,
+    N8N_BLOCK_ENV_ACCESS_IN_NODE: 'false',
+    N8N_RUNNERS_BROKER_PORT: '5690',
+    N8N_EVENTBUS_LOGWRITER_LOGBASENAME: 'n8nEventLog-harness',
+  };
+  for (const [k, v] of Object.entries(lines)) {
+    if (!/^[A-Z][A-Z0-9_]*$/.test(k) || /[\r\n]/.test(String(v))) throw new Error(`test/e2e: harness env ${k} is not a single line`);
+  }
+  mkdirSync(E2E_DIR, { recursive: true });
+  const file = join(E2E_DIR, `harness-${randomUUID()}.env`);
+  writeFileSync(file, `${Object.entries(lines).map(([k, v]) => `${k}=${v}`).join('\n')}\n`, { mode: 0o600 });
+  try {
+    const r = spawnSync('docker', ['exec', '--env-file', file, N8N_CONTAINER, 'n8n', 'execute', `--id=${workflowId}`, '--rawOutput'], {
+      encoding: 'utf8', timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024,
+    });
+    // The output holds execution data (a session token among it): only the
+    // exit status and whether it timed out are returned.
+    return { status: r.status, timedOut: !!(r.error && r.error.code === 'ETIMEDOUT') };
+  } finally {
+    rmSync(file, { force: true });
+  }
+}
 
 export const brief = (ex) => ex.map((e) => `${e.id}:${e.workflowId}:${e.mode}:${e.status}${e.error ? `(${e.error.node}: ${e.error.message})` : ''}`).join(' ');
 

@@ -81,14 +81,14 @@ SELECT matches(tests.error_as('fao_workflow', format('SELECT public.fao_run_fina
 -- fao_run_fail
 INSERT INTO v VALUES ('j_before', to_jsonb(tests.journal_total()));
 INSERT INTO v VALUES ('l_before', to_jsonb((SELECT count(*) FROM public.shadow_ledger)));
-INSERT INTO v VALUES ('fail_unknown', tests.jsonb_as('fao_workflow', $$SELECT public.fao_run_fail('no-such-execution', 'Node', 'boom')$$));
+INSERT INTO v VALUES ('fail_unknown', tests.jsonb_as('fao_workflow', $$SELECT public.fao_run_fail('no-such-execution', 'Node', 'boom', 'flagship')$$));
 SELECT is(pg_temp.g('fail_unknown')->>'code', 'UNKNOWN_EXECUTION', 'run_fail: unknown execution is UNKNOWN_EXECUTION');
 SELECT is(pg_temp.g('fail_unknown')->>'ok', 'false', 'run_fail: UNKNOWN_EXECUTION is ok:false');
 SELECT ok((SELECT count(*) FROM public.shadow_ledger) = (pg_temp.g('l_before')::text)::bigint AND tests.journal_total() = (pg_temp.g('j_before')::text)::bigint,
   'run_fail: an unknown execution writes nothing');
 
 INSERT INTO v VALUES ('fail_running', tests.jsonb_as('fao_workflow',
-  format($$SELECT public.fao_run_fail(%L, 'Per-Asset Reconcile', E'boom\u0001\nline')$$, pg_temp.exec_of(pg_temp.c('forced')))));
+  format($$SELECT public.fao_run_fail(%L, 'Per-Asset Reconcile', E'boom\u0001\nline', 'flagship')$$, pg_temp.exec_of(pg_temp.c('forced')))));
 SELECT is(pg_temp.g('fail_running')->>'state', 'FAILED', 'run_fail: a RUNNING run moves to FAILED');
 SELECT is(tests.run_state(pg_temp.c('forced')), 'FAILED', 'run_fail: run state FAILED');
 SELECT is((SELECT inputs->>'stage' || '/' || (inputs->>'source') || '/' || policy_outcome::text || '/' || status::text FROM public.shadow_ledger
@@ -100,14 +100,14 @@ SELECT ok((SELECT error_details !~ '[[:cntrl:]]' FROM public.shadow_ledger WHERE
   'run_fail: error_details has no control characters');
 
 INSERT INTO v VALUES ('fail_awaiting', tests.jsonb_as('fao_workflow',
-  format($$SELECT public.fao_run_fail(%L, 'HITL Gateway', 'notifier failed')$$, pg_temp.exec_of(pg_temp.c('review')))));
+  format($$SELECT public.fao_run_fail(%L, 'HITL Gateway', 'notifier failed', 'flagship')$$, pg_temp.exec_of(pg_temp.c('review')))));
 SELECT is((SELECT inputs->>'stage' FROM public.shadow_ledger WHERE correlation_id = pg_temp.c('review') AND inputs->>'event_type' = 'FAILED'),
   'after_request', 'run_fail: an AWAITING_HITL run gets FAILED with stage after_request');
 SELECT is((SELECT decision::text FROM public.hitl_queue WHERE correlation_id = pg_temp.c('review')), 'PENDING', 'run_fail: the request stays PENDING');
 SELECT is(tests.run_state(pg_temp.c('review')), 'AWAITING_HITL', 'run_fail: the AWAITING_HITL run state is unchanged');
 
 INSERT INTO v VALUES ('fail_terminal', tests.jsonb_as('fao_workflow',
-  format($$SELECT public.fao_run_fail(%L, 'Node', 'late')$$, pg_temp.exec_of(pg_temp.c('clean')))));
+  format($$SELECT public.fao_run_fail(%L, 'Node', 'late', 'flagship')$$, pg_temp.exec_of(pg_temp.c('clean')))));
 SELECT ok(pg_temp.g('fail_terminal')->>'code' = 'ALREADY_TERMINAL' AND pg_temp.g('fail_terminal')->>'ok' = 'true'
           AND tests.ledger_count(pg_temp.c('clean'), 'FAILED') = 0, 'run_fail: a terminal run gives ALREADY_TERMINAL and writes nothing');
 

@@ -13,6 +13,9 @@ export const NETWORK = 'supabase_network_finagent-os-local';
 export const DB_CONTAINER = 'supabase_db_finagent-os-local';
 export const N8N_CONTAINER = 'finagent-e2e-n8n';
 export const SLACK_CONTAINER = 'finagent-e2e-slack';
+// Round 5 (S17 to S19): the local Supabase API gateway as the harnesses reach
+// it from inside the n8n container (docker network name, port 8000).
+export const KONG_CONTAINER = 'supabase_kong_finagent-os-local';
 export const LOOPBACK = new Set(['localhost', '127.0.0.1', '::1', '[::1]', 'host.docker.internal']);
 
 let networkNames = null;

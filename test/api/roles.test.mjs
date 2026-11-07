@@ -30,7 +30,9 @@ const WORKFLOW_RPCS = [
   ['fao_run_claim', { p_run_token: 'A'.repeat(43), p_n8n_execution_id: 'x', p_agent_id: FLAGSHIP }],
   ['fao_ledger_append_batch', { p_events: [] }],
   ['fao_run_finalize', { p_correlation_id: '00000000-0000-4000-8000-000000000000' }],
-  ['fao_run_fail', { p_n8n_execution_id: 'x', p_failed_node: 'x', p_message: 'x' }],
+  // K1 (round 5): the full 4-argument signature, so a refusal is a permission
+  // refusal and not a missing-function 404.
+  ['fao_run_fail', { p_n8n_execution_id: 'x', p_failed_node: 'x', p_message: 'x', p_source: 'flagship' }],
   ['fao_notification_context', { p_hitl_id: 1, p_kind: 'REQUESTED', p_level: 0 }],
   ['fao_notification_record', { p_hitl_id: 1, p_kind: 'REQUESTED', p_level: 0, p_outcome: 'SENT', p_channel: 'slack', p_external_ref: null, p_error: null }],
   ['fao_maintenance_sweep', {}],
@@ -81,6 +83,20 @@ test('the service-role key reaches no FinAgent table, view or function', async (
       assert.ok(!(r.body && r.body.ok === true), `${v.label} ${fn} did not succeed`);
     }
   }
+});
+
+// K1 (round 5, D1): fao_run_fail has exactly the strict 4-argument signature.
+// The reader's 4-argument call reaches the function and is refused for lack
+// of EXECUTE (not a 404 for a missing function), and the old 3-argument form
+// no longer exists (PostgREST finds no function: 404 PGRST202).
+test('fao_run_fail: the 4-argument call is a permission refusal, the 3-argument form is gone', async () => {
+  const token = await signIn('reader');
+  const four = await rpc('fao_run_fail', { p_n8n_execution_id: 'x', p_failed_node: 'x', p_message: 'x', p_source: 'flagship' }, { token });
+  assert.ok(refused(four.status) && four.status !== 404, `4 arguments: ${four.status} ${four.text}`);
+  assert.ok(!(four.body && four.body.ok === true));
+  const three = await rpc('fao_run_fail', { p_n8n_execution_id: 'x', p_failed_node: 'x', p_message: 'x' }, { token });
+  assert.equal(three.status, 404, `3 arguments: ${three.status} ${three.text}`);
+  assert.equal(three.body && three.body.code, 'PGRST202');
 });
 
 test('the reader\'s fao_whoami shows exactly one global reader role', async () => {

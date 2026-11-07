@@ -7,6 +7,10 @@
 // failed execution the error message and node, and the first output item of
 // the last node that ran (lastNodeOutput). Reads n8n's own SQLite file
 // read-only with the sqlite3 and flatted modules n8n ships; writes nothing.
+//
+// Round 5 (S16): with `--next` it prints {"next": N} instead, the id the next
+// execution will get: one more than the larger of the AUTOINCREMENT sequence
+// and the highest stored id.
 // ============================================================================
 'use strict';
 
@@ -55,6 +59,14 @@ function summarise(raw) {
 }
 
 (async () => {
+  if (process.argv[2] === '--next') {
+    const seq = await all("SELECT seq FROM sqlite_sequence WHERE name = 'execution_entity'", []);
+    const max = await all('SELECT coalesce(max(id), 0) AS m FROM execution_entity', []);
+    const next = Math.max(Number((seq[0] || {}).seq || 0), Number(max[0].m || 0)) + 1;
+    process.stdout.write(JSON.stringify({ next }));
+    db.close();
+    return;
+  }
   const rows = await all(
     `SELECT e.id, e.workflowId, e.mode, e.status, e.finished, e.startedAt, e.stoppedAt, d.data
        FROM execution_entity e LEFT JOIN execution_data d ON d.executionId = e.id

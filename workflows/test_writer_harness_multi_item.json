@@ -15,7 +15,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// ============================================================================\n// Test harness - Assert Test Environment\n// ----------------------------------------------------------------------------\n// FAO-GOV-001 / FAO-GOV-008: harnesses write real runs and ledger rows, so\n// they may run only on an n8n instance started for tests (FAO_ENV=test).\n// On any other instance this node throws before any request is made.\n// ============================================================================\n\nif (!$env || $env.FAO_ENV !== 'test') {\n  throw new Error('FAO-GOV-008 harness: FAO_ENV is not test; refusing to run');\n}\n\nreturn [{ json: { fao_env: 'test' } }];"
+        "jsCode": "// ============================================================================\n// Test harness - Assert Test Environment\n// ----------------------------------------------------------------------------\n// FAO-GOV-001 / FAO-GOV-008: harnesses write real runs and ledger rows, so\n// they may run only on an n8n instance started for tests (FAO_ENV=test) and\n// only against local targets. Every URL this harness calls (FAO_TEST_SUPABASE_URL)\n// must be http or https, with no user info, to a local host: localhost,\n// 127.0.0.1, [::1], a name ending in .localhost or .test, or a single-label\n// name that starts with a letter (a Docker service name such as\n// supabase_kong_<project>, which resolves only on the local network). A\n// hosted project (for example <ref>.supabase.co) or any dotted or numeric\n// address is refused. Otherwise this node throws before any request is made.\n// ============================================================================\n\nif (!$env || $env.FAO_ENV !== 'test') {\n  throw new Error('FAO-GOV-008 harness: FAO_ENV is not test; refusing to run');\n}\n\nconst TARGETS = ['FAO_TEST_SUPABASE_URL'];\nconst URL_RE = /^https?:\\/\\/(\\[::1\\]|[A-Za-z0-9._-]+)(:[0-9]{1,5})?(\\/[^\\s]*)?$/;\nconst LOOPBACK = ['localhost', '127.0.0.1', '[::1]'];\nconst isLocal = (host) => {\n  const h = host.toLowerCase();\n  return LOOPBACK.includes(h) || h.endsWith('.localhost') || h.endsWith('.test') || /^[a-z][a-z0-9_-]{0,62}$/.test(h);\n};\n\nfor (const name of TARGETS) {\n  const m = URL_RE.exec(String($env[name] || ''));\n  if (!m || !isLocal(m[1])) {\n    throw new Error(`FAO-GOV-008 harness: ${name} is not a local target; refusing to run`);\n  }\n}\n\nreturn [{ json: { fao_env: 'test' } }];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -72,7 +72,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ p_agent_id: 'fao_reserve_recon_v1', p_reason: 'writer harness', p_idempotency_key: 'harness-writer-' + $execution.id, p_invoked_via: 'test' }) }}",
+        "jsonBody": "={{ JSON.stringify({ p_agent_id: 'fao_reserve_recon_v1', p_reason: 'writer harness', p_idempotency_key: 'harness-writer-' + $execution.id + '-' + $now.toMillis(), p_invoked_via: 'test' }) }}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
@@ -577,9 +577,9 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SELECT public.fao_run_fail($1, $2, $3) AS r;",
+        "query": "SELECT public.fao_run_fail($1, $2, $3, $4) AS r;",
         "options": {
-          "queryReplacement": "={{ [ $execution.id, 'writer_harness', 'writer harness complete' ] }}"
+          "queryReplacement": "={{ [ $execution.id, 'writer_harness', 'writer harness complete', 'flagship' ] }}"
         }
       },
       "type": "n8n-nodes-base.postgres",
@@ -599,7 +599,7 @@
     },
     {
       "parameters": {
-        "content": "## Test Writer Harness (multi item)\n\nTest environments only. **Assert Test Environment** throws unless `FAO_ENV` is `test`, so this harness cannot write to a shared ledger.\n\n1. Sign in as the test invoker and start a run through `fao_run_start` (`p_invoked_via: test`)\n2. Claim it as n8n would (`fao_run_claim`)\n3. Writer with STARTED plus 7 ASSET_RECONCILED: must store 8 events, 7 asset rows\n4. Writer with a batch whose item 2 has no `policy_rationale`: must fail with the named Writer error, storing nothing\n5. Close the run through `fao_run_fail`\n\nEnvironment: `FAO_ENV`, `FAO_TEST_SUPABASE_URL`, `FAO_TEST_PUBLIC_KEY`, `FAO_TEST_INVOKER_EMAIL`, `FAO_TEST_INVOKER_PASSWORD`.",
+        "content": "## Test Writer Harness (multi item)\n\nTest environments only. **Assert Test Environment** throws unless `FAO_ENV` is `test`, so this harness cannot write to a shared ledger.\n\n**Assert Test Environment** also refuses any target URL that is not local (localhost, 127.0.0.1, [::1], *.localhost, *.test, or a single-label Docker service name), so a hosted project such as <ref>.supabase.co is never called. It runs only where N8N_BLOCK_ENV_ACCESS_IN_NODE=false; the e2e layer runs it with n8n execute (test/e2e S17, S19).\n\n1. Sign in as the test invoker and start a run through `fao_run_start` (`p_invoked_via: test`)\n2. Claim it as n8n would (`fao_run_claim`)\n3. Writer with STARTED plus 7 ASSET_RECONCILED: must store 8 events, 7 asset rows\n4. Writer with a batch whose item 2 has no `policy_rationale`: must fail with the named Writer error, storing nothing\n5. Close the run through `fao_run_fail` (source `flagship`; the run is RUNNING, so it attaches FAILED)\n\nEnvironment: `FAO_ENV`, `FAO_TEST_SUPABASE_URL`, `FAO_TEST_PUBLIC_KEY`, `FAO_TEST_INVOKER_EMAIL`, `FAO_TEST_INVOKER_PASSWORD`.",
         "height": 440,
         "width": 620,
         "color": 5

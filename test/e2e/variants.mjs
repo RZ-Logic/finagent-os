@@ -30,6 +30,22 @@
 //    test can deprecate the agent after the claim and the asset writes and
 //    before fao_run_finalize. Every other node, Check Finalize Result
 //    included, is the export's.
+// 5. Round 5 (K1, F-20, F-32; FAO-GOV-008, FAO-GOV-001):
+//    a. The error handler export gets one change: its Extract Failure map
+//       (workflow id to p_source, one 'id': 'source' entry per line, round 5
+//       D4) gains the e2e copies, flagship variants as 'flagship' and the
+//       two on-demand sweeper copies as 'sweeper'. Each of the three export
+//       entries must appear exactly once or the build fails, so a changed
+//       map is never patched silently. Every other byte is the export's.
+//    b. The "preclaim" flagship variant throws in Validate Invoke Body
+//       (upstream of Claim Run), so S16 drives a pre-claim failure.
+//    c. A gateway caller (header-auth webhook) whose Execute Workflow node is
+//       the flagship's own HITL Gateway node, fed hitl_id 0, so the notifier
+//       export itself fails at Validate Payload (S15). The caller has no
+//       error workflow; the notifier's own settings.errorWorkflow runs.
+//    d. The two harness exports (workflows/test_*.json) are imported
+//       unchanged and never published; S17 to S19 run them with
+//       `n8n execute` (lib.mjs runHarness).
 // ============================================================================
 
 import { randomUUID } from 'node:crypto';
@@ -44,9 +60,10 @@ export const EXPORTS = {
   flagship: { file: 'fao_reserve_recon_v1.json', id: 'uhB2KjEaJDuviM4D' },
 };
 
-// Published in this order (sub-workflows first). The production sweeper is
+// Published in this order (sub-workflows and the error handler first; the
+// gateway names the handler as its error workflow). The production sweeper is
 // deliberately absent (see above).
-export const PUBLISH_ORDER = ['writer', 'gateway', 'errorHandler', 'flagship'];
+export const PUBLISH_ORDER = ['writer', 'errorHandler', 'gateway', 'flagship'];
 
 export const FLAGSHIP_PATH = 'fao-recon-invoke';
 export const SWEEP_PATH = 'fao-e2e-sweep';
@@ -66,6 +83,21 @@ export const MARKUP_AGENT = 'fao_e2e_markup_v1';
 export const DEPRECATE_AGENT = 'fao_e2e_deprecate_v1';
 export const PAUSE_NODE = 'E2E Pause Before Finalize';
 export const PAUSE_BEFORE_FINALIZE_MS = 15000;
+// Round 5: the harness exports, the gateway caller and the pre-claim message.
+export const HARNESSES = {
+  writer: { file: 'test_writer_harness_multi_item.json', id: 'OV7ukqcVKYfNXKHa' },
+  gateway: { file: 'test_hitl_gateway_harness.json', id: 'V87nEh6HALqINIDz' },
+};
+export const GATEWAY_CALLER_ID = 'FaoE2eGwCaller01';
+export const GATEWAY_CALLER_PATH = 'fao-e2e-gateway-bad-input';
+export const PRECLAIM_MESSAGE = 'FAO e2e: forced failure before Claim Run';
+// The error handler's map entries for the three exports (D4), exactly as the
+// export writes them.
+export const ERROR_MAP_ENTRIES = {
+  flagship: "'uhB2KjEaJDuviM4D': 'flagship'",
+  gateway: "'mUAC9qIMkVzlV5qw': 'gateway'",
+  sweeper: "'FaoSweeperV1x001': 'sweeper'",
+};
 
 // JS source for each variant's three literal blocks. JS, not JSON, so NaN and
 // markup survive exactly as a fixture author would write them.
@@ -191,9 +223,26 @@ VARIANTS.deprecate = {
   pauseBeforeFinalizeMs: PAUSE_BEFORE_FINALIZE_MS,
 };
 
+// Round 5 (S16): the in-band balances, and Validate Invoke Body throws before
+// it reads the body, so the execution fails upstream of Claim Run.
+VARIANTS.preclaim = {
+  id: 'FaoE2eReconPreC1',
+  path: 'fao-e2e-recon-preclaim',
+  wallet: VARIANTS.inband.wallet,
+  ledger: VARIANTS.inband.ledger,
+  meta: VARIANTS.inband.meta.replace(/e2e_inband/g, 'e2e_preclaim'),
+  throwBeforeClaim: true,
+};
+
 function readExport(root, key) {
   return JSON.parse(readFileSync(join(root, 'workflows', EXPORTS[key].file), 'utf8'));
 }
+
+function readHarness(root, key) {
+  return JSON.parse(readFileSync(join(root, 'workflows', HARNESSES[key].file), 'utf8'));
+}
+
+const reLiteral = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 function replaceOnce(code, startText, replacement, label) {
   const re = new RegExp(`${startText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{[\\s\\S]*?\\n\\};`, 'g');
@@ -225,6 +274,14 @@ export function flagshipVariant(root, name) {
     claim.parameters = JSON.parse(text.replace(FLAGSHIP_AGENT, v.agent));
   }
   if (v.pauseBeforeFinalizeMs) insertPauseBeforeFinalize(wf, v.pauseBeforeFinalizeMs, name);
+  if (v.throwBeforeClaim) {
+    const validate = wf.nodes.find((n) => n.name === 'Validate Invoke Body');
+    const outs = ((((wf.connections || {})['Validate Invoke Body'] || {}).main || [])[0] || []).map((c) => c.node);
+    if (!validate || validate.type !== 'n8n-nodes-base.code' || outs.join() !== 'Body Valid?') {
+      throw new Error(`variants: ${name}: expected a Validate Invoke Body Code node leading only to Body Valid?`);
+    }
+    validate.parameters.jsCode = `// E2E ONLY (test/e2e/variants.mjs): fail before Claim Run.\nthrow new Error(${JSON.stringify(PRECLAIM_MESSAGE)});\n${validate.parameters.jsCode}`;
+  }
   hook.webhookId = randomUUID();
   wf.id = v.id;
   wf.name = `fao_reserve_recon_v1 [e2e ${name}]`;
@@ -335,18 +392,114 @@ export function sweeperNotifierFails(root) {
   return wf;
 }
 
+// Round 5 (D4): the e2e ids the error handler must map. Flagship variants run
+// with the flagship's settings.errorWorkflow and the on-demand sweeper copies
+// with the sweeper's; the failing stand-in and the gateway caller have none.
+export function e2eSourceIds() {
+  return {
+    flagship: Object.values(VARIANTS).map((v) => v.id),
+    sweeper: [SWEEP_ID, SWEEP_NFAIL_ID],
+  };
+}
+
+// Inserts one `'<id>': '<source>',` line per e2e copy before the export's own
+// entry, with its indentation. Each export entry must occur exactly once, at
+// the start of a line.
+export function patchErrorHandlerMap(code) {
+  const lineRe = (entry) => new RegExp(`^([ \\t]*)(${reLiteral(entry)})`, 'gm');
+  for (const [source, entry] of Object.entries(ERROR_MAP_ENTRIES)) {
+    const hits = code.split(entry).length - 1;
+    const lines = (code.match(lineRe(entry)) || []).length;
+    if (hits !== 1 || lines !== 1) {
+      throw new Error(`variants: error handler map: expected ${entry} (${source}) exactly once at the start of a line, found ${hits} (${lines} at a line start)`);
+    }
+  }
+  const ids = e2eSourceIds();
+  let out = code;
+  for (const source of Object.keys(ids)) {
+    out = out.replace(lineRe(ERROR_MAP_ENTRIES[source]),
+      (all, indent, e) => `${ids[source].map((id) => `${indent}'${id}': '${source}',\n`).join('')}${indent}${e}`);
+  }
+  for (const source of Object.keys(ids)) {
+    for (const id of ids[source]) {
+      if (out.split(`'${id}': '${source}'`).length - 1 !== 1) throw new Error(`variants: error handler map: ${id} not added exactly once`);
+    }
+  }
+  return out;
+}
+
+export function errorHandlerForE2e(root) {
+  const wf = readExport(root, 'errorHandler');
+  const nodes = wf.nodes.filter((n) => n.name === 'Extract Failure');
+  if (nodes.length !== 1 || nodes[0].type !== 'n8n-nodes-base.code') throw new Error('variants: error handler has no single Extract Failure Code node');
+  nodes[0].parameters.jsCode = patchErrorHandlerMap(String(nodes[0].parameters.jsCode || ''));
+  return wf;
+}
+
+// S15: header-auth webhook, a Code node with the bad notifier input, then a
+// copy of the flagship's own HITL Gateway node (same target and mapping), so
+// the notifier export fails at Validate Payload as a sub-workflow.
+export function gatewayCaller(root) {
+  const flag = readExport(root, 'flagship');
+  const gw = flag.nodes.find((n) => n.name === 'HITL Gateway');
+  if (!gw || gw.type !== 'n8n-nodes-base.executeWorkflow' || !gw.parameters.workflowId || gw.parameters.workflowId.value !== EXPORTS.gateway.id) {
+    throw new Error(`variants: the flagship has no HITL Gateway node calling ${EXPORTS.gateway.id}`);
+  }
+  const hook = 'E2E Gateway Caller Webhook';
+  const input = 'E2E Bad Notifier Input';
+  return {
+    name: 'fao_hitl_gateway_v1 [e2e caller, bad input]',
+    nodes: [
+      {
+        parameters: { httpMethod: 'POST', path: GATEWAY_CALLER_PATH, authentication: 'headerAuth', responseMode: 'lastNode', options: {} },
+        id: randomUUID(),
+        name: hook,
+        type: 'n8n-nodes-base.webhook',
+        typeVersion: 2,
+        position: [0, 0],
+        webhookId: randomUUID(),
+        credentials: { httpHeaderAuth: { id: 'FaoInvokeHdr0001', name: 'FAO Invoke Header Auth' } },
+      },
+      {
+        parameters: { mode: 'runOnceForAllItems', jsCode: "// E2E ONLY: hitl_id 0 is outside the notifier's input contract.\nreturn [{ json: { hitl_id: 0, kind: 'REQUESTED', level: 0 } }];" },
+        type: 'n8n-nodes-base.code',
+        typeVersion: 2,
+        position: [220, 0],
+        id: randomUUID(),
+        name: input,
+      },
+      { ...structuredClone(gw), id: randomUUID(), position: [440, 0] },
+    ],
+    pinData: {},
+    connections: {
+      [hook]: { main: [[{ node: input, type: 'main', index: 0 }]] },
+      [input]: { main: [[{ node: gw.name, type: 'main', index: 0 }]] },
+    },
+    active: false,
+    settings: { executionOrder: 'v1' },
+    versionId: randomUUID(),
+    id: GATEWAY_CALLER_ID,
+    tags: [],
+  };
+}
+
 // Every workflow file for import:workflow --separate, keyed by file name.
 export function buildWorkflowSet(root) {
   const out = {};
   for (const key of Object.keys(EXPORTS)) out[EXPORTS[key].file] = readExport(root, key);
+  out[EXPORTS.errorHandler.file] = errorHandlerForE2e(root);
+  for (const key of Object.keys(HARNESSES)) out[HARNESSES[key].file] = readHarness(root, key);
   for (const name of Object.keys(VARIANTS)) out[`e2e_recon_${name}.json`] = flagshipVariant(root, name);
   out['e2e_sweeper_on_demand.json'] = sweeperOnDemand(root);
   out['e2e_notifier_always_fails.json'] = failingNotifier(root);
   out['e2e_sweeper_notifier_fails.json'] = sweeperNotifierFails(root);
+  out['e2e_gateway_caller.json'] = gatewayCaller(root);
   return out;
 }
 
 // The failing stand-in is published before the sweeper copy that calls it.
+// The harnesses are imported but never published (Manual Trigger); S17 to
+// S19 run them with n8n execute.
 export function publishIds() {
   return [
     ...PUBLISH_ORDER.map((k) => EXPORTS[k].id),
@@ -354,5 +507,6 @@ export function publishIds() {
     SWEEP_ID,
     FAILING_NOTIFIER_ID,
     SWEEP_NFAIL_ID,
+    GATEWAY_CALLER_ID,
   ];
 }

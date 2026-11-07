@@ -41,6 +41,13 @@
 --     that references it (FAO-GOV-001, phase 2-5 migration 0013).
 --   - Phase 2-5: the first statement sets fao.change_reason, which every
 --     change to agent_registry now needs (FAO-GOV-002).
+--   - sox_control_ids lists every control SOX-MAPPING.md says the agent
+--     exercises (fix round 5, F-28): the flagship adds FAO-GOV-008,
+--     FAO-GOV-009, FAO-GOV-015, FAO-REC-003, FAO-REC-004 and FAO-REC-008.
+--     The stubs have no workflow, so they list only the inherited platform
+--     controls. Planned controls (FAO-GOV-005, 010 to 012, FAO-REC-005,
+--     009) are not listed. supabase/tests/146_round5_hitl.test.sql asserts
+--     the set per agent.
 --   - The flagship rollback_procedure text below describes the correction
 --     procedure: an erroneous ledger row is corrected by a CORRECTION event
 --     that references the original ledger_id (fao_ledger_correct, phase
@@ -84,12 +91,18 @@ SELECT
     'FAO-GOV-002',  -- Agent Registry membership
     'FAO-GOV-003',  -- Risk-tier classification
     'FAO-GOV-004',  -- Segregation of Duties
+    'FAO-GOV-008',  -- Correlation ID threading
+    'FAO-GOV-009',  -- Policy outcome vocabulary
     'FAO-GOV-013',  -- Named Process Owner
     'FAO-GOV-014',  -- AI disabled by default
+    'FAO-GOV-015',  -- MCP tool surface (invoke_reserve_recon and the read tools)
     'FAO-REC-001',  -- Per-asset deterministic compare
     'FAO-REC-002',  -- Materiality thresholds (ratio + band)
+    'FAO-REC-003',  -- Reserve ratio computation (per asset)
+    'FAO-REC-004',  -- Reserve ratio floor check (per asset)
     'FAO-REC-006',  -- Policy engine (deterministic)
-    'FAO-REC-007'   -- Negative balance detection
+    'FAO-REC-007',  -- Negative balance detection
+    'FAO-REC-008'   -- Audit evidence records by correlation_id
   ]::TEXT[],
   FALSE,  -- AI advisory off by default; FAO_AI_ASSIST_ENABLED switch planned for v1.1, not read in v1
   -- rollback_procedure: corrections are CORRECTION events written by

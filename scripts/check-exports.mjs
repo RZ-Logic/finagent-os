@@ -6,7 +6,10 @@
 //   FAO-GOV-001  ledger writes go only through fao_ledger_append_batch
 //   FAO-GOV-004  no export calls the retired decision functions or handler
 //   FAO-GOV-007  the notifier posts through the named Slack credential only
-//   FAO-GOV-008  runs start only through the authenticated invoke webhook
+//   FAO-GOV-008  runs start only through the authenticated invoke webhook;
+//                every failure of the flagship, the notifier and the sweeper
+//                reaches the error handler, whose source map and pre-claim
+//                list match the exports (rule error_handler_map)
 //
 // One check per rule per workflow, plus three global checks: the set of
 // exported files, the n8n version the node typeVersion pins were checked
@@ -47,6 +50,16 @@ export const RETIRED_FILES = ['fao_hitl_approval_handler_v2.json'];
 const HARNESS_FILES = new Set(['test_writer_harness_multi_item.json', 'test_hitl_gateway_harness.json']);
 const FLAGSHIP_FILE = 'fao_reserve_recon_v1.json';
 const ERROR_WORKFLOW_ID = 'FaoErrHandlerV01';
+const ERROR_HANDLER_FILE = 'fao_error_handler_v1.json';
+// FAO-GOV-008 (round 5, F-20): the workflows whose failures the error
+// handler records, with the fao_run_fail source each maps to. Exactly these
+// set settings.errorWorkflow; the error handler's Extract Failure node holds
+// the same map, one entry per line ('<id>': '<source>',).
+export const ERROR_SOURCES = {
+  'fao_reserve_recon_v1.json': 'flagship',
+  'fao_hitl_gateway_v1.json': 'gateway',
+  'fao_hitl_sweeper_v1.json': 'sweeper',
+};
 const WRITER_ID = 'dQslIEVwF3WqMliT';
 const NOTIFIER_ID = 'mUAC9qIMkVzlV5qw';
 
@@ -107,8 +120,8 @@ export const VERSIONS_FILE = join(REPO_ROOT, 'test', 'env', 'versions.json');
 // workflow's sticky note says its step.
 export const PUBLISH_ORDER = [
   'writer.json',
-  'fao_hitl_gateway_v1.json',
   'fao_error_handler_v1.json',
+  'fao_hitl_gateway_v1.json',
   'fao_hitl_sweeper_v1.json',
   'fao_reserve_recon_v1.json',
 ];
@@ -209,7 +222,7 @@ export const SECTION4 = {
     present: [
       { name: 'Error Trigger', type: T.errorTrigger },
       { name: 'Extract Failure', type: T.code, mode: ALL_ITEMS },
-      { name: 'Record Run Failure', type: T.postgres, query: 'public.fao_run_fail($1,$2,$3)' },
+      { name: 'Record Run Failure', type: T.postgres, query: 'public.fao_run_fail($1,$2,$3,$4)' },
     ],
     absent: [],
   },
@@ -395,14 +408,22 @@ export const RULES = [
   },
   {
     id: 'error_workflow',
-    text: 'errorWorkflow set on the flagship and nothing else',
+    text: 'errorWorkflow set on the flagship, the notifier and the sweeper, and nothing else',
     run: ({ file, wf }) => {
       const ew = (wf.settings || {}).errorWorkflow;
-      if (file === FLAGSHIP_FILE) {
+      if (Object.prototype.hasOwnProperty.call(ERROR_SOURCES, file)) {
         return ew === ERROR_WORKFLOW_ID ? [] : [`settings.errorWorkflow is ${ew || '(unset)'}, expected ${ERROR_WORKFLOW_ID}`];
       }
-      return (ew === undefined || ew === null || ew === '') ? [] : [`settings.errorWorkflow is set (${ew}) outside the flagship`];
+      return (ew === undefined || ew === null || ew === '') ? [] : [`settings.errorWorkflow is set (${ew}) outside the flagship, the notifier and the sweeper`];
     },
+  },
+  {
+    // FAO-GOV-008 (round 5, F-20, K1): the error handler maps the failed
+    // workflow id to the fao_run_fail source with a fixed map, and a flagship
+    // failure upstream of Claim Run to flagship_pre_claim.
+    id: 'error_handler_map',
+    text: 'the error handler source map and pre-claim list match the exports, and Record Run Failure passes the source as $4',
+    run: ({ file, wf, exportedById }) => (file === ERROR_HANDLER_FILE ? checkErrorHandler(wf, exportedById) : []),
   },
   {
     id: 'code_mode',
@@ -694,6 +715,125 @@ function checkFinalizeGate(wf, byName) {
   if (!/\.ok\s*!==\s*true/.test(code) || !/\bthrow\b/.test(code)) {
     v.push('flagship: Check Finalize Result must throw unless r.ok === true');
   }
+  // Round 5 (red team r4 item 2): ok:true with state FAILED
+  // (AUDIT_CHAIN_MISMATCH) must fail the execution too.
+  if (!/const\s+PASS_STATES\s*=\s*\[\s*'COMMITTED'\s*,\s*'AWAITING_HITL'\s*\]\s*;/.test(code)
+      || !/!\s*PASS_STATES\.includes\(\s*r\.state\s*\)/.test(code)) {
+    v.push('flagship: Check Finalize Result must throw unless r.state is COMMITTED or AWAITING_HITL (PASS_STATES)');
+  }
+  return v;
+}
+
+// --- Error handler (round 5, F-20) -------------------------------------------
+// The non-blank lines of the one `const <name> = <open>` ... `<close>;`
+// block in code, or null when there is not exactly one.
+function blockLines(code, name, open, close) {
+  const head = `const ${name} = ${open}\n`;
+  const start = code.indexOf(head);
+  if (start < 0 || code.indexOf(`const ${name} =`, start + 1) >= 0) return null;
+  const body = code.slice(start + head.length);
+  const end = body.indexOf(`\n${close};`);
+  if (end < 0) return null;
+  return body.slice(0, end).split('\n').filter((l) => l.trim() !== '');
+}
+
+// Every node from which `target` is reachable through main connections,
+// sorted by name.
+export function upstreamOf(wf, target) {
+  const into = new Map();
+  for (const [from, c] of Object.entries((wf && wf.connections) || {})) {
+    for (const out of ((c || {}).main || [])) {
+      for (const x of (out || [])) {
+        if (!x || !x.node) continue;
+        if (!into.has(x.node)) into.set(x.node, new Set());
+        into.get(x.node).add(from);
+      }
+    }
+  }
+  const seen = new Set();
+  const stack = [target];
+  while (stack.length) {
+    for (const p of into.get(stack.pop()) || []) {
+      if (p !== target && !seen.has(p)) { seen.add(p); stack.push(p); }
+    }
+  }
+  return [...seen].sort();
+}
+
+// FAO-GOV-008 (round 5, F-20, K1, D4). The source map in Extract Failure is
+// one entry per line, '<id>': '<source>', and equals ERROR_SOURCES; each
+// entry's text appears exactly once (test/e2e/variants.mjs patches e2e ids in
+// next to them); every exported workflow that names this handler has a
+// source. The pre-claim list equals the flagship nodes upstream of Claim
+// Run. Record Run Failure is the last node and calls the 4-argument
+// fao_run_fail with the source as $4.
+export function checkErrorHandler(wf, exportedById) {
+  const v = [];
+  const byName = new Map(nodesOf(wf).map((n) => [n.name, n]));
+  const extract = byName.get('Extract Failure');
+  const record = byName.get('Record Run Failure');
+  if (!extract || !record) return ['error handler: Extract Failure or Record Run Failure is missing'];
+  const code = String(params(extract).jsCode || '');
+
+  const want = new Map(Object.entries(ERROR_SOURCES).map(([f, src]) => [WORKFLOWS[f].id, src]));
+  const lines = blockLines(code, 'SOURCE_BY_WORKFLOW', '{', '}');
+  if (!lines) {
+    v.push('error handler: Extract Failure has no single const SOURCE_BY_WORKFLOW = { ... }; block');
+  } else {
+    const got = new Map();
+    for (const l of lines) {
+      const m = /^ {2}'([A-Za-z0-9]{1,64})': '(flagship|gateway|sweeper)',$/.exec(l);
+      if (!m) { v.push(`error handler: source map line ${JSON.stringify(l)} is not written '<id>': '<source>',`); continue; }
+      if (got.has(m[1])) v.push(`error handler: source map lists ${m[1]} twice`);
+      got.set(m[1], m[2]);
+    }
+    for (const [id, src] of want) {
+      if (got.get(id) !== src) v.push(`error handler: source map gives ${id} ${got.has(id) ? got.get(id) : '(nothing)'}, expected ${src}`);
+      const entry = `'${id}': '${src}'`;
+      const count = code.split(entry).length - 1;
+      if (count !== 1) v.push(`error handler: the entry ${entry} appears ${count} times in Extract Failure, expected exactly once`);
+    }
+    for (const id of got.keys()) if (!want.has(id)) v.push(`error handler: source map lists ${id}, which is not an export that names this handler`);
+  }
+  for (const [id, other] of exportedById || new Map()) {
+    const ew = ((other && other.settings) || {}).errorWorkflow;
+    if (ew === ERROR_WORKFLOW_ID && !want.has(id)) v.push(`error handler: workflow ${id} names this handler but has no source`);
+  }
+
+  const pre = blockLines(code, 'PRE_CLAIM_NODES', '[', ']');
+  const flagship = exportedById ? exportedById.get(WORKFLOWS[FLAGSHIP_FILE].id) : null;
+  if (!pre) {
+    v.push('error handler: Extract Failure has no single const PRE_CLAIM_NODES = [ ... ]; block');
+  } else if (!flagship) {
+    v.push('error handler: the flagship export is missing, so the pre-claim list cannot be checked');
+  } else {
+    const names = [];
+    for (const l of pre) {
+      const m = /^ {2}'([^'\\]+)',$/.exec(l);
+      if (!m) { v.push(`error handler: pre-claim line ${JSON.stringify(l)} is not written '<node name>',`); continue; }
+      names.push(m[1]);
+    }
+    const upstream = upstreamOf(flagship, 'Claim Run');
+    if (new Set(names).size !== names.length || JSON.stringify([...names].sort()) !== JSON.stringify(upstream)) {
+      v.push(`error handler: pre-claim list is ${JSON.stringify(names)}, expected the flagship nodes upstream of Claim Run ${JSON.stringify(upstream)}`);
+    }
+  }
+  const live = stripComments(code);
+  if (!/PRE_CLAIM_NODES\.includes\(\s*lastNode\s*\)/.test(live) || !/'flagship_pre_claim'/.test(live)) {
+    v.push('error handler: Extract Failure does not map a pre-claim flagship failure to flagship_pre_claim');
+  }
+  if (!/hasOwnProperty\.call\(\s*SOURCE_BY_WORKFLOW\s*,\s*wfId\s*\)/.test(live) || !/\bthrow\b/.test(live)) {
+    v.push('error handler: Extract Failure does not refuse a workflow id outside the map');
+  }
+
+  if (squash(params(record).query) !== squash('SELECT public.fao_run_fail($1, $2, $3, $4) AS r;')) {
+    v.push('error handler: Record Run Failure query is not SELECT public.fao_run_fail($1, $2, $3, $4) AS r;');
+  }
+  if (squash(queryReplacement(record)) !== squash('={{ [ $json.n8n_execution_id, $json.failed_node, $json.message, $json.source ] }}')) {
+    v.push('error handler: Record Run Failure does not pass n8n_execution_id, failed_node, message, source as $1 to $4');
+  }
+  const outs = (((wf.connections || {})['Record Run Failure'] || {}).main || []).flat().filter(Boolean);
+  if (outs.length) v.push('error handler: Record Run Failure must be the last node');
   return v;
 }
 

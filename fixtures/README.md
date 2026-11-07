@@ -9,8 +9,16 @@ reconciliation snapshot:
 In production these come from Fireblocks REST API and NetSuite General
 Ledger saved searches respectively. Inline JSON for the smoke test isolates
 the policy logic from data-source plumbing. The workflow does not read these
-files: `Init Execution` uses inline constants that match them except for
-ADA's wallet balance (47,293,847 inline, 47,293,847.92 in `wallet_data.json`).
+files: `Init Execution` uses inline constants equal to them. Since round 5
+ADA's wallet balance is 47,293,847 in both (`wallet_data.json` used to say
+47,293,847.92; the inline value, which the recorded runs used, was kept).
+`test/node/fixtures.test.mjs` runs `Init Execution` and fails unless its
+wallet, ledger and provenance values equal these two files and the table
+below, then runs `Check Thresholds` and `Per-Asset Reconcile` on that
+output with the `policy_branches.json` thresholds (checked equal to seed
+0006) and asserts each row's outcome, ratio and control, and the five band
+statuses named below. `policy_branches.json` drives every other branch
+(`test/node/recon.test.mjs`).
 
 ## Design principle
 
@@ -40,6 +48,18 @@ ABOVE_BAND_UPPER (rule 4), or the NO_THRESHOLD pre-check that marks an asset
 BLOCKED. No rule produces DENY. Execution rollup is REQUIRE_HUMAN CRITICAL
 (worst-asset rule).
 
+## Why the STARTED row says ALLOW
+
+The STARTED row of every run carries `policy_outcome` ALLOW, `status`
+SUCCESS and `hitl_status` NOT_REQUIRED. That is a database rule, not a
+policy result: `fao_ledger_append_batch` (migration 0014) refuses any other
+STARTED item with `STARTED must be ALLOW and SUCCESS`. STARTED records that
+the claimed run began and fixes its asset scope; no asset has been
+reconciled yet, so there is nothing to deny or escalate. The run's outcome
+is the worst ASSET_RECONCILED outcome, which `fao_run_finalize` rolls up
+from the stored events (REQUIRE_HUMAN CRITICAL for this snapshot). The
+fixture test asserts the STARTED fields and the 0014 rule.
+
 ## Real-world anchor: Kraken's December 2025 PoR
 
 Source: https://blog.kraken.com/news/december-2025-proof-of-reserves
@@ -62,8 +82,9 @@ Stablecoins: the seeded USDC and USDT `ratio_band_upper` is 1.005
 (`supabase/seeds/0006_materiality_thresholds_seed.sql`), below Kraken's
 published 105%+. A stablecoin reconciled at that posture (ratio about 1.05)
 would hit rule 4, ABOVE_BAND_UPPER, and escalate to REQUIRE_HUMAN STANDARD.
-Whether surplus at that level should escalate is a policy choice. Kraken's
-snapshot also covers more than Spot, so its ratios are not directly
+Whether surplus at that level should escalate is a policy choice; the
+1.0050 band is a pending owner decision and is unchanged on this branch.
+Kraken's snapshot also covers more than Spot, so its ratios are not directly
 comparable with the Spot-only seeds.
 
 ## Real-world anchor: krakendb (2014)
@@ -124,6 +145,9 @@ nodes against Fireblocks and NetSuite. The fixture files hold per-asset
 object arrays (under `wallets` and `ledger`, with `wallet_balance` and
 `client_liabilities`), while
 `Per-Asset Reconcile` reads asset-keyed maps, so the swap needs a mapping
-step as well as new nodes. Before live feeds, the reconcile logic also
-needs input completeness checks: it iterates wallet assets only and does
-not reject a missing or non-numeric balance.
+step as well as new nodes. The reconcile logic already fails closed on
+its inputs: the asset scope is the union of wallet and ledger keys, an
+asset present on one side only is BLOCKED (`ONE_SIDED`), a missing,
+non-numeric, NaN or infinite balance is BLOCKED (`INVALID_INPUT`), and an
+asset with no usable threshold is BLOCKED (`NO_THRESHOLD`); each routes
+the run to human review.

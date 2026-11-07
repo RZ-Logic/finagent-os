@@ -21,8 +21,10 @@
 --                CHECK is added in 0013, after the legacy closure, fix round
 --                2 R31); frozen approval counts on every request
 --   FAO-GOV-007  Notification attempts (fao_notifications)
---   FAO-GOV-008  Run records (run_invocations) and single-use run tokens
---                stored only as a hash (fao_private.run_tokens)
+--   FAO-GOV-008  Run records (run_invocations), single-use run tokens
+--                stored only as a hash (fao_private.run_tokens) and the
+--                append-only workflow failure record (workflow_failures,
+--                round 5 K1)
 --
 -- Replaces:
 --   - the CASCADE and SET NULL delete rules on process_owners.id,
@@ -229,7 +231,32 @@ CREATE UNIQUE INDEX fao_notifications_sent_key
   ON public.fao_notifications (hitl_id, kind, level)
   WHERE outcome = 'SENT';
 
--- Row level security: on for all eight tables. The six public tables get
+-- FAO-GOV-008 (round 5, K1): every fao_run_fail call that does not attach a
+-- FAILED row to a run leaves one row here, in the same transaction, so a
+-- workflow failure is never lost. source is the workflow the error handler
+-- mapped; outcome says why nothing was attached (ATTACHED is never stored:
+-- the FAILED ledger row is the record). correlation_id is set only for
+-- ALREADY_TERMINAL (the newest run holding the execution id). failed_node
+-- and message are stored cleaned (control characters to spaces, cut to 200
+-- and 500). Append-only (triggers in 0013); members read under RLS (0013);
+-- no client role writes it.
+CREATE TABLE public.workflow_failures (
+  id                bigserial    PRIMARY KEY,
+  recorded_at       timestamptz  NOT NULL DEFAULT now(),
+  source            text         NOT NULL CHECK (source IN ('flagship','flagship_pre_claim','gateway','sweeper')),
+  n8n_execution_id  text,
+  failed_node       text,
+  message           text,
+  outcome           text         NOT NULL CHECK (outcome IN ('UNKNOWN_EXECUTION','ALREADY_TERMINAL','PRE_CLAIM','NOT_FLAGSHIP')),
+  correlation_id    uuid         NULL REFERENCES public.run_invocations(correlation_id) ON DELETE RESTRICT,
+  CONSTRAINT workflow_failures_correlation_only_terminal
+    CHECK ((outcome = 'ALREADY_TERMINAL') = (correlation_id IS NOT NULL))
+);
+
+CREATE INDEX idx_workflow_failures_recorded_at
+  ON public.workflow_failures (recorded_at);
+
+-- Row level security: on for all nine tables. The seven public tables get
 -- SELECT policies in 0013; the two private tables never get a policy.
 ALTER TABLE public.run_invocations      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.fao_user_roles       ENABLE ROW LEVEL SECURITY;
@@ -237,6 +264,7 @@ ALTER TABLE public.fao_settings         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.fao_refusal_journal  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.fao_admin_audit      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.fao_notifications    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.workflow_failures    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE fao_private.run_tokens      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE fao_private.test_clock      ENABLE ROW LEVEL SECURITY;
 
@@ -251,13 +279,15 @@ REVOKE ALL ON TABLE public.fao_settings         FROM PUBLIC, anon, authenticated
 REVOKE ALL ON TABLE public.fao_refusal_journal  FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON TABLE public.fao_admin_audit      FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON TABLE public.fao_notifications    FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
-REVOKE ALL ON TABLE fao_private.run_tokens      FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
+REVOKE ALL ON TABLE public.workflow_failures    FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
+REVOKE ALL ON TABLE fao_private.run_tokens     FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON TABLE fao_private.test_clock      FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 
 REVOKE ALL ON SEQUENCE public.fao_user_roles_id_seq                  FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON SEQUENCE public.fao_refusal_journal_refusal_id_seq     FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON SEQUENCE public.fao_admin_audit_audit_id_seq           FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON SEQUENCE public.fao_notifications_notification_id_seq  FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
+REVOKE ALL ON SEQUENCE public.workflow_failures_id_seq               FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 
 -- ----------------------------------------------------------------------------
 -- 6. Changes to existing tables. Adding a column with a constant default

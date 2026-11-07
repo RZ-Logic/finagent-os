@@ -2,8 +2,9 @@
 // ============================================================================
 // FinAgent OS: n8n end-to-end layer (local only, never live)
 // ----------------------------------------------------------------------------
-// Builds a fresh n8n 2.x instance in Docker, imports the workflow exports and
-// three credentials that point only at local services, publishes them, starts
+// Builds a fresh n8n 2.x instance in Docker, imports the workflow exports (the
+// two harnesses too, never published) and three credentials that point only
+// at local services, publishes them, starts
 // a fake Slack beside it, then runs test/e2e/*.test.mjs (TAP on stdout).
 //
 //   node scripts/e2e-n8n.mjs          up, then test (what test-all runs)
@@ -31,7 +32,9 @@ import pg from 'pg';
 import {
   NETWORK, DB_CONTAINER, N8N_CONTAINER, SLACK_CONTAINER, assertLocalTargets, assertLocalEnv,
 } from '../test/e2e/guard.mjs';
-import { buildWorkflowSet, publishIds, VARIANTS, FLAGSHIP_PATH, SWEEP_PATH } from '../test/e2e/variants.mjs';
+import {
+  buildWorkflowSet, publishIds, VARIANTS, FLAGSHIP_PATH, SWEEP_PATH, GATEWAY_CALLER_PATH, HARNESSES,
+} from '../test/e2e/variants.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const E2E_DIR = join(ROOT, '.local', 'e2e');
@@ -248,7 +251,7 @@ async function up() {
 
   await waitFor('fake Slack', async () => ({ ok: (await fetch(`${SLACK_URL}/_e2e/health`)).status === 200 }), { timeoutMs: 30000 });
   await waitFor('n8n /healthz', async () => ({ ok: (await fetch(`${N8N_URL}/healthz`)).status === 200 }), { timeoutMs: 180000 });
-  const paths = [FLAGSHIP_PATH, SWEEP_PATH, ...Object.values(VARIANTS).map((v) => v.path)];
+  const paths = [FLAGSHIP_PATH, SWEEP_PATH, GATEWAY_CALLER_PATH, ...Object.values(VARIANTS).map((v) => v.path)];
   for (const p of paths) {
     // Registered production webhooks answer 403 without the header key.
     await waitFor(`webhook ${p}`, async () => {
@@ -268,6 +271,9 @@ async function up() {
     flagship_path: FLAGSHIP_PATH,
     sweep_path: SWEEP_PATH,
     variant_paths: Object.fromEntries(Object.entries(VARIANTS).map(([k, v]) => [k, v.path])),
+    gateway_caller_path: GATEWAY_CALLER_PATH,
+    // Imported, never published; run with n8n execute (test/e2e S17 to S19).
+    harness_ids: Object.fromEntries(Object.entries(HARNESSES).map(([k, v]) => [k, v.id])),
     execution_ids_already_claimed_up_to: reusedUpTo,
     setup_seconds: Number(((Date.now() - started) / 1000).toFixed(1)),
   };

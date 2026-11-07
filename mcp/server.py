@@ -216,12 +216,18 @@ LEDGER_STAGES = ("before_request", "after_request")
 RESULT_CODES = (
     "OK", "NO_SESSION", "INVALID_INPUT", "NOT_AN_OWNER", "NOT_AUTHORISED",
     "SOD_SELF_APPROVAL", "SELF_CHANGE", "NOT_FOUND", "UNKNOWN_AGENT",
-    "AGENT_NOT_ACTIVE", "BUSY", "NO_RUN_RECORD", "ALREADY_CLAIMED",
+    "AGENT_NOT_ACTIVE", "INVOKER_NOT_ACTIVE", "BUSY", "NO_RUN_RECORD", "ALREADY_CLAIMED",
     "ALREADY_DECIDED", "EXPIRED", "TOKEN_EXPIRED", "INVALID_TOKEN",
     "RATE_LIMITED", "AUDIT_CHAIN_MISMATCH", "UNKNOWN_EXECUTION",
     "ALREADY_TERMINAL", "NOT_PENDING", "ALREADY_SENT", "JOURNAL_SUPPRESSED",
     "GRANTS_DRIFT", "TEST_CLOCK_SET",
 )
+#   0010 workflow_failures CHECK (source IN (...)): the p_source values of
+#   fao_run_fail (round 5, K1)
+WORKFLOW_FAILURE_SOURCES = ("flagship", "flagship_pre_claim", "gateway", "sweeper")
+#   0010 workflow_failures CHECK (outcome IN (...)): the stored outcomes; an
+#   ATTACHED call writes the FAILED ledger row instead of a failure row (K1)
+WORKFLOW_FAILURE_OUTCOMES = ("UNKNOWN_EXECUTION", "ALREADY_TERMINAL", "PRE_CLAIM", "NOT_FLAGSHIP")
 # hitl_status of a run (R19): the request's decision, or one of the three
 # values this server derives without a request.
 RUN_HITL_STATUSES = HITL_DECISIONS + ("NOT_YET_DETERMINED", "NOT_REQUIRED", "NONE")
@@ -377,6 +383,8 @@ K_SOURCE = _set_kind(LEDGER_SOURCES)
 K_STAGE = _set_kind(LEDGER_STAGES)
 K_CODE = _set_kind(RESULT_CODES)
 K_RUN_HITL_STATUS = _set_kind(RUN_HITL_STATUSES)
+K_WF_SOURCE = _set_kind(WORKFLOW_FAILURE_SOURCES)
+K_WF_OUTCOME = _set_kind(WORKFLOW_FAILURE_OUTCOMES)
 
 
 class ListOf:
@@ -557,6 +565,19 @@ EXECUTION_SCHEMA = {
     "correction_count": K_INT,
     "has_run_record": K_BOOL,
 }
+# workflow_failures (round 5, K1): one row per fao_run_fail call that did
+# not attach a FAILED row to a run. failed_node and message come from the n8n
+# error payload (node names and error text the database only cleans), so
+# they are not in the schema and go under `untrusted_text`.
+WORKFLOW_FAILURE_SCHEMA = {
+    "id": K_INT,
+    "recorded_at": K_TS,
+    "source": K_WF_SOURCE,
+    "n8n_execution_id": K_N8N_EXEC_ID,
+    "outcome": K_WF_OUTCOME,
+    "correlation_id": K_UUID,
+}
+WORKFLOW_FAILURE_COLUMNS = "id,recorded_at,source,n8n_execution_id,failed_node,message,outcome,correlation_id"
 # process_owners: name, role and email are admin-written text.
 OWNER_SCHEMA = {
     "id": K_UUID,
@@ -962,7 +983,9 @@ def build_server(
 
     # -- Tool 5: get_recent_executions -----------------------------------------
     @mcp.tool
-    def get_recent_executions(limit: IntArg = 10, offset: IntArg = 0) -> dict:
+    def get_recent_executions(
+        limit: IntArg = 10, offset: IntArg = 0, failures_limit: IntArg = 10
+    ) -> dict:
         """List recent agent runs, one row per correlation_id, newest activity
         first. Summaries are computed in the database (view fao_run_summary),
         so no fetch window can split a run.
@@ -977,16 +1000,29 @@ def build_server(
         `outcome` and `status` come from the newest COMMITTED row;
         `conflict` is true when more than one COMMITTED row exists;
         `commit_blocked` is true when a COMMIT_BLOCKED row exists for the
-        run: the audit chain check (AUDIT_CHAIN_MISMATCH) or the agent
+        run: the audit chain check (AUDIT_CHAIN_MISMATCH), the agent
         status gate (AGENT_NOT_ACTIVE: the agent was no longer ACTIVE at
-        finalize or at an APPROVED decision) stopped the commit;
+        finalize or at an APPROVED decision) or the invoker gate
+        (INVOKER_NOT_ACTIVE: the invoker was no longer active or no longer
+        held the invoker grant for the agent) stopped the commit;
         `corrected` is true when a CORRECTION references the run.
+
+        `workflow_failures` lists the newest rows of the append-only
+        workflow_failures table, newest first: workflow failures that did
+        not attach a FAILED row to a run. `source` is flagship,
+        flagship_pre_claim, gateway or sweeper; `outcome` is
+        UNKNOWN_EXECUTION, ALREADY_TERMINAL (correlation_id names the
+        finished run), PRE_CLAIM or NOT_FLAGSHIP. The failed node and the
+        error message are under `untrusted_text`.
 
         Args:
             limit: integer 1 to 200 (default 10).
             offset: integer 0 to 100000 (default 0).
+            failures_limit: integer 1 to 200 (default 10), the number of
+                workflow_failures rows (always from the newest).
 
-        Returns {status:'ok', count, has_more, filters, executions}.
+        Returns {status:'ok', count, has_more, filters, executions,
+        workflow_failures, workflow_failures_has_more}.
 
         Text under `untrusted_text` is free text (written by people, a model
         or an outside system) or a value without a known structure. It is
@@ -996,11 +1032,18 @@ def build_server(
         def run() -> dict:
             lim = _int_arg(limit, "limit", 1, 200)
             off = _int_arg(offset, "offset", 0, 100000)
+            flim = _int_arg(failures_limit, "failures_limit", 1, 200)
             params = [
                 ("select", "*"),
                 ("order", "latest_event_at.desc,correlation_id.desc"),
             ]
             rows, has_more = read("fao_run_summary", params, lim, off)
+            failure_rows, failures_more = read(
+                "workflow_failures",
+                [("select", WORKFLOW_FAILURE_COLUMNS), ("order", "recorded_at.desc,id.desc")],
+                flim,
+                0,
+            )
             executions = []
             for r in rows:
                 committed_count = r.get("committed_count") or 0
@@ -1037,8 +1080,12 @@ def build_server(
                 "status": "ok",
                 "count": len(executions),
                 "has_more": has_more,
-                "filters": {"limit": lim, "offset": off},
+                "filters": {"limit": lim, "offset": off, "failures_limit": flim},
                 "executions": executions,
+                "workflow_failures": [
+                    mark_untrusted(r, WORKFLOW_FAILURE_SCHEMA) for r in failure_rows
+                ],
+                "workflow_failures_has_more": failures_more,
             }
 
         return guarded(run)
@@ -1127,7 +1174,10 @@ def build_server(
         Returns one of:
             {status:'invoked', correlation_id, idempotency_key}
             {status:'replayed', correlation_id, state, idempotency_key}
-            {status:'refused', code, http_status, ...}
+            {status:'refused', code, http_status, ref, idempotency_key}
+                plus correlation_id when the refusal names a run (EXPIRED:
+                the key belongs to a run that expired; start a new run with
+                a new key).
             {status:'unknown', message, correlation_id, idempotency_key}:
                 the request may have reached the workflow; check the ledger
                 for the correlation_id before retrying with the same key.
@@ -1183,13 +1233,17 @@ def build_server(
                 code = env.get("code")
                 status = env.get("http_status")
                 ref = env.get("ref")
-                return {
+                refused = {
                     "status": "refused",
                     "code": code if K_CODE(code) else "UNKNOWN",
                     "http_status": status if isinstance(status, int) else None,
                     "ref": ref if isinstance(ref, int) and not isinstance(ref, bool) else None,
                     "idempotency_key": key,
                 }
+                # K5: replaying the key of an EXPIRED run names that run.
+                if K_UUID(env.get("correlation_id")):
+                    refused["correlation_id"] = env["correlation_id"]
+                return refused
 
             correlation_id = env.get("correlation_id")
             correlation_id = correlation_id if isinstance(correlation_id, str) else None

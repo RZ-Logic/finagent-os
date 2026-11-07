@@ -28,6 +28,7 @@ const MESSAGES = {
   NOT_FOUND: 'Not found.',
   UNKNOWN_AGENT: 'The agent does not exist.',
   AGENT_NOT_ACTIVE: 'The agent is not active.',
+  INVOKER_NOT_ACTIVE: 'The invoker is no longer authorised for this agent.',
   BUSY: 'Someone else is deciding this request. Try again.',
   NO_RUN_RECORD: 'This request has no run record.',
   ALREADY_CLAIMED: 'This run has already started.',
@@ -44,7 +45,7 @@ const MESSAGES = {
 };
 const HTTP = {
   OK: 200, NO_SESSION: 401, INVALID_INPUT: 400, NOT_AN_OWNER: 403, NOT_AUTHORISED: 403, SOD_SELF_APPROVAL: 403,
-  SELF_CHANGE: 403, NOT_FOUND: 404, UNKNOWN_AGENT: 404, AGENT_NOT_ACTIVE: 409, BUSY: 409, NO_RUN_RECORD: 409,
+  SELF_CHANGE: 403, NOT_FOUND: 404, UNKNOWN_AGENT: 404, AGENT_NOT_ACTIVE: 409, INVOKER_NOT_ACTIVE: 409, BUSY: 409, NO_RUN_RECORD: 409,
   ALREADY_CLAIMED: 409, ALREADY_DECIDED: 410, EXPIRED: 410, TOKEN_EXPIRED: 410, INVALID_TOKEN: 401, RATE_LIMITED: 429,
   AUDIT_CHAIN_MISMATCH: 200, UNKNOWN_EXECUTION: 200, ALREADY_TERMINAL: 200, NOT_PENDING: 200, ALREADY_SENT: 200,
 };
@@ -375,4 +376,132 @@ test('the blocked view carries markup in decision fields unchanged as plain text
   const values = vm.fields.map((f) => f.value);
   assert.ok(values.includes(`APPROVED${M}`) && values.includes(`t${M}`));
   for (const x of leaves(vm)) assert.ok(!(x && typeof x === 'object' && (x.fn || x.dom)));
+});
+
+// --- Round 5 (K2, K3; red team round 4 item 3) -------------------------------------
+// K2: fao_hitl_decide APPROVED when the run's invoker is no longer active or
+// no longer holds the invoker grant: the same key set as AGENT_NOT_ACTIVE.
+const INVOKER_TEXT =
+  'Decision recorded. The run was not committed because the invoker is no longer authorised for this agent.';
+
+function invokerBlocked() {
+  return {
+    ok: false, code: 'INVOKER_NOT_ACTIVE', http_status: 409, message: 'server text <b>x</b>', ref: 77,
+    hitl_id: 12, decision: 'APPROVED', decided_at: '2026-11-07T12:00:00Z',
+    committed: false, committed_ledger_id: null,
+  };
+}
+
+test('INVOKER_NOT_ACTIVE decide envelope shows the recorded decision and the fixed text (K2)', () => {
+  assert.equal(app.PAGE_TEXT.decidedNotCommittedInvoker, INVOKER_TEXT, 'fixed text in PAGE_TEXT');
+  const vm = app.buildViewModel(invokerBlocked());
+  assert.equal(vm.kind, 'decided');
+  assert.equal(vm.code, 'INVOKER_NOT_ACTIVE');
+  assert.equal(vm.message, INVOKER_TEXT);
+  assert.equal(vm.retry, false);
+  assert.equal(vm.reference, 'Reference id: 77');
+  assert.deepEqual(vm.fields, [
+    { label: 'Request id', value: '12' },
+    { label: 'Decision', value: 'APPROVED' },
+    { label: 'Decided at', value: '2026-11-07T12:00:00Z' },
+    { label: 'Committed', value: 'No' },
+  ]);
+  const strings = leaves(vm).filter((x) => typeof x === 'string');
+  assert.ok(!strings.some((x) => x.includes('server text')), 'server message text is never shown');
+  // The agent gate keeps its own text.
+  assert.equal(app.buildViewModel(blockedResult()).message, BLOCKED_TEXT);
+});
+
+test('INVOKER_NOT_ACTIVE without the decision fields stays a plain refusal (K2)', () => {
+  const vm = app.buildViewModel({ ok: false, code: 'INVOKER_NOT_ACTIVE', http_status: 409, message: 'x', ref: 5 });
+  assert.equal(vm.kind, 'message');
+  assert.equal(vm.message, 'The invoker is no longer authorised for this agent.');
+  for (const variant of [
+    { ...invokerBlocked(), committed: true },
+    { ...invokerBlocked(), committed: undefined },
+    { ...invokerBlocked(), decision: '' },
+  ]) {
+    assert.notEqual(app.buildViewModel(variant).message, INVOKER_TEXT, JSON.stringify(variant));
+  }
+});
+
+// K3: fao_hitl_get carries committed and commit_blocked_reason at the top
+// level of the ALREADY_DECIDED and EXPIRED envelopes; request keeps exactly
+// hitl_id, decision and decided_at.
+function decidedGet(over = {}) {
+  return {
+    ok: false, code: 'ALREADY_DECIDED', http_status: 410, message: 'server text', ref: null,
+    request: { hitl_id: 12, decision: 'APPROVED', decided_at: '2026-11-07T12:00:00Z' },
+    committed: false, commit_blocked_reason: null,
+    ...over,
+  };
+}
+
+test('reloading a decided request that was blocked shows the not-committed text and reason (K3)', () => {
+  for (const [reason, text] of [['AGENT_NOT_ACTIVE', BLOCKED_TEXT], ['INVOKER_NOT_ACTIVE', INVOKER_TEXT]]) {
+    const vm = app.buildViewModel(decidedGet({ commit_blocked_reason: reason }));
+    assert.equal(vm.kind, 'closed', reason);
+    assert.equal(vm.message, text, reason);
+    assert.equal(vm.title, 'Request 12');
+    assert.deepEqual(vm.fields, [
+      { label: 'Request id', value: '12' },
+      { label: 'Decision', value: 'APPROVED' },
+      { label: 'Decided at', value: '2026-11-07T12:00:00Z' },
+      { label: 'Committed', value: 'No' },
+    ], reason);
+  }
+});
+
+test('reloading a decided request: committed, rejected and unnamed reasons (K3)', () => {
+  const committed = app.buildViewModel(decidedGet({ committed: true }));
+  assert.equal(committed.message, 'This request has already been decided.');
+  assert.ok(committed.fields.some((f) => f.label === 'Committed' && f.value === 'Yes'));
+
+  const rejected = app.buildViewModel(decidedGet({ request: { hitl_id: 12, decision: 'REJECTED', decided_at: 't' } }));
+  assert.equal(rejected.message, 'This request has already been decided.', 'a rejection is not a blocked commit');
+  assert.ok(rejected.fields.some((f) => f.label === 'Committed' && f.value === 'No'));
+  for (const reason of ['AGENT_NOT_ACTIVE', 'INVOKER_NOT_ACTIVE']) {
+    const r = app.buildViewModel(decidedGet({
+      request: { hitl_id: 12, decision: 'REJECTED', decided_at: 't' }, commit_blocked_reason: reason }));
+    assert.equal(r.message, 'This request has already been decided.', reason);
+  }
+
+  const unnamed = app.buildViewModel(decidedGet());
+  assert.equal(unnamed.message, 'Decision recorded. The run was not committed.');
+  assert.equal(app.PAGE_TEXT.approvedNotCommitted, 'Decision recorded. The run was not committed.');
+
+  // A reason outside the closed set is never shown or echoed.
+  const odd = app.buildViewModel(decidedGet({ commit_blocked_reason: 'APPROVE_ALL<b>' }));
+  assert.equal(odd.message, 'Decision recorded. The run was not committed.');
+  assert.ok(!JSON.stringify(odd).includes('APPROVE_ALL'));
+
+  // committed not a boolean: no Committed row, and the plain decided text.
+  const noFlag = app.buildViewModel(decidedGet({ committed: 'false', commit_blocked_reason: 'AGENT_NOT_ACTIVE' }));
+  assert.equal(noFlag.message, 'This request has already been decided.');
+  assert.ok(!JSON.stringify(noFlag.fields).includes('Committed'));
+  const legacy = app.buildViewModel({ ok: false, code: 'ALREADY_DECIDED', http_status: 410, request: { hitl_id: 3, decision: 'APPROVED', decided_at: 't' } });
+  assert.equal(legacy.message, 'This request has already been decided.');
+});
+
+test('reloading an expired request keeps the expired text with Committed No (K3)', () => {
+  const vm = app.buildViewModel({
+    ok: false, code: 'EXPIRED', http_status: 410, message: 'x', ref: null,
+    request: { hitl_id: 5, decision: 'EXPIRED', decided_at: null },
+    committed: false, commit_blocked_reason: null,
+  });
+  assert.equal(vm.kind, 'closed');
+  assert.equal(vm.message, 'This request has expired.');
+  assert.deepEqual(vm.fields, [
+    { label: 'Request id', value: '5' },
+    { label: 'Decision', value: 'EXPIRED' },
+    { label: 'Committed', value: 'No' },
+  ]);
+});
+
+test('the page text list holds every not-committed text and app.js renders by textContent only (K2, K3)', () => {
+  const src = read('app.js');
+  for (const t of [BLOCKED_TEXT, INVOKER_TEXT, 'Decision recorded. The run was not committed.']) {
+    assert.ok(Object.values(app.PAGE_TEXT).includes(t), t);
+  }
+  assert.ok(!/\binnerHTML\b/.test(src));
 });

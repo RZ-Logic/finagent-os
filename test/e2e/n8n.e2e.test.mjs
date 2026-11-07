@@ -16,10 +16,14 @@
 import { test, after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { assertLocalTargets } from './guard.mjs';
 import * as L from './lib.mjs';
 import {
   MARKUP_NOTE, MARKUP_NOTE_2, FAILING_NOTIFIER_ID, FAILING_NOTIFIER_MESSAGE, SWEEP_NFAIL_ID, SWEEP_NFAIL_PATH,
   DEPRECATE_AGENT, PAUSE_NODE, PAUSE_BEFORE_FINALIZE_MS,
+  HARNESSES, GATEWAY_CALLER_ID, GATEWAY_CALLER_PATH, PRECLAIM_MESSAGE, VARIANTS,
 } from './variants.mjs';
 
 const P = L.state.variant_paths;
@@ -281,6 +285,7 @@ test('S06 an unauthenticated webhook call is refused and leaves the token unused
 
 // ---------------------------------------------------------------------------
 test('S09 a forced node failure goes through the error handler and the run ends FAILED', T, async (t) => {
+  const t0 = await L.dbNow();
   const before = L.lastExecutionId();
   const { corr, token } = await L.startRun('sarah', { reason: 'e2e forced node failure' });
   const w = await L.webhook(P.failnode, { run_token: token });
@@ -306,7 +311,17 @@ test('S09 a forced node failure goes through the error handler and the run ends 
   assert.equal(rows[0].status, 'FAILURE');
   assert.ok(r.finished_at, 'finished_at set');
   assert.equal((await L.requests(corr)).length, 0);
-  record(t, 'S09', { corr, state: r.state, last_error: r.last_error, executions: L.brief(ex) });
+  // K1 (round 5): source 'flagship' on a RUNNING newest holder attaches the
+  // FAILED row, and that is the one durable record (no workflow_failures row).
+  const failRes = (handler[0].lastNodeOutput || {}).r || {};
+  assert.equal(failRes.ok, true, JSON.stringify(failRes));
+  assert.equal(failRes.code, 'OK', JSON.stringify(failRes));
+  assert.equal(failRes.outcome, 'ATTACHED', JSON.stringify(failRes));
+  assert.equal(failRes.state, 'FAILED');
+  assert.equal(failRes.correlation_id, corr);
+  assert.equal(String(failRes.ledger_id), String(rows[0].ledger_id));
+  assert.deepEqual(await L.workflowFailures(r.n8n_execution_id, t0), [], 'no workflow_failures row for an attached failure');
+  record(t, 'S09', { corr, state: r.state, last_error: r.last_error, fail_outcome: failRes.outcome, executions: L.brief(ex) });
 });
 
 // ---------------------------------------------------------------------------
@@ -567,6 +582,7 @@ test('S13 a notifier failure and a sweep item error in the same sweep both fail 
   const offset = Math.ceil((new Date(req.timeout_at).getTime() - Date.now()) / 1000) + 120;
   assert.ok(offset > 0 && offset <= 2592000);
 
+  const t0 = await L.dbNow();
   const before = L.lastExecutionId();
   let sweepResponse;
   await withNoEscalationTarget('sarah', () => L.withTestClock(offset, async () => {
@@ -617,9 +633,35 @@ test('S13 a notifier failure and a sweep item error in the same sweep both fail 
   const notes = await L.notifications(req.hitl_id);
   assert.deepEqual(notes.map((n) => `${n.kind}/${n.level}/${n.outcome}`), ['REQUESTED/0/SENT']);
   assert.equal((await L.slack.forHitl(req.hitl_id)).length, 1, 'no escalation notice reached Slack');
+
+  // Round 5 (F-20, K1): the sweeper copy runs with the sweeper's
+  // settings.errorWorkflow, so the failed sweep reaches the error handler
+  // once, mapped to 'sweeper', and fao_run_fail writes exactly one
+  // workflow_failures row (NOT_FLAGSHIP) and no ledger row. The failing
+  // notifier stand-in has no error workflow, so it adds no handler run.
+  const handler = await L.waitUntil('the error handler for the failed sweep', async () => {
+    const h = byWorkflow(L.executions(before), ERROR_WF);
+    return h.length >= 1 && h.every((e) => e.stoppedAt) ? h : null;
+  }, { timeoutMs: 60000, everyMs: 750 });
+  assert.equal(handler.length, 1, `error workflow ran once: ${L.brief(handler)}`);
+  assert.equal(handler[0].status, 'success', L.brief(handler));
+  assert.equal(handler[0].lastNodeExecuted, 'Record Run Failure');
+  const failRes = (handler[0].lastNodeOutput || {}).r || {};
+  assert.deepEqual(
+    [failRes.ok, failRes.code, failRes.outcome, failRes.correlation_id, failRes.ledger_id, failRes.state],
+    [true, 'OK', 'NOT_FLAGSHIP', null, null, null], JSON.stringify(failRes),
+  );
+  const wfRows = await L.workflowFailures(sweepEx[0].id, t0);
+  assert.equal(wfRows.length, 1, JSON.stringify(wfRows));
+  assert.equal(wfRows[0].source, 'sweeper');
+  assert.equal(wfRows[0].outcome, 'NOT_FLAGSHIP');
+  assert.equal(wfRows[0].failed_node, 'Check Sweep Errors');
+  assert.equal(wfRows[0].message, L.cleanText(msg, 500));
+  assert.equal(wfRows[0].correlation_id, null);
   record(t, 'S13', {
     corr, hitl_id: req.hitl_id, offset_seconds: offset, sweep_http: s.status, sweep_error: msg,
-    executions: `${L.brief(ex)} | ${L.brief(ex2)}`,
+    workflow_failure: { id: wfRows[0].id, source: wfRows[0].source, outcome: wfRows[0].outcome },
+    executions: `${L.brief(ex)} | ${L.brief(ex2)} | ${L.brief(handler)}`,
   });
 });
 
@@ -629,7 +671,8 @@ test('S13 a notifier failure and a sweep item error in the same sweep both fail 
 // writes COMMIT_BLOCKED, moves the run to FAILED and returns the
 // AGENT_NOT_ACTIVE envelope (IC-24); Check Finalize Result must fail the
 // execution so the error workflow runs, and the error workflow's
-// fao_run_fail must answer ALREADY_TERMINAL and write nothing. The deprecate
+// fao_run_fail must answer ALREADY_TERMINAL, write no ledger row and record
+// exactly one workflow_failures row (round 5, K1). The deprecate
 // variant (variants.mjs) runs under the local-only agent DEPRECATE_AGENT and
 // waits PAUSE_BEFORE_FINALIZE_MS in E2E Pause Before Finalize. The agent is
 // deprecated and re-activated through fao_admin_set_agent as Marcus (admin),
@@ -662,12 +705,13 @@ async function setAgentStatus(token, status, why) {
   assert.equal(await agentStatus(), status);
 }
 
-test('S14 the agent deprecated between claim and finalize fails the execution at Check Finalize Result; the error handler writes nothing more', T, async (t) => {
+test('S14 the agent deprecated between claim and finalize fails the execution at Check Finalize Result; the error handler records ALREADY_TERMINAL only', T, async (t) => {
   await ensureDeprecateAgent();
   const marcus = await L.signIn('marcus');
   if (await agentStatus() !== 'ACTIVE') await setAgentStatus(marcus, 'ACTIVE', 'activate before the run');
   await L.slack.reset();
 
+  const t0 = await L.dbNow();
   const before = L.lastExecutionId();
   const { corr, token } = await L.startRun('sarah', { agent: DEPRECATE_AGENT, reason: 'e2e S14 agent deprecated before finalize' });
   let r;
@@ -712,8 +756,9 @@ test('S14 the agent deprecated between claim and finalize fails the execution at
   assert.equal(blocked.hitl_status, 'NOT_REQUIRED');
   assert.match(blocked.policy_rationale, /^FAO-GOV-002 agent fao_e2e_deprecate_v1 status DEPRECATED at commit; run not committed/);
   assert.equal((await L.requests(corr)).length, 0, 'no request');
-  // No FAILED row anywhere for this execution id after the run's first row
-  // (fao_run_fail resolves by execution id; KNOWN-LIMITS U14 (a)).
+  // No FAILED row anywhere for this execution id after the run's first row.
+  // Since round 5 (K1) fao_run_fail looks only at the newest run holding the
+  // id; it is terminal, so nothing falls back to an older run (U14 (a)).
   const stray = await L.q(
     `SELECT ledger_id, correlation_id FROM public.shadow_ledger
       WHERE inputs->>'event_type' = 'FAILED' AND inputs->>'n8n_execution_id' = $1 AND ledger_id > $2`,
@@ -742,7 +787,9 @@ test('S14 the agent deprecated between claim and finalize fails the execution at
   assert.ok(writers.every((e) => e.status === 'success'), L.brief(writers));
   assert.equal(byWorkflow(ex, GATEWAY_WF).length, 0, 'the notifier was never called');
 
-  // The error handler ran once and fao_run_fail wrote nothing.
+  // The error handler ran once; fao_run_fail (source 'flagship', K1) found
+  // the newest holder of the id terminal: ALREADY_TERMINAL, no ledger row,
+  // and exactly one workflow_failures row naming that run.
   const handler = byWorkflow(ex, ERROR_WF);
   assert.equal(handler.length, 1, `error workflow ran once: ${L.brief(ex)}`);
   assert.equal(handler[0].status, 'success', L.brief(handler));
@@ -750,14 +797,307 @@ test('S14 the agent deprecated between claim and finalize fails the execution at
   const failRes = (handler[0].lastNodeOutput || {}).r || {};
   assert.equal(failRes.ok, true, JSON.stringify(handler[0].lastNodeOutput));
   assert.equal(failRes.code, 'ALREADY_TERMINAL', JSON.stringify(failRes));
+  assert.equal(failRes.outcome, 'ALREADY_TERMINAL', JSON.stringify(failRes));
   assert.equal(failRes.ledger_id, null);
   assert.equal(failRes.correlation_id, corr);
   assert.equal(failRes.state, 'FAILED');
   assert.deepEqual((await L.ledger(corr)).map((x) => x.ledger_id), rows.map((x) => x.ledger_id), 'nothing appended after the handler');
+  const wfRows = await L.workflowFailures(r.n8n_execution_id, t0);
+  assert.equal(wfRows.length, 1, JSON.stringify(wfRows));
+  assert.deepEqual(
+    [wfRows[0].source, wfRows[0].outcome, wfRows[0].correlation_id, wfRows[0].failed_node],
+    ['flagship', 'ALREADY_TERMINAL', corr, 'Check Finalize Result'],
+  );
+  assert.equal(wfRows[0].message, L.cleanText(flag.error.message, 500));
   assert.equal((await L.slack.requests()).length, 0, 'no Slack message');
   assert.equal(await agentStatus(), 'ACTIVE', 'agent restored');
   record(t, 'S14', {
     corr, state: r.state, last_error: r.last_error, flagship_error: flag.error.message,
-    fail_result: failRes.code, executions: L.brief(ex),
+    fail_result: failRes.code, workflow_failure: wfRows[0].id, executions: L.brief(ex),
   });
+});
+
+// ===========================================================================
+// Round 5 scenarios (K1, F-20, F-32, B-19 / F-38)
+// ===========================================================================
+const maxLedgerId = async () => (await L.one('SELECT coalesce(max(ledger_id), 0)::text AS m FROM public.shadow_ledger')).m;
+const strayFailed = (executionId, afterLedgerId) => L.q(
+  `SELECT ledger_id, correlation_id FROM public.shadow_ledger
+    WHERE inputs->>'event_type' = 'FAILED' AND inputs->>'n8n_execution_id' = $1 AND ledger_id > $2::bigint`,
+  [String(executionId), afterLedgerId],
+);
+const failResult = (exec) => ((exec && exec.lastNodeOutput) || {}).r || {};
+
+// Waits until executions after `before` include at least `min[workflowId]`
+// of each listed workflow and every execution has stopped.
+const waitFor = (label, before, min) => L.waitUntil(label, async () => {
+  const all = L.executions(before);
+  const enough = Object.entries(min).every(([wf, n]) => byWorkflow(all, wf).length >= n);
+  return enough && all.every((e) => e.stoppedAt) ? all : null;
+}, { timeoutMs: 90000, everyMs: 750 });
+
+// ---------------------------------------------------------------------------
+// S15 (F-20, K1): the notifier export fails as a sub-workflow (bad input from
+// the e2e caller); its settings.errorWorkflow runs the error handler, which
+// maps it to 'gateway', and fao_run_fail records one workflow_failures row
+// (NOT_FLAGSHIP) and no ledger row.
+test('S15 a notifier failure reaches the error handler as gateway and writes one workflow_failures row', T, async (t) => {
+  await L.waitUntil(`webhook ${GATEWAY_CALLER_PATH}`, async () => (await L.webhook(GATEWAY_CALLER_PATH, {}, { key: null })).status === 403,
+    { timeoutMs: 60000, everyMs: 500 });
+  const t0 = await L.dbNow();
+  const ledgerBefore = await maxLedgerId();
+  const before = L.lastExecutionId();
+  const w = await L.webhook(GATEWAY_CALLER_PATH, {});
+  const ex = await waitFor('caller, notifier and error handler', before, { [GATEWAY_CALLER_ID]: 1, [GATEWAY_WF]: 1, [ERROR_WF]: 1 });
+
+  const gw = byWorkflow(ex, GATEWAY_WF);
+  assert.equal(gw.length, 1, L.brief(ex));
+  assert.equal(gw[0].status, 'error', L.brief(gw));
+  assert.equal(gw[0].lastNodeExecuted, 'Validate Payload', L.brief(gw));
+  assert.match(gw[0].error.message, /^FAO-GOV-007 notifier: hitl_id invalid/);
+  const caller = byWorkflow(ex, GATEWAY_CALLER_ID);
+  assert.equal(caller.length, 1, L.brief(ex));
+  assert.equal(caller[0].status, 'error', 'the caller fails with its sub-workflow');
+  const handler = byWorkflow(ex, ERROR_WF);
+  assert.equal(handler.length, 1, `the error workflow ran once (only the notifier has errorWorkflow): ${L.brief(ex)}`);
+  assert.equal(handler[0].status, 'success', L.brief(handler));
+  assert.equal(handler[0].lastNodeExecuted, 'Record Run Failure');
+  const r = failResult(handler[0]);
+  assert.deepEqual([r.ok, r.code, r.outcome, r.correlation_id, r.ledger_id, r.state], [true, 'OK', 'NOT_FLAGSHIP', null, null, null], JSON.stringify(r));
+
+  const rows = await L.workflowFailures(gw[0].id, t0);
+  assert.equal(rows.length, 1, JSON.stringify(rows));
+  assert.deepEqual([rows[0].source, rows[0].outcome, rows[0].failed_node, rows[0].correlation_id], ['gateway', 'NOT_FLAGSHIP', 'Validate Payload', null]);
+  assert.equal(rows[0].message, L.cleanText(gw[0].error.message, 500));
+  assert.deepEqual(await strayFailed(gw[0].id, ledgerBefore), [], 'no FAILED ledger row');
+  record(t, 'S15', { webhook_http: w.status, workflow_failure: rows[0].id, executions: L.brief(ex) });
+});
+
+// ---------------------------------------------------------------------------
+// S16 (K1, U14 (a)): an older run, claimed with the id the next n8n
+// execution will get (what a fresh instance that reuses ids produces, R09)
+// and taken to AWAITING_HITL, is never touched when that next execution, a
+// flagship copy, fails before Claim Run. The handler sends
+// 'flagship_pre_claim' (last node upstream of Claim Run); fao_run_fail looks
+// up no run and records PRE_CLAIM. The older run is set up as the invoker
+// (fao_run_start) and fao_workflow (claim, append, finalize), as n8n would.
+test('S16 a flagship failure before Claim Run records PRE_CLAIM and leaves an older AWAITING_HITL run on the same id untouched', T, async (t) => {
+  const t0 = await L.dbNow();
+  const ledgerBefore = await maxLedgerId();
+  const next = String(L.nextExecutionId());
+
+  const old = await L.startRun('aisha', { reason: 'e2e S16 older run holding the next execution id' });
+  const c = await L.claim(old.token, next);
+  assert.equal(c.ok, true, `claim with execution id ${next}: ${JSON.stringify(c)}`);
+  await L.append([L.startedEvent(old.corr, ['USDT'])]);
+  await L.append([L.assetEvent(old.corr, 'USDT', 'REQUIRE_HUMAN', 'STANDARD')]);
+  const f = await L.finalize(old.corr);
+  assert.equal(f.hitl_required, true, JSON.stringify(f));
+  const oldRun = await L.run(old.corr);
+  assert.equal(oldRun.state, 'AWAITING_HITL');
+  assert.equal(oldRun.n8n_execution_id, next);
+  const oldRows = await L.ledger(old.corr);
+  const req = await openRequest(old.corr);
+  assert.equal(req.decision, 'PENDING');
+
+  assert.equal(String(L.nextExecutionId()), next, 'no n8n execution started while the older run was set up');
+  const before = Number(next) - 1;
+  const w = await L.webhook(P.preclaim, {});
+  assert.notEqual(w.status, 202, w.text);
+  const ex = await waitFor('pre-claim flagship copy and error handler', before, { [VARIANTS.preclaim.id]: 1, [ERROR_WF]: 1 });
+
+  const flag = byWorkflow(ex, VARIANTS.preclaim.id);
+  assert.equal(flag.length, 1, L.brief(ex));
+  assert.equal(flag[0].id, next, `the failing execution has the older run's id: ${L.brief(ex)}`);
+  assert.equal(flag[0].status, 'error');
+  assert.equal(flag[0].lastNodeExecuted, 'Validate Invoke Body');
+  assert.ok(flag[0].error.message.startsWith(PRECLAIM_MESSAGE), flag[0].error.message);
+  assert.ok(!(flag[0].nodes || []).includes('Claim Run'), 'Claim Run never ran');
+  const handler = byWorkflow(ex, ERROR_WF);
+  assert.equal(handler.length, 1, L.brief(ex));
+  assert.equal(handler[0].status, 'success', L.brief(handler));
+  const r = failResult(handler[0]);
+  assert.deepEqual([r.ok, r.code, r.outcome, r.correlation_id, r.ledger_id, r.state], [true, 'OK', 'PRE_CLAIM', null, null, null], JSON.stringify(r));
+
+  const rows = await L.workflowFailures(next, t0);
+  assert.equal(rows.length, 1, JSON.stringify(rows));
+  assert.deepEqual([rows[0].source, rows[0].outcome, rows[0].failed_node, rows[0].correlation_id],
+    ['flagship_pre_claim', 'PRE_CLAIM', 'Validate Invoke Body', null]);
+  assert.equal(rows[0].message, L.cleanText(flag[0].error.message, 500));
+
+  // The older run: same rows, same state, request still pending.
+  assert.deepEqual((await L.ledger(old.corr)).map((x) => x.ledger_id), oldRows.map((x) => x.ledger_id), 'no row on the older run');
+  const after = await L.run(old.corr);
+  assert.equal(after.state, 'AWAITING_HITL');
+  assert.equal(after.last_error, oldRun.last_error);
+  assert.equal((await openRequest(old.corr)).decision, 'PENDING');
+  assert.deepEqual(await strayFailed(next, ledgerBefore), [], 'no FAILED ledger row for that execution id');
+
+  const d = await L.decide('sarah', req.hitl_id, 'REJECTED', 'e2e cleanup: S16 older run');
+  assert.equal(d.status, 200, JSON.stringify(d.body));
+  record(t, 'S16', { corr: old.corr, execution_id: next, webhook_http: w.status, workflow_failure: rows[0].id, executions: L.brief(ex) });
+});
+
+// ---------------------------------------------------------------------------
+// F-32: the two harness exports, imported unchanged, run with `n8n execute`
+// (lib.mjs runHarness) against the local stack.
+const H_TIMEOUT = { timeout: 240000 };
+function assertHarnessTargetsLocal() {
+  assertLocalTargets([['harness Supabase url', L.HARNESS_TARGETS.supabase], ['harness invoke url', L.HARNESS_TARGETS.invoke]]);
+}
+const harnessRun = (corrKey, executionId, t0) => L.q(
+  `SELECT * FROM public.run_invocations
+    WHERE invoker_id = $1 AND idempotency_key LIKE $2 AND requested_at >= $3 ORDER BY requested_at`,
+  [L.uid('aisha'), `${corrKey}-${executionId}-%`, t0],
+);
+
+test('S17 the Writer harness export runs with n8n execute: 8 events stored, the bad batch refused, the run closed FAILED', H_TIMEOUT, async (t) => {
+  assertHarnessTargetsLocal();
+  const t0 = await L.dbNow();
+  const before = L.lastExecutionId();
+  const res = L.runHarness(HARNESSES.writer.id, L.harnessEnv('aisha'));
+  assert.equal(res.timedOut, false, 'n8n execute timed out');
+  assert.equal(res.status, 0, 'n8n execute exit code');
+  const ex = await waitFor('the Writer harness and its two Writer calls', before, { [HARNESSES.writer.id]: 1, [WRITER_WF]: 2 });
+
+  const h = byWorkflow(ex, HARNESSES.writer.id);
+  assert.equal(h.length, 1, L.brief(ex));
+  assert.equal(h[0].mode, 'cli');
+  assert.equal(h[0].status, 'success', L.brief(h));
+  assert.equal(h[0].lastNodeExecuted, 'Close Run');
+  for (const n of ['Assert Test Environment', 'Sign In', 'Start Run', 'Claim', 'Writer: Valid Batch', 'Writer: Bad Batch', 'Assert Results', 'Close Run']) {
+    assert.ok((h[0].nodes || []).includes(n), `${n} ran: ${(h[0].nodes || []).join(', ')}`);
+  }
+  assert.deepEqual(byWorkflow(ex, WRITER_WF).map((e) => e.status).sort(), ['error', 'success'], 'valid batch stored, bad batch failed');
+  const r = failResult(h[0]);
+  assert.deepEqual([r.ok, r.code, r.outcome, r.state], [true, 'OK', 'ATTACHED', 'FAILED'], JSON.stringify(r));
+
+  const runs = await harnessRun('harness-writer', h[0].id, t0);
+  assert.equal(runs.length, 1, 'one harness run');
+  const run = runs[0];
+  assert.equal(run.correlation_id, r.correlation_id);
+  assert.equal(run.state, 'FAILED');
+  assert.equal(run.invoked_via, 'test');
+  assert.equal(run.n8n_execution_id, h[0].id);
+  const rows = await L.ledger(run.correlation_id);
+  assert.deepEqual(rows.map((x) => x.t), ['STARTED', ...Array(7).fill('ASSET_RECONCILED'), 'FAILED']);
+  assert.deepEqual(assets(rows).map((x) => x.inputs.asset), ['ADA', 'BTC', 'ETH', 'SOL', 'USDC', 'USDT', 'XRP']);
+  const failed = rows.at(-1);
+  assert.equal(String(failed.ledger_id), String(r.ledger_id));
+  assert.equal(failed.inputs.failed_node, 'writer_harness');
+  assert.equal(failed.inputs.source, 'error_workflow');
+  assert.ok(!rows.some((x) => ['A0', 'A1', 'A2'].includes(x.inputs.asset)), 'nothing from the bad batch');
+  assert.deepEqual(await L.workflowFailures(h[0].id, t0), []);
+  record(t, 'S17', { corr: run.correlation_id, ledger: rows.map((x) => x.t), executions: L.brief(ex) });
+});
+
+test('S18 the notifier harness export runs with n8n execute: the token is accepted and the flagship opens one request with one Slack notice', H_TIMEOUT, async (t) => {
+  assertHarnessTargetsLocal();
+  await L.slack.reset();
+  const t0 = await L.dbNow();
+  const before = L.lastExecutionId();
+  const res = L.runHarness(HARNESSES.gateway.id, L.harnessEnv('aisha'));
+  assert.equal(res.timedOut, false, 'n8n execute timed out');
+  assert.equal(res.status, 0, 'n8n execute exit code');
+  const hs = await waitFor('the notifier harness', before, { [HARNESSES.gateway.id]: 1 });
+  const h = byWorkflow(hs, HARNESSES.gateway.id);
+  assert.equal(h.length, 1, L.brief(hs));
+  assert.equal(h[0].mode, 'cli');
+  assert.equal(h[0].status, 'success', L.brief(h));
+  assert.equal(h[0].lastNodeExecuted, 'Assert Accepted');
+  const out = h[0].lastNodeOutput || {};
+  assert.equal(out.accepted, true, JSON.stringify(out));
+  const runs = await harnessRun('harness-notifier', h[0].id, t0);
+  assert.equal(runs.length, 1, 'one harness run');
+  const corr = runs[0].correlation_id;
+  assert.equal(out.correlation_id, corr);
+
+  const r = await L.waitSettled(corr);
+  assert.equal(r.state, 'AWAITING_HITL');
+  const req = await openRequest(corr);
+  assert.equal(req.agent_invoker_id, L.uid('aisha'));
+  const notes = await L.waitNotifications(req.hitl_id, 1);
+  assert.deepEqual(notes.map((n) => `${n.kind}/${n.level}/${n.outcome}`), ['REQUESTED/0/SENT']);
+  assert.equal((await L.slack.forHitl(req.hitl_id)).length, 1, 'one Slack message');
+  const ex = await waitFor('the flagship, two Writer calls and the notifier', before, { [FLAGSHIP_WF]: 1, [WRITER_WF]: 2, [GATEWAY_WF]: 1 });
+  const flag = ex.find((e) => e.id === String(r.n8n_execution_id));
+  assert.ok(flag && flag.workflowId === FLAGSHIP_WF && flag.status === 'success', L.brief(ex));
+  assert.equal(byWorkflow(ex, ERROR_WF).length, 0, 'no failure');
+  assert.deepEqual(await L.types(corr), ['STARTED', ...Array(7).fill('ASSET_RECONCILED'), 'HITL_REQUESTED', 'NOTIFICATION_SENT']);
+  const d = await L.decide('sarah', req.hitl_id, 'REJECTED', 'e2e cleanup: notifier harness run');
+  assert.equal(d.status, 200, JSON.stringify(d.body));
+  record(t, 'S18', { corr, hitl_id: req.hitl_id, executions: L.brief(ex) });
+});
+
+// S19: Assert Test Environment refuses before any request. The refused
+// targets cannot be reached even if the check were broken: .invalid never
+// resolves (RFC 2606) and 192.0.2.1 is TEST-NET-1 (RFC 5737); the password
+// and invoke key in these runs are dummies.
+test('S19 Assert Test Environment refuses FAO_ENV other than test and every non-local target before any request', { timeout: 600000 }, async (t) => {
+  const t0 = await L.dbNow();
+  const dummy = { FAO_TEST_INVOKER_PASSWORD: 'not-a-password-e2e', FAO_TEST_INVOKE_KEY: 'not-a-key-e2e' };
+  const cases = [
+    ['writer', { FAO_ENV: 'production' }, /^FAO-GOV-008 harness: FAO_ENV is not test; refusing to run/],
+    ['writer', { FAO_TEST_SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co.invalid' }, /^FAO-GOV-008 harness: FAO_TEST_SUPABASE_URL is not a local target; refusing to run/],
+    ['gateway', { FAO_TEST_SUPABASE_URL: 'http://192.0.2.1:8000' }, /^FAO-GOV-008 harness: FAO_TEST_SUPABASE_URL is not a local target; refusing to run/],
+    ['gateway', { FAO_TEST_INVOKE_URL: 'https://n8n.fao-e2e.invalid/webhook/fao-recon-invoke' }, /^FAO-GOV-008 harness: FAO_TEST_INVOKE_URL is not a local target; refusing to run/],
+  ];
+  const seen = [];
+  for (const [key, change, re] of cases) {
+    const id = HARNESSES[key].id;
+    const label = `${key} ${Object.keys(change)[0]}`;
+    const before = L.lastExecutionId();
+    const res = L.runHarness(id, L.harnessEnv('aisha', { ...dummy, ...change }));
+    assert.equal(res.timedOut, false, `${label}: n8n execute timed out`);
+    assert.equal(res.status, 1, `${label}: n8n execute exit code`);
+    const ex = await L.waitExecutions(before, 1);
+    assert.equal(ex.length, 1, `${label}: only the harness ran: ${L.brief(ex)}`);
+    assert.equal(ex[0].workflowId, id);
+    assert.equal(ex[0].status, 'error', label);
+    assert.equal(ex[0].lastNodeExecuted, 'Assert Test Environment', label);
+    assert.deepEqual([...(ex[0].nodes || [])].sort(), ['Assert Test Environment', 'Manual Trigger'], `${label}: no request node ran`);
+    assert.match(ex[0].error.message, re, label);
+    seen.push(`${label}: ${ex[0].id}`);
+  }
+  const runs = await L.q("SELECT correlation_id FROM public.run_invocations WHERE idempotency_key LIKE 'harness-%' AND requested_at >= $1", [t0]);
+  assert.deepEqual(runs, [], 'no run started');
+  record(t, 'S19', { refused: seen });
+});
+
+// ---------------------------------------------------------------------------
+// S20 (B-19, F-38): the auditor query printed in fixtures/README.md
+// ("Provenance threading", its one sql block, read from the file, not
+// copied) runs as printed after a flagship run and returns each asset's
+// provenance source from the STARTED row.
+test('S20 the provenance query printed in fixtures/README.md returns the source of each asset of a flagship run', T, async (t) => {
+  const readme = readFileSync(join(L.REPO_ROOT, 'fixtures', 'README.md'), 'utf8').replace(/\r\n/g, '\n');
+  const start = readme.indexOf('\n## Provenance threading\n');
+  assert.ok(start >= 0, 'fixtures/README.md has the Provenance threading section');
+  const end = readme.indexOf('\n## ', start + 1);
+  const section = readme.slice(start, end < 0 ? undefined : end);
+  const blocks = [...section.matchAll(/```sql\n([\s\S]*?)\n```/g)].map((m) => m[1]);
+  assert.equal(blocks.length, 1, 'exactly one sql block in the section');
+  const sql = blocks[0];
+
+  const { corr, run, ex } = await invoke('aisha', FLAGSHIP_PATH, { minExecutions: 4 });
+  assert.equal(run.state, 'AWAITING_HITL');
+  const rows = (await L.q(sql)).filter((x) => x.correlation_id === corr);
+  const expected = {
+    ADA: 'synthetic_anomaly', BTC: 'kraken_por_2025_q4_anchor', ETH: 'kraken_por_2025_q4_anchor', SOL: 'synthetic_anomaly',
+    USDC: 'synthetic_clean_baseline', USDT: 'synthetic_anomaly', XRP: 'kraken_por_2025_q4_anchor',
+  };
+  assert.deepEqual(Object.fromEntries(rows.map((x) => [x.asset, x.provenance])), expected, 'one row per asset with its .source');
+  assert.equal(rows.length, 7);
+  const ledger = await L.ledger(corr);
+  const started = ledger.find((x) => x.t === 'STARTED');
+  for (const x of rows) {
+    assert.equal(x.provenance, started.inputs.fixture_provenance[x.asset].source, `${x.asset}: the value written by Init Execution`);
+    const a = assets(ledger).find((y) => y.inputs.asset === x.asset);
+    assert.equal(String(x.policy_outcome), a.outcome, x.asset);
+    assert.equal(x.policy_sub_tier === null ? null : String(x.policy_sub_tier), a.sub_tier, x.asset);
+  }
+  const req = await openRequest(corr);
+  const d = await L.decide('sarah', req.hitl_id, 'REJECTED', 'e2e cleanup: provenance query run');
+  assert.equal(d.status, 200, JSON.stringify(d.body));
+  record(t, 'S20', { corr, provenance: Object.fromEntries(rows.map((x) => [x.asset, x.provenance])), executions: L.brief(ex) });
 });

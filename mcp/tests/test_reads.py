@@ -69,7 +69,9 @@ async def test_every_read_sends_reader_token_and_public_key(harness: Harness):
         assert result["status"] == "ok", tool
         assert_no_secrets(result)
     gets = [q for q in r.requests if q.method == "GET"]
-    assert len(gets) == 6
+    # Six tools; get_recent_executions also reads workflow_failures.
+    assert len(gets) == 7
+    assert sum(q.url.path == "/rest/v1/workflow_failures" for q in gets) == 1
     for q in gets:
         assert q.headers["authorization"] == f"Bearer {READER_TOKEN}"
         assert q.headers["apikey"] == PUBLIC_KEY
@@ -361,7 +363,7 @@ async def test_recent_executions_read_only_the_summary_view_once(harness: Harnes
     harness.router.add("GET", "/rest/v1/fao_run_summary", table_response(rows, "0-3/9"))
     result = await harness.call("get_recent_executions", {"limit": 4})
     new = harness.router.requests[before:]
-    assert [q.url.path for q in new] == ["/rest/v1/fao_run_summary"]
+    assert [q.url.path for q in new] == ["/rest/v1/fao_run_summary", "/rest/v1/workflow_failures"]
     assert ("order", "latest_event_at.desc,correlation_id.desc") in new[0].url.params.multi_items()
     assert result["has_more"] is True
     e1, e2, e3, e4 = result["executions"]

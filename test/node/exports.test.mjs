@@ -249,7 +249,9 @@ test('check-exports fails when every Execute Workflow node is bumped (the R26 pr
 // ----------------------------------------------------------------------------
 
 test('PUBLISH_ORDER puts every sub-workflow and the error workflow before their callers', () => {
-  assert.deepEqual(PUBLISH_ORDER, ['writer.json', 'fao_hitl_gateway_v1.json', 'fao_error_handler_v1.json', 'fao_hitl_sweeper_v1.json', 'fao_reserve_recon_v1.json']);
+  // Round 5 (F-20): the notifier and the sweeper name the error handler as
+  // their errorWorkflow, so it is published right after the Writer.
+  assert.deepEqual(PUBLISH_ORDER, ['writer.json', 'fao_error_handler_v1.json', 'fao_hitl_gateway_v1.json', 'fao_hitl_sweeper_v1.json', 'fao_reserve_recon_v1.json']);
   const rule = RULES.find((r) => r.id === 'publish_order');
   assert.ok(rule, 'rule exists');
   const all = loadAll();
@@ -272,10 +274,11 @@ test('PUBLISH_ORDER puts every sub-workflow and the error workflow before their 
 test('publish_docs: the README publishes the five production ids in PUBLISH_ORDER and no harness', () => {
   const readme = readFileSync(join(WORKFLOWS_DIR, 'README.md'), 'utf8');
   assert.deepEqual(checkPublishDocs(readme), []);
-  const ids = ['dQslIEVwF3WqMliT', 'mUAC9qIMkVzlV5qw', 'FaoErrHandlerV01', 'FaoSweeperV1x001', 'uhB2KjEaJDuviM4D'];
+  const ids = ['dQslIEVwF3WqMliT', 'FaoErrHandlerV01', 'mUAC9qIMkVzlV5qw', 'FaoSweeperV1x001', 'uhB2KjEaJDuviM4D'];
   const doc = (list) => list.map((id) => `n8n publish:workflow --id=${id}`).join('\n');
   assert.deepEqual(checkPublishDocs(doc(ids)), []);
   assert.equal(checkPublishDocs(doc([ids[0], ids[4], ids[1], ids[2], ids[3]])).length, 1, 'flagship before the notifier');
+  assert.equal(checkPublishDocs(doc([ids[0], ids[2], ids[1], ids[3], ids[4]])).length, 1, 'notifier before its error workflow (round 4 order)');
   assert.equal(checkPublishDocs(doc(ids.slice(1))).length, 1, 'Writer missing');
   assert.equal(checkPublishDocs(doc([...ids, 'OV7ukqcVKYfNXKHa'])).length, 1, 'a harness published');
   assert.equal(checkPublishDocs(`${doc(ids)}\nThe Writer, notifier and error handler run only when called.`).length, 1, 'n8n 1.x wording');

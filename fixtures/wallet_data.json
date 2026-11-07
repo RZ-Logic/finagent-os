@@ -61,7 +61,7 @@
     },
     {
       "asset": "ADA",
-      "wallet_balance": 47293847.92,
+      "wallet_balance": 47293847,
       "usd_per_unit": 0.72,
       "last_block": 10284739,
       "_provenance": "synthetic_anomaly",

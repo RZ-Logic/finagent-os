@@ -26,6 +26,7 @@ export const CODE_MESSAGES = Object.freeze(
     NOT_FOUND: 'Not found.',
     UNKNOWN_AGENT: 'The agent does not exist.',
     AGENT_NOT_ACTIVE: 'The agent is not active.',
+    INVOKER_NOT_ACTIVE: 'The invoker is no longer authorised for this agent.',
     BUSY: 'Someone else is deciding this request. Try again.',
     NO_RUN_RECORD: 'This request has no run record.',
     ALREADY_CLAIMED: 'This run has already started.',
@@ -64,6 +65,14 @@ export const PAGE_TEXT = Object.freeze({
   // AGENT_NOT_ACTIVE with the decision fields (KNOWN-LIMITS U16 (a), P2).
   decidedNotCommitted:
     'Decision recorded. The run was not committed because the agent is no longer active.',
+  // Same, when the run's invoker is no longer active or no longer holds the
+  // invoker grant for the agent (round 5, K2: INVOKER_NOT_ACTIVE).
+  decidedNotCommittedInvoker:
+    'Decision recorded. The run was not committed because the invoker is no longer authorised for this agent.',
+  // A decided request reloaded through fao_hitl_get whose approval did not
+  // commit for a reason the database does not name (K3: committed false,
+  // commit_blocked_reason null), for example a broken ledger chain.
+  approvedNotCommitted: 'Decision recorded. The run was not committed.',
   committedYes: 'Yes',
   committedNo: 'No',
   signedInAs: 'Signed in as ',
@@ -165,6 +174,16 @@ function filled(fields) {
 // form and note kept (B2): a refused note (INVALID_INPUT), someone else
 // deciding (BUSY), or a network or server failure.
 const RETRY_CODES = Object.freeze(['BUSY', 'INVALID_INPUT']);
+
+// Commit gates that leave the decision standing but block the commit, with
+// the fixed text for each (K2, K3). fao_hitl_decide returns the code as the
+// envelope code; fao_hitl_get returns it as commit_blocked_reason.
+const BLOCKED_TEXT = Object.freeze(
+  Object.assign(Object.create(null), {
+    AGENT_NOT_ACTIVE: PAGE_TEXT.decidedNotCommitted,
+    INVOKER_NOT_ACTIVE: PAGE_TEXT.decidedNotCommittedInvoker,
+  }),
+);
 
 function referenceText(result) {
   const ref = result && result.ref;
@@ -269,12 +288,13 @@ export function buildViewModel(result) {
 
   // The decision stands but the run was blocked at commit: show the recorded
   // decision and its time, not a bare refusal, so the approver does not think
-  // the approval failed (U16 (a), P2). Only the decide envelope carries
-  // committed false with a decision; pre-decision AGENT_NOT_ACTIVE refusals
-  // have neither and fall through to the plain message.
+  // the approval failed (U16 (a), P2; INVOKER_NOT_ACTIVE, round 5 K2). Only
+  // the decide envelope carries committed false with a decision; pre-decision
+  // refusals with these codes have neither and fall through to the plain
+  // message.
   if (
     !result.ok &&
-    code === 'AGENT_NOT_ACTIVE' &&
+    hasOwn(BLOCKED_TEXT, code) &&
     result.committed === false &&
     typeof result.decision === 'string' &&
     result.decision !== ''
@@ -282,7 +302,7 @@ export function buildViewModel(result) {
     model.kind = 'decided';
     model.hitlId = toText(result.hitl_id);
     model.title = `Request ${model.hitlId}`;
-    model.message = PAGE_TEXT.decidedNotCommitted;
+    model.message = BLOCKED_TEXT[code];
     model.fields = filled([
       field('Request id', result.hitl_id),
       field('Decision', result.decision),
@@ -296,11 +316,25 @@ export function buildViewModel(result) {
     model.kind = 'closed';
     model.hitlId = toText(request.hitl_id);
     model.title = `Request ${model.hitlId}`;
+    // K3: fao_hitl_get carries committed and commit_blocked_reason at the top
+    // level of the envelope. Only a boolean committed is shown; any other
+    // value leaves the row out.
+    const committed = typeof result.committed === 'boolean' ? result.committed : null;
+    const reason = typeof result.commit_blocked_reason === 'string' ? result.commit_blocked_reason : null;
     model.fields = filled([
       field('Request id', request.hitl_id),
       field('Decision', request.decision),
       field('Decided at', request.decided_at),
+      field('Committed', committed === null ? '' : committed ? PAGE_TEXT.committedYes : PAGE_TEXT.committedNo),
     ]);
+    // Reloading a decided request whose approval was not committed says so,
+    // with the reason, instead of the bare "already decided" text (red team
+    // round 4 item 3). Only an approval can be blocked at commit; a
+    // rejection keeps the plain decided text whatever the reason says.
+    if (code === 'ALREADY_DECIDED' && committed === false && request.decision === 'APPROVED') {
+      model.message =
+        reason !== null && hasOwn(BLOCKED_TEXT, reason) ? BLOCKED_TEXT[reason] : PAGE_TEXT.approvedNotCommitted;
+    }
     return model;
   }
 

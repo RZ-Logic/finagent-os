@@ -211,6 +211,8 @@ jobs:
       # into a fresh container on the Supabase docker network, starts the fake
       # Slack, and runs test/e2e under the same strict pass rule as the other
       # layers. db:reset above already ran local-setup, so --no-reset.
+      # Round 5: the layer also runs the two harness exports with
+      # `n8n execute` (S17 to S19) and fails unless exactly 20 tests ran.
       - name: n8n end-to-end tests
         run: node scripts/test-all.mjs --no-reset --layer e2e
       - name: Collect n8n logs

@@ -45,6 +45,7 @@ export const MESSAGES = {
   NOT_FOUND: 'Not found.',
   UNKNOWN_AGENT: 'The agent does not exist.',
   AGENT_NOT_ACTIVE: 'The agent is not active.',
+  INVOKER_NOT_ACTIVE: 'The invoker is no longer authorised for this agent.',
   BUSY: 'Someone else is deciding this request. Try again.',
   NO_RUN_RECORD: 'This request has no run record.',
   ALREADY_CLAIMED: 'This run has already started.',

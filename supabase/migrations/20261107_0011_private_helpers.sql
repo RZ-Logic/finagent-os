@@ -88,58 +88,124 @@ $$;
 COMMENT ON FUNCTION fao_private.owner_active(uuid) IS
   'FAO-GOV-013: true when the user has a process_owners row with active = true.';
 
+-- FAO-GOV-004 (round 5, U12): the caller check shared by has_role and
+-- has_any_role. A signed-in user may ask only about their own roles, even if
+-- fao_private were ever exposed to the API (for example through pg_graphql):
+-- when the nearest calling function on the stack is not a FinAgent function
+-- (public.fao_* or fao_private.*) and the caller acts as a client role, the
+-- uid must be auth.uid(). FinAgent SECURITY DEFINER functions ask about
+-- other users (the invoker at claim, finalize and decide, escalation
+-- targets) and keep working; so do the read policies, which pass
+-- auth.uid(). Owner-class sessions (postgres, supabase_admin) are not
+-- restricted. The stack is read with GET DIAGNOSTICS PG_CONTEXT; the lines
+-- for SQL statements and expressions between frames are skipped.
+CREATE FUNCTION fao_private.role_query_allowed(p_uid uuid, p_context text)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_frames text[];
+  v_caller text;
+BEGIN
+  IF fao_private.caller_role() IN ('postgres', 'supabase_admin') THEN
+    RETURN true;
+  END IF;
+  -- Line 1 is the asking helper itself; the nearest function frame after it
+  -- is its caller.
+  SELECT array_agg(l ORDER BY o)
+    INTO v_frames
+    FROM unnest(string_to_array(coalesce(p_context, ''), E'\n')) WITH ORDINALITY AS t(l, o)
+   WHERE o > 1
+     AND (l LIKE 'PL/pgSQL function %' OR l LIKE 'SQL function %');
+  v_caller := v_frames[1];
+  IF v_caller IS NOT NULL
+     AND v_caller ~ '^PL/pgSQL function ((public\.)?fao_[a-z0-9_]+|fao_private\.[a-z0-9_]+)\(' THEN
+    RETURN true;
+  END IF;
+  RETURN p_uid IS NOT DISTINCT FROM auth.uid();
+END;
+$$;
+
+COMMENT ON FUNCTION fao_private.role_query_allowed(uuid, text) IS
+  'FAO-GOV-004 (round 5, U12): true when has_role or has_any_role may answer for p_uid: an owner-class session, a FinAgent function as the nearest caller on the stack, or p_uid = auth.uid(). Never granted to any client role.';
+
 -- FAO-GOV-004: true when the user holds an unrevoked grant of the role for
 -- the agent. A grant with agent_id NULL covers every agent; when p_agent_id
 -- is NULL only such global grants match. Roles other than reader also need
 -- an active owner row. For admin and reader only global grants count.
+-- Round 5 (U12): false when a client asks about another user directly (see
+-- role_query_allowed).
 CREATE FUNCTION fao_private.has_role(p_uid uuid, p_role public.fao_app_role, p_agent_id text)
 RETURNS boolean
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
 SECURITY DEFINER
 SET search_path = ''
 AS $$
-  SELECT p_uid IS NOT NULL
-     AND p_role IS NOT NULL
-     AND EXISTS (
-       SELECT 1
-         FROM public.fao_user_roles r
-        WHERE r.user_id = p_uid
-          AND r.role = p_role
-          AND r.revoked_at IS NULL
-          AND (
-            r.agent_id IS NULL
-            OR (p_agent_id IS NOT NULL
-                AND p_role NOT IN ('admin'::public.fao_app_role, 'reader'::public.fao_app_role)
-                AND r.agent_id = p_agent_id)
-          )
-     )
-     AND (p_role = 'reader'::public.fao_app_role OR fao_private.owner_active(p_uid))
+DECLARE
+  v_context text;
+BEGIN
+  IF p_uid IS NULL OR p_role IS NULL THEN
+    RETURN false;
+  END IF;
+  GET DIAGNOSTICS v_context = PG_CONTEXT;
+  IF NOT fao_private.role_query_allowed(p_uid, v_context) THEN
+    RETURN false;
+  END IF;
+  RETURN EXISTS (
+           SELECT 1
+             FROM public.fao_user_roles r
+            WHERE r.user_id = p_uid
+              AND r.role = p_role
+              AND r.revoked_at IS NULL
+              AND (
+                r.agent_id IS NULL
+                OR (p_agent_id IS NOT NULL
+                    AND p_role NOT IN ('admin'::public.fao_app_role, 'reader'::public.fao_app_role)
+                    AND r.agent_id = p_agent_id)
+              )
+         )
+     AND (p_role = 'reader'::public.fao_app_role OR fao_private.owner_active(p_uid));
+END;
 $$;
 
 COMMENT ON FUNCTION fao_private.has_role(uuid, public.fao_app_role, text) IS
-  'FAO-GOV-004: unrevoked grant of the role for the agent (NULL agent grant covers all). Non-reader roles need an active owner row; admin and reader count only global grants. Executable by authenticated for RLS.';
+  'FAO-GOV-004: unrevoked grant of the role for the agent (NULL agent grant covers all). Non-reader roles need an active owner row; admin and reader count only global grants. Executable by authenticated for RLS; a client asking directly about another user gets false (round 5, U12).';
 
 -- FAO-GOV-004: true when has_role is true for some role and some agent.
+-- Round 5 (U12): the same caller check as has_role.
 CREATE FUNCTION fao_private.has_any_role(p_uid uuid)
 RETURNS boolean
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
 SECURITY DEFINER
 SET search_path = ''
 AS $$
-  SELECT p_uid IS NOT NULL
-     AND EXISTS (
-       SELECT 1
-         FROM public.fao_user_roles r
-        WHERE r.user_id = p_uid
-          AND r.revoked_at IS NULL
-          AND fao_private.has_role(p_uid, r.role, r.agent_id)
-     )
+DECLARE
+  v_context text;
+BEGIN
+  IF p_uid IS NULL THEN
+    RETURN false;
+  END IF;
+  GET DIAGNOSTICS v_context = PG_CONTEXT;
+  IF NOT fao_private.role_query_allowed(p_uid, v_context) THEN
+    RETURN false;
+  END IF;
+  RETURN EXISTS (
+           SELECT 1
+             FROM public.fao_user_roles r
+            WHERE r.user_id = p_uid
+              AND r.revoked_at IS NULL
+              AND fao_private.has_role(p_uid, r.role, r.agent_id)
+         );
+END;
 $$;
 
 COMMENT ON FUNCTION fao_private.has_any_role(uuid) IS
-  'FAO-GOV-004: true when has_role holds for some role and some agent. Used by member read policies. Executable by authenticated for RLS.';
+  'FAO-GOV-004: true when has_role holds for some role and some agent. Used by member read policies. Executable by authenticated for RLS; a client asking directly about another user gets false (round 5, U12).';
 
 -- ----------------------------------------------------------------------------
 -- Fixed codes, HTTP statuses and messages (FAO-GOV-008). One table, shared by
@@ -167,6 +233,7 @@ BEGIN
     WHEN 'NOT_FOUND'            THEN 'Not found.'
     WHEN 'UNKNOWN_AGENT'        THEN 'The agent does not exist.'
     WHEN 'AGENT_NOT_ACTIVE'     THEN 'The agent is not active.'
+    WHEN 'INVOKER_NOT_ACTIVE'   THEN 'The invoker is no longer authorised for this agent.'
     WHEN 'BUSY'                 THEN 'Someone else is deciding this request. Try again.'
     WHEN 'NO_RUN_RECORD'        THEN 'This request has no run record.'
     WHEN 'ALREADY_CLAIMED'      THEN 'This run has already started.'
@@ -217,6 +284,7 @@ BEGIN
     WHEN 'NOT_FOUND'            THEN 404
     WHEN 'UNKNOWN_AGENT'        THEN 404
     WHEN 'AGENT_NOT_ACTIVE'     THEN 409
+    WHEN 'INVOKER_NOT_ACTIVE'   THEN 409
     WHEN 'BUSY'                 THEN 409
     WHEN 'NO_RUN_RECORD'        THEN 409
     WHEN 'ALREADY_CLAIMED'      THEN 409
@@ -758,6 +826,7 @@ CREATE TRIGGER fao_notifications_deny_truncate
 REVOKE ALL ON FUNCTION fao_private.caller_role()                                          FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION fao_private.clock()                                                FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION fao_private.owner_active(uuid)                                     FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
+REVOKE ALL ON FUNCTION fao_private.role_query_allowed(uuid, text)                        FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION fao_private.has_role(uuid, public.fao_app_role, text)              FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION fao_private.has_any_role(uuid)                                     FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION fao_private.code_message(text)                                     FROM PUBLIC, anon, authenticated, service_role, fao_workflow;

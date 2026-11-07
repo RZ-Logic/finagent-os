@@ -142,6 +142,9 @@ def table_response(rows: list, content_range: Optional[str] = None, status: int 
 def router() -> Router:
     r = Router()
     r.add("POST", "/auth/v1/token", auth_handler)
+    # get_recent_executions also reads workflow_failures (round 5, K1); empty
+    # unless a test sets its own rows.
+    r.add("GET", "/rest/v1/workflow_failures", table_response([]))
     r.add(
         "POST",
         "/rest/v1/rpc/fao_whoami",

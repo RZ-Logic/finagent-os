@@ -38,7 +38,7 @@ CREATE FUNCTION pg_temp.jcount(p_code text) RETURNS bigint LANGUAGE sql AS $$
 CREATE FUNCTION pg_temp.append_err(p_events jsonb) RETURNS text LANGUAGE sql AS $$
   SELECT tests.error_as('fao_workflow', format('SELECT public.fao_ledger_append_batch(%L::jsonb)', p_events)) $$;
 CREATE FUNCTION pg_temp.fail(p_exec text) RETURNS jsonb LANGUAGE sql AS $$
-  SELECT tests.jsonb_as('fao_workflow', format('SELECT public.fao_run_fail(%L, %L, %L)', p_exec, 'Claim Run', 'pgtap 142')) $$;
+  SELECT tests.jsonb_as('fao_workflow', format('SELECT public.fao_run_fail(%L, %L, %L, %L)', p_exec, 'Claim Run', 'pgtap 142', 'flagship')) $$;
 CREATE FUNCTION pg_temp.consumed(p_corr uuid) RETURNS boolean LANGUAGE sql AS $$
   SELECT consumed_at IS NOT NULL FROM fao_private.run_tokens WHERE correlation_id = p_corr $$;
 -- An asset event with a chosen status, or with extra inputs keys
@@ -136,7 +136,9 @@ SELECT is(tests.claim_raw(pg_temp.tok('r9e'), 'pgtap-142-y')->>'code', 'OK', 'R0
 SELECT is((pg_temp.fail('pgtap-142-y')->>'correlation_id')::uuid, pg_temp.c('r9e'), 'R09: fao_run_fail resolves Y to the RUNNING holder E');
 SELECT is(tests.ledger_count(pg_temp.c('r9d'), 'FAILED'), 0::bigint,
   'R09: no FAILED event on the AWAITING_HITL run D');
-SELECT is((pg_temp.fail('pgtap-142-y')->>'correlation_id')::uuid, pg_temp.c('r9d'), 'R09: with E finished, Y resolves to the unfinished run D');
+INSERT INTO v VALUES ('r9_y2', pg_temp.fail('pgtap-142-y'));
+SELECT is(pg_temp.g('r9_y2')->>'code' || '/' || (pg_temp.g('r9_y2')->>'correlation_id') || '/' || tests.ledger_count(pg_temp.c('r9d'), 'FAILED')::text,
+  'ALREADY_TERMINAL/' || pg_temp.c('r9e')::text || '/0', 'R09 (round 5 K1): with the newest holder E finished, Y answers ALREADY_TERMINAL for E and never falls back to the older AWAITING_HITL run D');
 
 -- ============================================================================
 -- R05: ASSET_RECONCILED status agrees with the outcome

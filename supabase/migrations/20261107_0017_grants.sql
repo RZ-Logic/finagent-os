@@ -58,6 +58,7 @@ REVOKE ALL ON TABLE
   public.fao_refusal_journal,
   public.fao_admin_audit,
   public.fao_notifications,
+  public.workflow_failures,
   public.fao_run_summary,
   fao_private.run_tokens,
   fao_private.test_clock
@@ -82,7 +83,8 @@ BEGIN
          'public.materiality_thresholds'::regclass, 'public.run_invocations'::regclass,
          'public.fao_user_roles'::regclass, 'public.fao_settings'::regclass,
          'public.fao_refusal_journal'::regclass, 'public.fao_admin_audit'::regclass,
-         'public.fao_notifications'::regclass, 'public.fao_run_summary'::regclass,
+         'public.fao_notifications'::regclass, 'public.workflow_failures'::regclass,
+         'public.fao_run_summary'::regclass,
          'fao_private.run_tokens'::regclass, 'fao_private.test_clock'::regclass)
   LOOP
     EXECUTE format('REVOKE ALL ON SEQUENCE %s FROM PUBLIC, anon, authenticated, service_role, fao_workflow', r.seq);
@@ -101,7 +103,8 @@ BEGIN
          'public.materiality_thresholds'::regclass, 'public.run_invocations'::regclass,
          'public.fao_user_roles'::regclass, 'public.fao_settings'::regclass,
          'public.fao_refusal_journal'::regclass, 'public.fao_admin_audit'::regclass,
-         'public.fao_notifications'::regclass, 'public.fao_run_summary'::regclass,
+         'public.fao_notifications'::regclass, 'public.workflow_failures'::regclass,
+         'public.fao_run_summary'::regclass,
          'fao_private.run_tokens'::regclass, 'fao_private.test_clock'::regclass)
   LOOP
     EXECUTE format('REVOKE ALL (%I) ON TABLE %s FROM PUBLIC, anon, authenticated, service_role, fao_workflow', r.attname, r.rel);
@@ -138,6 +141,7 @@ AS $$
       ('table',    'public',      'fao_admin_audit',        'authenticated', 'SELECT'),
       ('table',    'public',      'fao_notifications',      'authenticated', 'SELECT'),
       ('table',    'public',      'fao_settings',           'authenticated', 'SELECT'),
+      ('table',    'public',      'workflow_failures',      'authenticated', 'SELECT'),
       ('view',     'public',      'fao_run_summary',        'authenticated', 'SELECT'),
       ('function', 'public',      'public.fao_run_start(json)',                                        'anon',          'EXECUTE'),
       ('function', 'public',      'public.fao_run_start(json)',                                        'authenticated', 'EXECUTE'),
@@ -153,7 +157,7 @@ AS $$
       ('function', 'public',      'public.fao_run_claim(text,text,text)',                              'fao_workflow',  'EXECUTE'),
       ('function', 'public',      'public.fao_ledger_append_batch(jsonb)',                             'fao_workflow',  'EXECUTE'),
       ('function', 'public',      'public.fao_run_finalize(uuid)',                                     'fao_workflow',  'EXECUTE'),
-      ('function', 'public',      'public.fao_run_fail(text,text,text)',                               'fao_workflow',  'EXECUTE'),
+      ('function', 'public',      'public.fao_run_fail(text,text,text,text)',                          'fao_workflow',  'EXECUTE'),
       ('function', 'public',      'public.fao_notification_context(bigint,text,integer)',              'fao_workflow',  'EXECUTE'),
       ('function', 'public',      'public.fao_notification_record(bigint,text,integer,text,text,text,text)', 'fao_workflow', 'EXECUTE'),
       ('function', 'public',      'public.fao_maintenance_sweep()',                                    'fao_workflow',  'EXECUTE'),
@@ -189,7 +193,7 @@ AS $$
      WHERE (n.nspname = 'public' AND c.relname IN (
               'shadow_ledger', 'hitl_queue', 'agent_registry', 'process_owners', 'materiality_thresholds',
               'run_invocations', 'fao_user_roles', 'fao_settings', 'fao_refusal_journal', 'fao_admin_audit',
-              'fao_notifications', 'fao_run_summary'))
+              'fao_notifications', 'workflow_failures', 'fao_run_summary'))
         OR (n.nspname = 'fao_private' AND c.relname IN ('run_tokens', 'test_clock'))
   ),
   seq AS (
@@ -315,6 +319,10 @@ GRANT SELECT ON TABLE public.fao_user_roles TO authenticated;
 GRANT SELECT ON TABLE public.fao_refusal_journal, public.fao_admin_audit,
                       public.fao_notifications, public.fao_settings TO authenticated;
 
+-- Workflow failures that attach to no run (round 5, K1): members read under
+-- RLS, the MCP reader included; written only by fao_run_fail.
+GRANT SELECT ON TABLE public.workflow_failures TO authenticated;
+
 -- Summary view (security invoker: the caller's RLS applies).
 GRANT SELECT ON TABLE public.fao_run_summary TO authenticated;
 
@@ -337,7 +345,7 @@ GRANT EXECUTE ON FUNCTION
   public.fao_run_claim(text, text, text),
   public.fao_ledger_append_batch(jsonb),
   public.fao_run_finalize(uuid),
-  public.fao_run_fail(text, text, text),
+  public.fao_run_fail(text, text, text, text),
   public.fao_notification_context(bigint, text, int),
   public.fao_notification_record(bigint, text, int, text, text, text, text),
   public.fao_maintenance_sweep()
@@ -427,6 +435,18 @@ BEGIN
      AND NOT EXISTS (SELECT 1 FROM unnest(coalesce(p.proconfig, ARRAY[]::text[])) c WHERE c LIKE 'search\_path=%');
   IF v_detail IS NOT NULL THEN
     RAISE EXCEPTION 'FAO-GOV-015 grants assertion failed: fao_private function without a pinned search_path: %', v_detail
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- B-28 (round 5): the v1 append-only trigger function is pinned too (0013).
+  IF EXISTS (
+       SELECT 1
+         FROM pg_catalog.pg_proc p
+         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public'
+          AND p.proname = 'shadow_ledger_enforce_append_only'
+          AND NOT EXISTS (SELECT 1 FROM unnest(coalesce(p.proconfig, ARRAY[]::text[])) c WHERE c LIKE 'search\_path=%')) THEN
+    RAISE EXCEPTION 'FAO-GOV-015 grants assertion failed: public.shadow_ledger_enforce_append_only() without a pinned search_path'
       USING ERRCODE = '42501';
   END IF;
 

@@ -89,6 +89,49 @@ test('Check Finalize Result never echoes a code or id outside their formats', as
   }
 });
 
+// Round 5 (red team r4 item 2): fao_run_finalize answers ok:true with state
+// FAILED for AUDIT_CHAIN_MISMATCH (0014: COMMIT_BLOCKED written, run FAILED).
+// That run was not committed either, so the gate fails the execution with
+// the same fixed message; only COMMITTED and AWAITING_HITL pass.
+test('Check Finalize Result fails on ok:true with state FAILED and on any state outside COMMITTED and AWAITING_HITL', async () => {
+  const chain = { ...COMMITTED, ok: true, code: 'AUDIT_CHAIN_MISMATCH', committed_ledger_id: null, state: 'FAILED' };
+  const cases = [
+    [[{ r: chain }], MSG('AUDIT_CHAIN_MISMATCH')],
+    [[{ r: { ...COMMITTED, state: 'FAILED' } }], MSG('OK')],
+    [[{ r: { ...COMMITTED, state: 'RUNNING' } }], MSG('OK')],
+    [[{ r: { ...COMMITTED, state: 'EXPIRED' } }], MSG('OK')],
+    [[{ r: { ...COMMITTED, state: 'committed' } }], MSG('OK')],
+    [[{ r: { ...COMMITTED, state: undefined } }], MSG('OK')],
+    [[{ r: { ...COMMITTED, state: null } }], MSG('OK')],
+    [[{ r: { ...AWAITING, state: ['AWAITING_HITL'] } }], MSG('OK')],
+  ];
+  for (const [items, msg] of cases) {
+    await assert.rejects(gate(items), (e) => {
+      assert.equal(e.message, msg, JSON.stringify(items));
+      return true;
+    });
+  }
+});
+
+test('check-exports refuses a Check Finalize Result without the state check', () => {
+  const rule = RULES.find((r) => r.id === 'section4_nodes');
+  const base = JSON.parse(readFileSync(join(WORKFLOWS, WF), 'utf8'));
+  const run = (edit) => {
+    const wf = structuredClone(base);
+    const n = wf.nodes.find((x) => x.name === NODE);
+    n.parameters.jsCode = edit(n.parameters.jsCode);
+    return rule.run({ file: WF, wf });
+  };
+  const re = /must throw unless r\.state is COMMITTED or AWAITING_HITL/;
+  assert.deepEqual(run((c) => c), [], 'the export passes');
+  const noState = run((c) => c.replace(' || !PASS_STATES.includes(r.state)', ''));
+  assert.ok(noState.some((v) => re.test(v)), noState.join('; '));
+  const wider = run((c) => c.replace("['COMMITTED', 'AWAITING_HITL']", "['COMMITTED', 'AWAITING_HITL', 'FAILED']"));
+  assert.ok(wider.some((v) => re.test(v)), wider.join('; '));
+  const commented = run((c) => c.replace('if (!r || r.ok !== true || !PASS_STATES.includes(r.state)) {', '// || !PASS_STATES.includes(r.state)\nif (!r || r.ok !== true) {'));
+  assert.ok(commented.some((v) => re.test(v)), commented.join('; '));
+});
+
 test('Check Finalize Result passes COMMITTED and AWAITING_HITL results through unchanged', async () => {
   for (const r of [COMMITTED, AWAITING]) {
     const out = await gate([{ r }]);

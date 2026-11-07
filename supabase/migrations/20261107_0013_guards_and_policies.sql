@@ -13,6 +13,10 @@
 --    workflow role reads thresholds; no client write policy remains.
 -- 4. Attaches the generic triggers from 0011: no TRUNCATE on every FinAgent
 --    table, change reason and admin audit on configuration tables, updated_at.
+-- Round 5: the member read policy and the append-only triggers on
+-- workflow_failures (K1); the v1 append-only trigger function's search_path
+-- pinned (B-28); the hitl_queue catalog comments rewritten for the current
+-- controls (F-09).
 --
 -- Control IDs implemented:
 --   FAO-GOV-001  no TRUNCATE for any role (the owner included, unless the
@@ -426,6 +430,16 @@ CREATE POLICY "FAO members read hitl_queue"
   TO authenticated
   USING (fao_private.has_any_role((select auth.uid())));
 
+-- F-09 (round 5): the 0005 catalog comments described the v1 controls (SoD
+-- in the RLS layer, an RLS WITH CHECK on approver_id), which this file
+-- replaces. The catalog now describes the controls in force.
+COMMENT ON TABLE public.hitl_queue IS
+  'FAO-GOV-004: human-approval requests, one per run that needs review. Members read under RLS (has_any_role); no client role holds a write grant and there is no write policy. Requests are opened only by fao_private.create_request inside fao_run_finalize and decided only through fao_hitl_decide; the row guard (fao_private.hitl_queue_guard_row) holds for every role, the owner included, and the CHECK hitl_no_self_approval keeps approver_id <> agent_invoker_id. DELETE is refused; decided rows are frozen.';
+COMMENT ON COLUMN public.hitl_queue.agent_invoker_id IS
+  'FAO-GOV-004: the process owner who started the run (run_invocations.invoker_id, from the session at fao_run_start). The row guard and the CHECK hitl_no_self_approval refuse this identity as the approver.';
+COMMENT ON COLUMN public.hitl_queue.approver_id IS
+  'FAO-GOV-004: NULL until decided. Set only by fao_hitl_decide to the signed-in session user, who must hold the approver role for the agent and must not be the invoker (row guard fao_private.hitl_queue_guard_row and CHECK hitl_no_self_approval). Stays NULL on EXPIRED.';
+
 -- ----------------------------------------------------------------------------
 -- 7. Policies on shadow_ledger (FAO-GOV-001): members read; no write policy.
 -- ----------------------------------------------------------------------------
@@ -439,6 +453,12 @@ CREATE POLICY "FAO members read shadow_ledger"
   TO authenticated
   USING (fao_private.has_any_role((select auth.uid())));
 
+-- B-28 (round 5): the v1 append-only trigger function (0004) is the one
+-- function in public or fao_private without a pinned search_path. Its body
+-- names no relation or function, so an empty search_path changes nothing it
+-- does; pinning it closes the gap the 010 pin checks missed.
+ALTER FUNCTION public.shadow_ledger_enforce_append_only() SET search_path = '';
+
 COMMENT ON FUNCTION public.shadow_ledger_enforce_append_only() IS
   'FAO-GOV-001: trigger function that raises on UPDATE or DELETE against shadow_ledger. It refuses every application role and the owner in normal operation; the table owner can disable triggers, which is outside the control (owner trust class). New rows are written only by the FinAgent database functions.';
 
@@ -447,6 +467,14 @@ COMMENT ON FUNCTION public.shadow_ledger_enforce_append_only() IS
 -- ----------------------------------------------------------------------------
 CREATE POLICY "FAO members read run_invocations"
   ON public.run_invocations
+  FOR SELECT
+  TO authenticated
+  USING (fao_private.has_any_role((select auth.uid())));
+
+-- Round 5 (K1): workflow failures that attach to no run; members read them
+-- like run_invocations (the MCP reader included). No write policy.
+CREATE POLICY "FAO members read workflow_failures"
+  ON public.workflow_failures
   FOR SELECT
   TO authenticated
   USING (fao_private.has_any_role((select auth.uid())));
@@ -551,6 +579,16 @@ CREATE TRIGGER run_tokens_deny_truncate
   FOR EACH STATEMENT EXECUTE FUNCTION fao_private.deny_truncate();
 CREATE TRIGGER test_clock_deny_truncate
   BEFORE TRUNCATE ON fao_private.test_clock
+  FOR EACH STATEMENT EXECUTE FUNCTION fao_private.deny_truncate();
+
+-- FAO-GOV-001 (round 5, K1): workflow_failures is append-only like the
+-- journal, audit and notification tables (0011): no UPDATE, DELETE or
+-- TRUNCATE for any role, the owner included.
+CREATE TRIGGER workflow_failures_append_only
+  BEFORE UPDATE OR DELETE ON public.workflow_failures
+  FOR EACH ROW EXECUTE FUNCTION fao_private.deny_row_mutation();
+CREATE TRIGGER workflow_failures_deny_truncate
+  BEFORE TRUNCATE ON public.workflow_failures
   FOR EACH STATEMENT EXECUTE FUNCTION fao_private.deny_truncate();
 
 -- FAO-GOV-002: configuration tables need a change reason (statement level)

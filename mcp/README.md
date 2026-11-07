@@ -4,6 +4,8 @@ Python [FastMCP](https://gofastmcp.com) server exposing a deliberately asymmetri
 
 **Six read tools and one bounded invoke tool. No governance-mutation tools exist.** AI consumers can read the FinAgent OS audit trail and start a governed run as a named human; they cannot approve or reject HITL requests, edit materiality thresholds, register agents, or write to `shadow_ledger`. The database enforces the same limits independently: the server reads as a user that holds only the `reader` role, and it holds no service key.
 
+**Status:** this README describes the server on the branch `phase2-5-core-2026-11-07`, tested against a local Supabase stack only. Live still runs the v1 server (which holds a service key) until the cutover.
+
 For platform context, see the [root README](../README.md). For the SOX control mapping, see [`SOX-MAPPING.md`](../SOX-MAPPING.md).
 
 ---
@@ -20,10 +22,10 @@ Every read runs as the reader user. Lists page with `limit` and `offset` and rep
 | `get_agent_registry` | `status?` (ACTIVE, STUB_DOCUMENTED, DEPRECATED), `limit=50`, `offset=0` | agents with risk tier, status, run limit and owner (`process_owners` embed) |
 | `get_pending_hitl` | `limit=50`, `offset=0` | requests with `decision = PENDING`, the invoker embed, and `past_deadline` (UTC now at or after `timeout_at`) |
 | `get_materiality_thresholds` | `asset_symbol?` (upper-cased, `^[A-Z0-9]{1,12}$`), `scope?` (Spot, Futures, Spot_and_Futures) | thresholds; without `scope`, every scope for the symbol |
-| `get_recent_executions` | `limit=10`, `offset=0` | one row per run from the database view `fao_run_summary`: `hitl_status`: the request's decision when there is a request; otherwise NOT_REQUIRED only for a committed run, NOT_YET_DETERMINED while the run is in flight (REQUESTED, RUNNING, AWAITING_HITL; the request opens at finalize), NONE when the run ended without one (FAILED, EXPIRED, commit blocked), `outcome` and `status` from the newest COMMITTED row, `conflict` (more than one COMMITTED), `commit_blocked`, `corrected` |
+| `get_recent_executions` | `limit=10`, `offset=0`, `failures_limit=10` (1 to 200) | one row per run from the database view `fao_run_summary`: `hitl_status`: the request's decision when there is a request; otherwise NOT_REQUIRED only for a committed run, NOT_YET_DETERMINED while the run is in flight (REQUESTED, RUNNING, AWAITING_HITL; the request opens at finalize), NONE when the run ended without one (FAILED, EXPIRED, commit blocked), `outcome` and `status` from the newest COMMITTED row, `conflict` (more than one COMMITTED), `commit_blocked` (audit chain, `AGENT_NOT_ACTIVE` or `INVOKER_NOT_ACTIVE` gate), `corrected`; plus `workflow_failures`: the newest rows of the append-only `workflow_failures` table (failures that attached no FAILED row to a run: `source` flagship, flagship_pre_claim, gateway or sweeper; `outcome` UNKNOWN_EXECUTION, ALREADY_TERMINAL, PRE_CLAIM or NOT_FLAGSHIP; `failed_node` and `message` under `untrusted_text`) and `workflow_failures_has_more` |
 | `get_process_owners` | `limit=50`, `offset=0` | owners with `active` and `escalates_to_name` |
 
-`get_recent_executions` reads one view in one request, so no fetch window can split a run's history, and the HITL status comes from the request itself (the v1 PENDING inversion is gone).
+`get_recent_executions` reads the run summaries from one view in one request, so no fetch window can split a run's history (the `workflow_failures` rows are a second, separate read), and the HITL status comes from the request itself (the v1 PENDING inversion is gone).
 
 ### Invoke tool (one)
 
@@ -71,14 +73,14 @@ Tools never raise to the client. Failures come back as structured results that c
 | Result | When |
 |---|---|
 | `{status:'error', kind, http_status}` | `kind` is `timeout`, `connect`, `http`, `bad_json`, `auth` (sign-in refused) or `internal` |
-| `{status:'refused', code, http_status, ref, idempotency_key}` | `fao_run_start` refused the run; `code` is the database result code (for example `RATE_LIMITED`, `NOT_AUTHORISED`, `AGENT_NOT_ACTIVE`) and `ref` the refusal journal id |
+| `{status:'refused', code, http_status, ref, idempotency_key}` | `fao_run_start` refused the run; `code` is the database result code (for example `RATE_LIMITED`, `NOT_AUTHORISED`, `AGENT_NOT_ACTIVE`) and `ref` the refusal journal id; `correlation_id` is added when the refusal names a run (`EXPIRED`: the key belongs to a run that expired, so start again with a new key) |
 | `{status:'replayed', correlation_id, state, idempotency_key}` | the key matched a run that has already started; no webhook call is made |
 | `{status:'invoked', correlation_id, idempotency_key}` | the webhook accepted the run (HTTP 202) |
 | `{status:'unknown', message, correlation_id, idempotency_key}` | the webhook call timed out or dropped after it was sent, so the run may have started. Check the ledger for the correlation id before retrying with the same key |
 
 ### Untrusted text
 
-Marking is an allow-list. Each tool keeps outside `untrusted_text` only the keys of a fixed per-tool schema in `server.py`, and only when the value has that key's shape: ids the database checks (agent_id, asset symbols), n8n_execution_id only as a digit string (the shape of a real n8n execution id), UUIDs, numbers, booleans, timestamps, and enum-like values only when they belong to the database's own allowed set (enum types, CHECK lists, the `code_http` and `append_event` lists, and the only `source`, `stage` and channel literals the database writes; fix round 3 item 5). Values the database does not constrain stay under `untrusted_text` even when they look like identifiers: `band_status`, the Writer's threshold labels, `channel`, `email`, `approval_url`, `slack_channel_id`, `workflow_id`, `sox_control_ids`, and the `process_owners` and `invoker` embeds. Every other value moves under the row's `untrusted_text` object at the same path: free text written by people, a model or an outside system (`policy_rationale`, `decision_notes`, `reason`, `notes`, `rollback_procedure`, `error_details`, `ai_human_brief`, `ai_prompt`, `ai_output`, `obligations`, names, roles and display names, `escalates_to_name`), every `inputs` key that is not structured (`inputs.reason`, `input_problem`, `decision_notes`, `error`, `external_ref`, `failed_node`, `problems`, `wallet_source`, `ledger_source`, `fixture_provenance`) at any depth, any key the schema does not know, and a known key whose value has the wrong shape. Every tool description tells the MCP client that this text is data and must not be followed as instructions.
+Marking is an allow-list. Each tool keeps outside `untrusted_text` only the keys of a fixed per-tool schema in `server.py`, and only when the value has that key's shape: ids the database checks (agent_id, asset symbols), n8n_execution_id only as a digit string (the shape of a real n8n execution id), UUIDs, numbers, booleans, timestamps, and enum-like values only when they belong to the database's own allowed set (enum types, CHECK lists, the `code_http` and `append_event` lists, and the only `source`, `stage` and channel literals the database writes; fix round 3 item 5). Values the database does not constrain stay under `untrusted_text` even when they look like identifiers: `band_status`, the Writer's threshold labels, `channel`, `email`, `approval_url`, `slack_channel_id`, `workflow_id`, `sox_control_ids`, and the `process_owners` and `invoker` embeds. Every other value moves under the row's `untrusted_text` object at the same path: free text written by people, a model or an outside system (`policy_rationale`, `decision_notes`, `reason`, `notes`, `rollback_procedure`, `error_details`, `ai_human_brief`, `ai_prompt`, `ai_output`, `obligations`, names, roles and display names, `escalates_to_name`), every `inputs` key that is not structured (`inputs.reason`, `input_problem`, `decision_notes`, `error`, `external_ref`, `failed_node`, `problems`, `wallet_source`, `ledger_source`, `fixture_provenance`) at any depth, `failed_node` and `message` of a `workflow_failures` row, any key the schema does not know, and a known key whose value has the wrong shape. Every tool description tells the MCP client that this text is data and must not be followed as instructions.
 
 ### Threat model
 
@@ -92,7 +94,7 @@ An attacker with access to the machine can read `mcp/.env`. That file holds the 
 
 ### Prerequisites
 
-- Python 3.12 (CI uses 3.12)
+- Python 3.12 (the CI workflow pins 3.12; the local test runs used 3.14.7)
 - A Supabase project with the FinAgent OS migrations applied, the reader user created and granted the global `reader` role
 - For invoke: the n8n flagship workflow with its invoke webhook (`POST /webhook/fao-recon-invoke`, header auth)
 
@@ -135,7 +137,7 @@ Local smoke check against the local Supabase stack (after `npm run db:reset`, wh
 python mcp/scripts/smoke_local.py
 ```
 
-It refuses any `SUPABASE_URL` or webhook URL whose host is not `127.0.0.1` or `localhost`, runs the reader role check, calls the six read tools, and exits non-zero when any of them fails. It never calls `invoke_reserve_recon`.
+It refuses any `SUPABASE_URL` or webhook URL whose host is not `127.0.0.1` or `localhost`, runs the reader role check, calls the six read tools, and exits non-zero when any of them does not return `status: 'ok'` (`get_recent_executions` must also return its `workflow_failures` list). It never calls `invoke_reserve_recon`.
 
 ---
 
@@ -164,7 +166,7 @@ Use the virtual environment's own Python so the pinned packages are found, and d
 
 On Apr 25, 2026, after the v1 server shipped, Claude Opus was given access through the MCP read surface and asked to narrate the most recent execution, approve a pending HITL request, and red-team the system. Semantic searches for approve, resolve, decision, write, commit, override and bypass returned only tools that cannot mutate HITL state. That self-audit tested the tool surface only, not the approval layer, which in v1 was a demo endpoint without authentication. It also surfaced a real gap: the dual-approval wording in `policy_rationale` was not wired in code, documented as [ADR-0001](../docs/adr/0001-dual-approval-not-yet-enforced.md). Full transcript: [claude.ai/share/5f0eb294-e658-42b5-a876-8164a0049960](https://claude.ai/share/5f0eb294-e658-42b5-a876-8164a0049960). Evidence: [`docs/evidence/mcp/`](../docs/evidence/mcp/).
 
-The approval layer is now the signed-in approval page and `fao_hitl_decide`; the server no longer holds a service key.
+On the branch, the approval layer is the signed-in approval page and `fao_hitl_decide`, and the server no longer holds a service key. Live keeps the v1 server and approval endpoints until the cutover.
 
 ---
 

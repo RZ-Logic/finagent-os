@@ -22,6 +22,13 @@
 --   - Running this seed more than once will fail on the UNIQUE(email)
 --     constraint. That is intentional — seeds are one-time, not
 --     idempotent. If you need to re-seed, TRUNCATE process_owners first.
+--   - WARNING: process_owners is referenced by agent_registry,
+--     shadow_ledger, hitl_queue and materiality_thresholds, so a bare
+--     TRUNCATE fails and only TRUNCATE ... CASCADE succeeds. CASCADE also
+--     empties all four, including shadow_ledger and hitl_queue, which
+--     erases audit evidence.
+--     Re-seed only a fresh database; never re-seed one that holds
+--     evidence.
 --
 -- Escalation hierarchy:
 --   Aisha Okonkwo  (FP&A Lead)   →  Sarah Chen  (Controller)

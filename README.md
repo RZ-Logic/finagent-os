@@ -12,7 +12,7 @@
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge" alt="License: MIT"/></a>
   <a href="https://n8n.io"><img src="https://img.shields.io/badge/Built_with-n8n-EA4B71?style=for-the-badge&logo=n8n&logoColor=white" alt="n8n"/></a>
   <a href="https://supabase.com"><img src="https://img.shields.io/badge/Database-Supabase-3FCF8E?style=for-the-badge&logo=supabase&logoColor=white" alt="Supabase"/></a>
-  <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-Verified-blueviolet?style=for-the-badge" alt="MCP Verified"/></a>
+  <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-Self_Audited-blueviolet?style=for-the-badge" alt="MCP Self-Audited"/></a>
   <img src="https://img.shields.io/badge/AI_Authority-None_(v1)-2A9D4A?style=for-the-badge" alt="AI Authority: None"/>
   <img src="https://img.shields.io/badge/Status-v1.0-orange?style=for-the-badge" alt="Status v1.0"/>
 </p>
@@ -36,9 +36,9 @@
 
 I'm an ACCA with audit roots who pivoted into AI automation architecture. Working in audit, you learn quickly that *"the policy says X"* and *"the code does X"* are different sentences, and the second one is the only one that matters when the regulator shows up.
 
-When I started designing AI agents for finance operations, the same gap kept appearing. *"The LLM is in the loop but the human is the final decision-maker"* is documentation, not architecture. So I built FinAgent OS: a platform where the SOX-defensible properties (append-only audit, segregation of duties, AI non-authority) are enforced by Postgres triggers and missing-by-design tool surfaces, not by trust in policy text.
+When I started designing AI agents for finance operations, the same gap kept appearing. *"The LLM is in the loop but the human is the final decision-maker"* is documentation, not architecture. So I built FinAgent OS: a platform where the SOX-defensible properties (append-only audit, segregation of duties, AI non-authority) are enforced in code, by Postgres triggers and an AI tool surface with no mutation tools, rather than by policy text. That enforcement has known gaps in v1, listed under [Known Limitations](#-known-limitations).
 
-The flagship workflow is a Reserve Reconciliation Agent calibrated to crypto-exchange Proof-of-Reserves work, with Kraken's published Dec 2025 PoR as the reference implementation. The platform beneath it is what makes the flagship safe to ship.
+The flagship workflow is a Reserve Reconciliation Agent calibrated to crypto-exchange Proof-of-Reserves work, with Kraken's published Dec 2025 PoR as the reference implementation. The platform beneath it supplies the flagship's audit, approval and registry controls; their v1 gaps are listed under Known Limitations.
 
 ---
 
@@ -46,11 +46,11 @@ The flagship workflow is a Reserve Reconciliation Agent calibrated to crypto-exc
 
 > **AI is optional and non-authoritative. Policy decisions are deterministic.**
 
-Every material financial decision in FinAgent OS is enforced by deterministic rules: Postgres triggers, n8n IF nodes, JS decision matrices that an auditor can read top-to-bottom. AI assists human judgment at narrative boundaries (summarizing decisions for human approvers, surfacing drift signals in retrospective audits). AI never produces a control outcome.
+Every material financial decision in FinAgent OS is enforced by deterministic rules: Postgres triggers, n8n IF nodes, JS decision matrices that an auditor can read top-to-bottom. From v1.1, AI assists human judgment at narrative boundaries (summarizing decisions for human approvers, surfacing drift signals in retrospective audits). AI never produces a control outcome.
 
 The complete enumeration, with every decision point in the system classified deterministic vs. advisory, lives in **[`SOX-MAPPING.md`](./SOX-MAPPING.md)** under the *"Where is the AI?"* table.
 
-**The empirical proof:** setting `FAO_AI_ASSIST_ENABLED=false` does not change a single policy outcome. Only the human-readable narratives go missing. With AI off, every decision in the repo is reproducible by reading the migration files.
+**What v1 shows:** no AI call exists anywhere in the v1 policy path, and `agent_registry.ai_advisory_enabled` defaults to FALSE. The `FAO_AI_ASSIST_ENABLED` flag that will gate the v1.1 advisory layer is not yet wired. Every v1 decision is reproducible by reading the migration files, seeds and the flagship workflow.
 
 ---
 
@@ -63,16 +63,16 @@ After the MCP server shipped, **Claude Opus** was given access to the FinAgent O
 
 Two outcomes worth highlighting.
 
-### The architecture held under adversarial probe
+### The MCP tool surface held under a self-audit probe
 
-Three semantic searches across `approve / resolve / decision`, `write / commit / override / bypass`, and `resolve / set status / sign` all returned the same five tools, **none of which mutate HITL state**. Defense in depth across four independent layers held: missing endpoint → bounded write tool → channel separation between MCP and Slack-based approvals → database-level SoD trigger.
+Three semantic searches across `approve / resolve / decision`, `write / commit / override / bypass`, and `resolve / set status / sign` all returned the same five tools, **none of which mutate HITL state**. This is a self-audit of the MCP tool surface: an AI on the MCP channel has no tool that approves, resolves or overrides a HITL request. Claude's narrative below also credits channel separation and the database SoD trigger as further layers. The probe did not test the approval endpoints or the database directly, so it is evidence about the MCP tool surface only, not an independent test of those layers.
 
 > *"I cannot reach the approval state. Not because I'm refusing — because the surface doesn't exist. Defense in depth held: missing endpoint → bounded write tool → channel separation → DB trigger. Any one of those alone would have stopped this; you have four."*
 > *Claude Opus, Apr 25, 2026 audit*
 
 ### The audit surfaced a real control gap, on first contact
 
-While narrating the most recent execution, Claude observed that `agent_registry.approval_threshold = 2` for RED-tier agents, and the `policy_rationale` text claimed *"Controller + CFO review required"*, but the HITL trigger only enforced `approver_id ≠ agent_invoker_id`. Single-approver SoD held; **dual-approval was named in documentation but not wired in code**.
+While narrating the most recent execution, Claude observed that `agent_registry.approval_threshold = 2` for RED-tier agents, and the `policy_rationale` text claimed *"Controller + CFO review required"*, but the HITL trigger only enforced `approver_id ≠ agent_invoker_id`. The single-approver check was wired; **dual-approval was named in documentation but not wired in code**.
 
 <p align="center">
   <img src="docs/evidence/mcp/mcp_03_dual_approval_gap_surfaced.png" alt="MCP self-audit surfacing dual-approval gap" width="800"/>
@@ -89,11 +89,12 @@ Full evidence preserved at [`docs/evidence/mcp/`](./docs/evidence/mcp/).
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                                                                          │
-│   One typical HITL-gated execution writes 11 audit rows:                 │
+│   One typical HITL-gated execution writes 11 audit rows (evidence run):  │
 │                                                                          │
 │     STARTED                  ← agent invocation, scope captured          │
 │       │                                                                  │
-│       ├─ ASSET_RECONCILED   ← BTC: ratio 1.003, IN_BAND, ALLOW          │
+│       ├─ ASSET_RECONCILED   ← BTC: ratio 1.003, BELOW_BAND_LOWER,        │
+│       │                       ALLOW_WITH_OBLIGATIONS                     │
 │       ├─ ASSET_RECONCILED   ← ETH: ratio 1.013, IN_BAND, ALLOW          │
 │       ├─ ASSET_RECONCILED   ← USDC: clean baseline, ALLOW                │
 │       ├─ ASSET_RECONCILED   ← USDT: USD-material breach, REQUIRE_HUMAN   │
@@ -102,13 +103,15 @@ Full evidence preserved at [`docs/evidence/mcp/`](./docs/evidence/mcp/).
 │       └─ ASSET_RECONCILED   ← ADA: negative ledger, REQUIRE_HUMAN/CRIT   │
 │                                                                          │
 │     HITL_REQUESTED          ← worst-asset rollup → CRITICAL HITL queue   │
-│     HITL_RESOLVED           ← Sarah Chen approves; SoD trigger validates │
+│     HITL_RESOLVED           ← approver named in request (Sarah Chen);    │
+│                                SoD trigger checks approver ≠ invoker     │
 │     COMMITTED               ← single COMMITTED row with three facts:     │
 │                                policy_outcome · hitl_status · status     │
 │                                                                          │
-│   Every row carries a single correlation_id. Every row is append-only,   │
-│   enforced by a Postgres trigger that rejects UPDATE/DELETE for every    │
-│   identity including service_role and superusers.                        │
+│   Every row carries a single correlation_id. Rows are append-only for    │
+│   application roles: a Postgres trigger rejects UPDATE/DELETE. It does   │
+│   not cover TRUNCATE, the table owner or forged inserts, so it is not    │
+│   administrator-proof.                                                   │
 │                                                                          │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
@@ -117,7 +120,7 @@ Full evidence preserved at [`docs/evidence/mcp/`](./docs/evidence/mcp/).
 
 | Component | What it is | Role of AI |
 |-----------|-----------|:-:|
-| **Platform governance layer** | 8 Postgres migrations + 3 seed files. 14 `FAO-GOV-*` controls. | None |
+| **Platform governance layer** | 10 Postgres migrations + 3 seed files. 15 `FAO-GOV-*` controls. | None |
 | **Reserve Reconciliation Agent** (flagship) | n8n workflow. RED-tier. FAO-REC-001 → 009. Owner: Sarah Chen. | None |
 | **Three stub agents** | Close Orchestrator (AMBER), Variance Analyzer (AMBER), Treasury Monitor (RED). Registered before built. | None |
 | **MCP server** | Python FastMCP. 6 read tools + 1 bounded invoke. **No mutation tools by design.** | Read access only |
@@ -132,9 +135,9 @@ Full control matrix lives in [`SOX-MAPPING.md`](./SOX-MAPPING.md).
 
 The agent reconciles wallet holdings (Fireblocks proxy) against ledger liabilities (NetSuite proxy) across **7 crypto assets**. Fixtures break down into three groups:
 
-- **4 calibrated to Kraken's published Dec 2025 Proof of Reserves.** BTC, ETH, and XRP wallet/ledger pairs reproduce the published ratios (BTC 100.3%, ETH 101.3%, XRP 100.6%), anchoring the agent against real exchange disclosures. USDC is the clean baseline.
-- **3 synthetic anomalies, each tagged to the control it exercises.** USDT triggers FAO-REC-002 (stablecoin USD-materiality breach). SOL triggers FAO-REC-004 (under-reservation floor). ADA triggers FAO-REC-007 (negative-liability anomaly per the [krakendb 2014 reference](https://github.com/krakenfx/krakendb)).
-- **Provenance threaded into every audit row.** `inputs.fixture_metadata` records which asset is calibrated, which is synthetic, and which control each anomaly was designed to exercise.
+- **3 calibrated to Kraken's published Dec 2025 Proof of Reserves.** BTC, ETH, and XRP wallet/ledger pairs reproduce the published ratios (BTC 100.3%, ETH 101.3%, XRP 100.6%), anchoring the agent against real exchange disclosures.
+- **1 synthetic clean baseline plus 3 synthetic anomalies, each anomaly tagged to the control it exercises.** USDC is the clean baseline. USDT triggers FAO-REC-002 (stablecoin USD-materiality breach). SOL triggers FAO-REC-004 (under-reservation floor). ADA triggers FAO-REC-007 (negative-liability anomaly per the [krakendb 2014 reference](https://github.com/krakenfx/krakendb)).
+- **Provenance recorded at the run level.** The STARTED row's `inputs.fixture_provenance` records which asset is calibrated, which is synthetic, and which control each anomaly was designed to exercise. Per-asset `ASSET_RECONCILED` rows do not carry it in v1.
 
 The decision matrix is deterministic: 7 rules evaluated top-down, first match wins. No LLM in the policy path.
 
@@ -148,9 +151,9 @@ The decision matrix is deterministic: 7 rules evaluated top-down, first match wi
 | Workflow orchestration | n8n (self-hosted, DigitalOcean) | Visual policy logic auditors can read; sub-workflows for governance enforcement boundaries |
 | AI advisory (gated, v1.1) | Claude API | Plain-English narrative summaries for human approvers; never on the authority path |
 | MCP server | Python 3.12 + FastMCP | Read + bounded-invoke surface for AI consumers; stdio transport in v1 |
-| HITL approval channel | Slack (link → POST `fao_hitl_resolve`) | Channel-separated from MCP; intentional defense-in-depth boundary |
+| HITL approval channel | Slack (link → POST `fao_hitl_resolve`) | Separate from the MCP surface, which has no tool that calls it. Demo only in v1: unauthenticated and not hardened for production |
 | Approval enforcement | Postgres `BEFORE UPDATE` trigger (`hitl_queue_sod_guard`) | Loud named exception on SoD violation; sole enforcer (see Migration 0005c) |
-| Append-only enforcement | Postgres `BEFORE UPDATE/DELETE` trigger (`shadow_ledger_append_only_guard`) | Catches every identity including service_role and superusers |
+| Append-only enforcement | Postgres `BEFORE UPDATE/DELETE` trigger (`shadow_ledger_append_only_guard`) | Blocks UPDATE and DELETE for application roles; does not cover TRUNCATE, the table owner or forged inserts, so not administrator-proof |
 
 **No infrastructure novelty.** Everything in this stack is off-the-shelf. The contribution is the application layer: domain-specific governance for SOX-regulated crypto-finance, not the underlying tools.
 
@@ -174,14 +177,14 @@ Total: ~20 minutes for a read of how the platform works and what's shipped vs. r
 
 | Principle | How it works |
 |-----------|--------------|
-| **Append-only is a database constraint, not a convention** | Postgres trigger raises a named exception on UPDATE/DELETE against `shadow_ledger`. Catches every identity: authenticated users, `service_role`, superusers. RLS provides a second layer (no UPDATE/DELETE policy → default-deny). |
-| **AI never on the authority path** | Policy outcomes are computed by deterministic rules. AI produces narrative *after* the decision is made and recorded. With `FAO_AI_ASSIST_ENABLED=false`, every policy outcome is identical; only narratives go missing. |
-| **The Agent Registry is the gate** | No agent executes without a row specifying risk tier, named process owner, SOX control IDs, rollback procedure, and data sources. Stubs exist in the registry to prove the framework precedes the code. |
+| **Append-only is a database constraint, not a convention** | Postgres trigger raises a named exception on UPDATE/DELETE against `shadow_ledger` for application roles. RLS provides a second layer (no UPDATE/DELETE policy → default-deny). It does not cover TRUNCATE, the table owner or forged inserts, so it is not administrator-proof. |
+| **AI never on the authority path** | Policy outcomes are computed by deterministic rules. v1 makes no AI calls; from v1.1, AI produces narrative *after* the decision is made and recorded, so policy outcomes do not depend on it. |
+| **The Agent Registry gates HITL request creation** | Ledger rows and HITL requests need a registered `agent_id` (foreign key), and HITL creation takes its SLA from the registry row, so an agent with no SLA cannot open a HITL request. Agent status and risk tier are not checked at runtime in v1. Each registry row specifies risk tier, named process owner, SOX control IDs, rollback procedure, and data sources. Stubs exist in the registry to show the framework precedes the code. |
 | **Loud rejection > silent rejection** | SoD enforcement is a Postgres trigger raising `FAO-GOV-004: ...` exceptions, not an RLS policy that returns zero rows. Migration 0005c restructured this deliberately: silent rejection is weaker audit posture than loud, attributed exception. |
-| **Channel separation defends in depth** | The MCP surface and the Slack approval surface share no transport. AI on the MCP channel has no path to the approval endpoint regardless of reasoning. |
+| **Channel separation defends in depth** | The MCP surface and the Slack approval surface share no transport, and no MCP tool calls the approval endpoint. This is a property of the MCP tool surface only: the approval endpoints are demo only in v1, unauthenticated and not hardened for production. |
 | **No mutation tools on the AI surface** | The MCP server has six read tools and one bounded invoke. There is no `approve_hitl`, no `update_threshold`, no `register_agent`. The asymmetry IS the architecture. |
 | **Documented gaps and preserved iteration history** | Known gaps (ADR-0001) ship publicly with roadmap entries. The git history of Migration 0005 → 0005b → 0005c is preserved as evidence of how SoD enforcement evolved. |
-| **Risk-tier classification before build** | Every agent is GREEN/AMBER/RED before code is written. RED tier agents require 2 approvers (state-machine wiring on roadmap; see ADR-0001). |
+| **Risk-tier classification before build** | Every agent is GREEN/AMBER/RED before code is written. RED tier agents are configured for 2 approvers (`approval_threshold = 2`), but v1 enforces one approver; dual-approval wiring is on the roadmap (see ADR-0001). |
 
 ---
 
@@ -195,7 +198,7 @@ The HITL approval flow originally used a single endpoint that accepted approval 
 
 The first time I posted an HITL request to `#fao-approvals`, every queued item was approved within seconds. No human had clicked anything. Looking at `hitl_queue` showed `approver_id` stamped with the right Controller's UUID and `decided_at` timestamps clustered at the message-post time.
 
-**Slack's link-unfurling bot was walking every URL in the message to generate previews.** A GET request that mutates state is functionally an open invitation to any well-meaning crawler. Fixed by splitting HTTP semantics: GET to that endpoint now renders a confirmation form; POST is the mutation. The Slack expander hits the GET, sees a form, leaves the row alone. The CSRF defense layer added on top closes the cross-origin POST surface.
+**Slack's link-unfurling bot was walking every URL in the message to generate previews.** A GET request that mutates state is functionally an open invitation to any well-meaning crawler. Fixed by splitting HTTP semantics: GET to that endpoint now renders a confirmation form; POST is the mutation. The Slack expander hits the GET, sees a form, leaves the row alone. The split stops link previewers from changing state; it is not an authorization control. CSRF tokens are not implemented, and the approval endpoints are demo only: unauthenticated and not hardened for production.
 
 > **The principle:** HTTP verbs aren't aesthetic. GET is for reads: link previewers, search engines, and accidental retries depend on that. The moment a GET mutates state, your security model includes every entity that ever follows a link.
 
@@ -223,9 +226,9 @@ Collapsed into a single `ASSET_RECONCILED` event per asset that captures wallet,
 
 Considered: every n8n agent writes directly to `shadow_ledger` via the Postgres node. Simple, fewer moving parts.
 
-Decided: centralized "Writer" sub-workflow that every caller routes through. The Writer validates the 17-field payload structure, enforces required-field presence, and only then performs the INSERT.
+Decided: centralized "Writer" sub-workflow that every caller routes through. The Writer normalizes a 17-field payload: it checks that the 7 required fields are present and that enum and UUID fields are well formed, fills the 10 optional fields with defaults, and only then performs the INSERT.
 
-Why: the Writer is the application-layer enforcement boundary for FAO-GOV-001. The Postgres trigger catches any UPDATE/DELETE attempt against `shadow_ledger` regardless of how it arrives. That's the database-layer enforcement. Putting structural validation at the application boundary (above the DB) means the trigger doesn't need to do double duty as a schema validator. Defense in depth at *different* layers: the Writer enforces structural correctness, the DB trigger enforces immutability.
+Why: the Writer is the single n8n insert path for `shadow_ledger`, so structural checks live in one place. It does not stop other database clients from inserting rows directly (see Control gaps in v1). The Postgres trigger rejects UPDATE/DELETE attempts against `shadow_ledger` from application roles, whichever path they arrive by. That's the database-layer enforcement of FAO-GOV-001. Putting structural validation at the application boundary (above the DB) means the trigger doesn't need to do double duty as a schema validator. Defense in depth at *different* layers: the Writer checks structure for n8n callers, the DB trigger blocks row changes.
 
 The Writer is plumbing because it has no policy logic of its own. It doesn't decide outcomes; it persists them. Putting it in the agent registry would be miscategorization: agents are control-bearing entities; the Writer is a centralized utility.
 
@@ -249,6 +252,19 @@ Rejected for `agent_registry.agent_id`. The agent_id appears in n8n workflow ref
 
 The gaps a reviewer would find in v1 are surfaced below.
 
+### Control gaps in v1
+
+These gaps in the v1 controls are open. Each is planned for a later release.
+
+- **Identity binding of approver and invoker is not implemented.** The SoD trigger compares the approver against the run's recorded invoker and blocks self-approval by the same identity for approvals made through `fao_hitl_resolve`. In v1 the invoker is a fixed demo identity and the approver is the identity named in the approval request; neither is bound to an authenticated session. The check works on the identities it is given; v1 does not prove those identities are the people acting.
+- **Decided HITL requests are not locked, and SoD is not a boundary against privileged credentials.** The SoD trigger covers approvals made through `fao_hitl_resolve`. v1 does not stop a later database-level change to a decided request, and privileged database credentials are not constrained by the trigger.
+- **The approval endpoints are demo only: unauthenticated and not hardened for production.** The GET/POST split stops link previewers from changing state. CSRF tokens are not implemented.
+- **HITL resolution and its ledger writes are not atomic.** The `hitl_queue` decision and the follow-on `shadow_ledger` rows are written in separate steps, so a failure between them can leave a decided request without its full ledger trail.
+- **Not every failure is recorded to the ledger.** There is no ledger-writing error workflow. Some failures leave only a STARTED row, or a queued HITL request with no notification sent.
+- **HITL timeout is not enforced.** `timeout_at` is set from the registry SLA when a request is created, but resolution does not check it and no escalation runs when it passes.
+- **Append-only is not administrator-proof.** The `shadow_ledger` trigger blocks UPDATE and DELETE for application roles. It does not cover TRUNCATE, the table owner, or forged inserts. Administrator-proof evidence needs a separate storage and trust boundary.
+- **The committed Writer export drops batch items.** `workflows/writer.json` reads only the first item it receives, so the flagship imported as-is stores one ASSET_RECONCILED row instead of seven. The evidence run shows all seven, so the export differs from the version that produced that evidence.
+
 ### Wired but not yet complete
 
 These features are scaffolded in v1 (registry rows, schema columns, control IDs) and ship in v1.1 to close the loop.
@@ -260,22 +276,22 @@ These features are scaffolded in v1 (registry rows, schema columns, control IDs)
 
 These features are held back because the security model needs to ship first. Activating them without that work would be a posture downgrade.
 
-- **AI advisory layer (`FAO_AI_ASSIST_ENABLED`) is feature-flagged off in v1.** The deterministic spine had to be defensibly complete before AI was allowed near it. The threat model shifts when LLMs touch the chain (prompt injection via fixture provenance, advisory drift); those defenses ship as their own ADR before the flag flips.
+- **AI advisory layer is not built in v1; `FAO_AI_ASSIST_ENABLED` will gate it.** No AI call exists in v1, and `agent_registry.ai_advisory_enabled` defaults to FALSE. The deterministic spine had to be defensibly complete before AI was allowed near it. The threat model shifts when LLMs touch the chain (prompt injection via fixture provenance, advisory drift); those defenses ship as their own ADR before the flag flips.
 - **MCP transport is stdio, not HTTP.** Stdio is the correct choice for v1's audience: local Claude Desktop, Cursor, etc. HTTP + per-user OAuth for the MCP server is a v1.2 ADR; the auth boundary needs to be designed before the transport is opened.
 
 ### Stubs and fixtures by design
 
 These are properties of v1's scope, not gaps. The registry-precedes-the-build pattern is FAO-GOV-002 working as designed. Fixtures isolate policy logic from connector plumbing. Demo identities exercise the auth shape without production exposure.
 
-- **Three stub agents are registered but not implemented.** Close Orchestrator, Variance Analyzer, Treasury Monitor exist in `agent_registry` with `status=STUB_DOCUMENTED`, named process owners, declared SOX control inheritance, and stated rollback posture. They cannot execute. The registry row *precedes* the workflow build by design: FAO-GOV-002 enforcing *no agent without governance metadata first*.
+- **Three stub agents are registered but not implemented.** Close Orchestrator, Variance Analyzer, Treasury Monitor exist in `agent_registry` with `status=STUB_DOCUMENTED`, named process owners, declared SOX control inheritance, and stated rollback posture. They have no workflow, so there is nothing to execute, and with no SLA set they cannot open a HITL request; v1 does not check registry status at runtime. The registry row *precedes* the workflow build by design: FAO-GOV-002 enforcing *no agent without governance metadata first*.
 - **Fixtures, not live connectors.** Wallet data is a Fireblocks proxy; ledger data is a NetSuite proxy. Both are inline JSON in the flagship workflow. This isolates policy logic from data-source plumbing: the policy engine is testable end-to-end without live API dependencies. Live connectors are v2.
-- **Demo identities, not production auth.** Three Supabase Auth users (`@finagent-os.demo`) seed the process_owners table. The auth shape (FK to `process_owners`, `auth.uid()` enforcement) is real and exercised; the identity provider is demo. Production identity (OAuth 2.1, real org SSO) is v2.
+- **Demo identities, not production auth.** Three Supabase Auth users (`@finagent-os.demo`) seed the process_owners table. The FKs from `hitl_queue` to `process_owners` are real, and the SoD trigger compares the approver against the run's recorded invoker. In v1 the invoker is a fixed demo identity and the approver is the identity named in the approval request, so identity binding is a known gap (see Control gaps in v1); the identity provider is demo. Production identity (OAuth 2.1, real org SSO) is v2.
 
 ### USD materiality enforcement scope
 
-The `materiality_usd` column in `materiality_thresholds` is populated for all seven seeded assets, but the v1 policy engine enforces the USD materiality test only for stablecoin assets (`asset_class = 'Stablecoin'`), where raw units equal USD value (1 USDC = $1). For non-stablecoin assets (BTC, ETH, SOL, XRP, ADA), USD materiality enforcement requires a price oracle to convert unit discrepancies to USD and is deferred to v1.1. Ratio-based escalation (FAO-REC-004) provides primary coverage in v1. Under-reservation is caught for every asset; what's deferred is the in-band-but-large-USD-discrepancy case for non-stablecoin assets.
+The `materiality_usd` column in `materiality_thresholds` is populated for all seven seeded assets, but the v1 policy engine enforces the USD materiality test only for stablecoin assets (`asset_class = 'Stablecoin'`), where raw units equal USD value (1 USDC = $1). For non-stablecoin assets (BTC, ETH, SOL, XRP, ADA), USD materiality enforcement requires a price oracle to convert unit discrepancies to USD and is deferred to v1.1. Ratio-based escalation (FAO-REC-004) provides primary coverage in v1. Under-reservation is caught for every asset in the shipped fixtures; before live feeds, the reconcile logic needs input completeness checks (see `fixtures/README.md`). What's deferred is the in-band-but-large-USD-discrepancy case for non-stablecoin assets.
 
-Each item has a roadmap entry below.
+Most items above have a roadmap entry below; the control gaps are planned for a later release.
 
 ---
 
@@ -322,7 +338,7 @@ Founder, Velocyt Consulting · Mississauga, ON
 - Website: [velocyt.ca](https://velocyt.ca)
 - GitHub: [@RZ-Logic](https://github.com/RZ-Logic)
 
-Also built: __[Immi-OS](https://github.com/RZ-Logic/immi-os)__ (immigration automation, real clients) · __[Signal-Driven Outbound Engine](https://github.com/RZ-Logic/signal-driven-outbound-engine)__ (GTM automation) · __[Job Signal](https://github.com/RZ-Logic/jobsignal-engine)__ (job tracker, $0–12/mo)
+Also built: __[Immi-OS](https://github.com/RZ-Logic/immi-os)__ (immigration automation, real clients) · __[Signal-Driven Outbound Engine](https://github.com/RZ-Logic/signal-driven-outbound-engine)__ (GTM automation)
 
 ---
 

@@ -53,7 +53,7 @@ The self-audit on Apr 25, 2026 surfaced this on the most recent execution at the
 | `decision` | APPROVED |
 | Status | COMMITTED |
 
-> *All named individuals in this document — Sarah Chen, Aisha Okonkwo, Marcus Patel — are seeded demo identities in the `process_owners` table (`@finagent-os.demo` email domain). They are not real Velocyt or Kraken employees. See [README §Honest Limitations — Demo identities, not production auth](../../README.md#-honest-limitations).*
+> *All named individuals in this document (Sarah Chen, Aisha Okonkwo, Marcus Patel) are seeded demo identities in the `process_owners` table (`@finagent-os.demo` email domain). They are not real Velocyt or Kraken employees. See [README §Known Limitations](../../README.md#-known-limitations).*
 
 The audit trail is honest. The Shadow Ledger correctly records that Sarah Chen alone approved an execution that was *named* dual-approval in its rationale text. The append-only constraint preserves the discrepancy as a permanent record. There is nothing to "fix" in the historical row — it accurately reflects what happened. The fix is in the enforcement of future rows.
 
@@ -162,3 +162,32 @@ The Slack message UX will surface *"Approval 1 of 2 received — awaiting CFO si
 - [Migration 0008 — `fao_hitl_resolve` function](../../supabase/migrations/20260425_0008_fao_hitl_resolve_function.sql) — current resolution logic, single approval
 - [Agent registry seed](../../supabase/seeds/0003_agent_registry_seed.sql) — sets `approval_threshold = 2` for RED-tier agents
 - Root [README.md](../../README.md) — *Honest Limitations* section references this ADR
+
+---
+
+## Addendum (2026-11): review corrections
+
+Two external reviews of v1 (November 2026) found that several statements in this ADR describe a stronger control than the v1 code provides. The original text above is left unchanged as the record of what was decided on 2026-04-25. The corrections below apply as of v1.
+
+### Statements that are not accurate as of v1
+
+The root cause is the same for each: approver identity comes from the approval request, and the invoker is a fixed demo identity set by the flagship workflow. Neither is bound to an authenticated session, so the current control compares recorded identities; it does not bind identities to people. The approval endpoints are demo only: unauthenticated and not hardened for production. Identity binding of approver and invoker is a known gap planned for a later release.
+
+1. **ADR:9**, *"FAO-GOV-013 separation activates when a second authenticated identity is added to `process_owners`"*. The seed already contains three demo identities. Adding identities does not activate separation; what is missing is binding the approver and invoker to authenticated sessions, and change review by someone other than the author.
+2. **ADR:58**, *"The audit trail is honest"* (and the same caveat for ADR:115, *"accurately record what happened"*). The ledger accurately records the approver identity named in the approval request. It does not show that the named person made the approval.
+3. **ADR:93**, *"This is real enforcement. It is not nothing."* For approvals made through `fao_hitl_resolve`, the trigger does block an approval where the recorded approver equals the recorded invoker. Because neither identity is authenticated, that check does not establish who invoked or who approved.
+4. **ADR:109**, *"This control is genuinely active."* Accurate only in the narrow sense of item 3: same-identity self-approval is blocked. It is not an identity-bound segregation-of-duties control in v1.
+5. **ADR:111**, *"The residual risk surface is human, not technical. The system does what its enforcement code says it does."* The residual risk is also technical: the unbound identities and the unauthenticated approval endpoints described above.
+
+### The v1.1 plan as written
+
+- The proposed `hitl_approvals` table with `UNIQUE (hitl_id, approver_id)` alone would not stop one person supplying two approvals while approver identity is not authenticated. Dual approval depends on identity binding landing first or together with it.
+- The planned `IN_PROGRESS` state does not fit the current schema. The `hitl_queue` column is `decision`, of enum `hitl_decision` (`PENDING`, `APPROVED`, `REJECTED`), not `hitl_status`; `hitl_status` is the Shadow Ledger enum. The `hitl_decision_coherence` CHECK also allows only `PENDING` without an approver, or `APPROVED`/`REJECTED` with one. The v1.1 migration needs a revised design for the intermediate state: either a new `hitl_decision` value with a revised CHECK, or partial approvals tracked only in `hitl_approvals` while `decision` stays `PENDING`.
+
+### Link correction
+
+The README section this ADR cites as *Honest Limitations* is titled **Known Limitations**: [README §Known Limitations](../../README.md#-known-limitations). The broken link in the Context section has been corrected in place; the references at ADR:99 and in References mean the same section.
+
+### Migration comments
+
+Some SQL migration comments describe stronger guarantees than the code provides. Examples: Migration 0004 says the append-only trigger has *"no bypass"*; it rejects row-level UPDATE and DELETE but is not an administrator-proof boundary. The Migration 0005 table and column comments still say SoD is *"enforced at RLS layer"* after Migration 0005c moved enforcement to the trigger, and the 0005b comments describe the trigger as complementary to that RLS policy. The Migration 0008 header says the trigger fires correctly *"regardless of who claims to be approving"*, which holds only for the same-identity case in item 3. These migration files are applied history and are left unchanged; this addendum and [SOX-MAPPING.md](../../SOX-MAPPING.md) carry the corrected statements.

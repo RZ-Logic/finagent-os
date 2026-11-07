@@ -3,7 +3,7 @@
 -- ============================================================================
 -- Seeds the four agents that constitute the formalized control population
 -- for the Apr 26 launch: one flagship (ACTIVE) and three stubs
--- (STUB_DOCUMENTED) that inherit governance controls but cannot execute.
+-- (STUB_DOCUMENTED) that inherit governance controls but have no workflow yet.
 --
 -- Design principle: every agent — stub or active — has a named process
 -- owner, a declared risk tier, an enumerated SOX control list, a
@@ -30,12 +30,23 @@
 --   - process_owner_id is resolved by email lookup, consistent with
 --     seed 0002. No hardcoded UUIDs.
 --   - ai_advisory_enabled is FALSE for all agents (FAO-GOV-014: AI
---     disabled by default). Flagship will enable it at runtime via
---     feature flag only when FAO_AI_ASSIST_ENABLED is set.
+--     disabled by default). The FAO_AI_ASSIST_ENABLED runtime switch is
+--     planned for v1.1; nothing reads it, and no workflow reads this
+--     column at runtime in v1.
 --   - approval_threshold follows risk tier: GREEN/AMBER = 1 approver,
 --     RED = 2 approvers.
 --   - Not idempotent. Re-running will fail on PRIMARY KEY (agent_id).
 --     TRUNCATE agent_registry first if re-seeding.
+--   - WARNING: agent_registry is referenced by shadow_ledger and
+--     hitl_queue, so a bare TRUNCATE fails and only TRUNCATE ... CASCADE
+--     succeeds. CASCADE also empties shadow_ledger and hitl_queue, which
+--     erases audit evidence. Re-seed only a fresh database; never re-seed
+--     one that holds evidence.
+--   - The flagship rollback_procedure text below describes a correcting
+--     row with status CORRECTED_BY. That correction procedure is planned
+--     for v1.1 and is not supported today: the execution_status enum
+--     (migration 0001) allows only SUCCESS, FAILURE, PARTIAL and
+--     ROLLED_BACK, so such a row cannot be written.
 --
 -- Author: Rizwan Ahmed, ACCA · Velocyt Consulting
 -- Date:   2026-04-24
@@ -65,7 +76,7 @@ SELECT
   'RED',
   'ACTIVE',
   'fao_reserve_recon_v1',
-  2,  -- RED tier: two approvers required for REQUIRE_HUMAN outcomes
+  2,  -- RED tier: two approvers configured; not enforced in v1 (ADR-0001)
   ARRAY[
     'FAO-GOV-001',  -- Shadow Ledger append-only
     'FAO-GOV-002',  -- Agent Registry membership
@@ -78,7 +89,9 @@ SELECT
     'FAO-REC-006',  -- Policy engine (deterministic)
     'FAO-REC-007'   -- Negative balance detection
   ]::TEXT[],
-  FALSE,  -- AI advisory off by default; enabled via FAO_AI_ASSIST_ENABLED env flag
+  FALSE,  -- AI advisory off by default; FAO_AI_ASSIST_ENABLED switch planned for v1.1, not read in v1
+  -- rollback_procedure: the CORRECTED_BY correction described in this text is
+  -- planned for v1.1 and not supported by the current execution_status enum.
   'On failed commit: rollback is a no-op because the flagship writes only to the append-only Shadow Ledger — there is no destructive target system to reverse. If a ledger write is discovered to be erroneous, the correcting entry is a new row with status CORRECTED_BY and a reference to the original ledger_id. The original row is never deleted or updated (FAO-GOV-001).',
   '{
     "wallet_balances": "fixtures/wallet_data.json (mock Fireblocks REST snapshot)",

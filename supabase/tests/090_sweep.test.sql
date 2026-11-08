@@ -67,16 +67,11 @@ SELECT ok(NOT pg_temp.has_id(pg_temp.g('s0')->'renotify', pg_temp.id('r3')), 're
 SELECT ok(pg_temp.g('s0')->'renotify' @> jsonb_build_array(jsonb_build_object('hitl_id', pg_temp.id('r4'), 'attempt', 2)), 'renotify: a request with a FAILED attempt is listed with the next attempt');
 SELECT ok(NOT pg_temp.has_id(pg_temp.g('s0')->'renotify', pg_temp.id('r5')), 'renotify: a sent request is not listed');
 
--- Phase 1, clock 301: renotify limit, stale run
+-- Phase 1, clock 301: renotify limit (the stale run is checked at clock 901)
 INSERT INTO v VALUES ('stale', to_jsonb(tests.make_run('sarah.chen@finagent-os.demo', ARRAY['BTC'])));
 SELECT tests.set_clock(301);
 INSERT INTO v VALUES ('s1', tests.sweep());
 SELECT ok(pg_temp.g('s1')->'renotify' @> jsonb_build_array(jsonb_build_object('hitl_id', pg_temp.id('r3'), 'attempt', 1)), 'renotify: after 5 minutes a request with no attempt is listed');
-SELECT ok(pg_temp.has_uuid(pg_temp.g('s1')->'failed_runs', (pg_temp.g('stale')#>>'{}')::uuid), 'stale RUNNING run is listed in failed_runs');
-SELECT is(tests.run_state((pg_temp.g('stale')#>>'{}')::uuid), 'FAILED', 'stale RUNNING run is FAILED');
-SELECT is((SELECT inputs->>'source' || '/' || (inputs->>'failed_node') || '/' || (inputs->>'stage') FROM public.shadow_ledger
-           WHERE correlation_id = (pg_temp.g('stale')#>>'{}')::uuid AND inputs->>'event_type' = 'FAILED'),
-  'sweep/timeout/before_request', 'stale run: FAILED written by the sweep');
 
 INSERT INTO v VALUES ('f3a', pg_temp.rec(pg_temp.id('r3'), 'REQUESTED', 0, 'FAILED'));
 INSERT INTO v VALUES ('s2', tests.sweep());
@@ -98,9 +93,15 @@ SELECT is((SELECT count(*) FROM public.shadow_ledger WHERE correlation_id = pg_t
 SELECT ok(pg_temp.ctx(pg_temp.id('r3'), 'ESCALATED', 1)->>'send' = 'true', 'context: ESCALATED is sendable once the escalation exists');
 SELECT is(pg_temp.ctx(pg_temp.id('r3'), 'ESCALATED', 1)->>'target_name', 'Marcus Patel', 'context: ESCALATED names the escalation target');
 
--- Phase 2, clock 700: an expired REQUESTED run
-SELECT tests.set_clock(700);
+-- Phase 2, clock 901: an expired REQUESTED run; the stale RUNNING run is past
+-- the 900 s execution SLA floor (patch round 6, P4)
+SELECT tests.set_clock(901);
 INSERT INTO v VALUES ('s5', tests.sweep());
+SELECT ok(pg_temp.has_uuid(pg_temp.g('s5')->'failed_runs', (pg_temp.g('stale')#>>'{}')::uuid), 'stale RUNNING run is listed in failed_runs');
+SELECT is(tests.run_state((pg_temp.g('stale')#>>'{}')::uuid), 'FAILED', 'stale RUNNING run is FAILED');
+SELECT is((SELECT inputs->>'source' || '/' || (inputs->>'failed_node') || '/' || (inputs->>'stage') FROM public.shadow_ledger
+           WHERE correlation_id = (pg_temp.g('stale')#>>'{}')::uuid AND inputs->>'event_type' = 'FAILED'),
+  'sweep/timeout/before_request', 'stale run: FAILED written by the sweep');
 SELECT ok(pg_temp.has_uuid(pg_temp.g('s5')->'expired_runs', (pg_temp.g('unclaimed')->>'correlation_id')::uuid), 'an expired REQUESTED run is listed in expired_runs');
 SELECT is(tests.run_state((pg_temp.g('unclaimed')->>'correlation_id')::uuid), 'EXPIRED', 'the expired REQUESTED run is EXPIRED');
 SELECT is(tests.ledger_count((pg_temp.g('unclaimed')->>'correlation_id')::uuid), 0::bigint, 'an expired REQUESTED run writes no ledger row');
@@ -130,8 +131,9 @@ SELECT is((SELECT count(*) FROM public.shadow_ledger WHERE correlation_id = pg_t
 SELECT is((SELECT inputs->>'reason' || '/' || (inputs->>'target_owner_id') FROM public.shadow_ledger WHERE correlation_id = pg_temp.corr('r1') AND inputs->>'event_type' = 'HITL_ESCALATED'),
   'TIMEOUT/' || tests.uid('marcus.patel@finagent-os.demo')::text, 'sweep: escalation reason TIMEOUT, target from escalation_to');
 SELECT ok(pg_temp.g('s6')->'escalations' @> jsonb_build_array(jsonb_build_object('hitl_id', pg_temp.id('r1'), 'level', 1, 'reason', 'TIMEOUT')), 'sweep: the TIMEOUT escalation is listed');
-SELECT is((SELECT status::text || '/' || hitl_status::text || '/' || (inputs->>'decision') FROM public.shadow_ledger WHERE correlation_id = pg_temp.corr('r1') AND inputs->>'event_type' = 'COMMITTED'),
-  'FAILURE/EXPIRED/EXPIRED', 'sweep: COMMITTED with FAILURE for the expired request');
+SELECT ok(tests.ledger_count(pg_temp.corr('r1'), 'COMMITTED') = 0
+          AND (SELECT status::text || '/' || hitl_status::text || '/' || (inputs->>'committed') FROM public.shadow_ledger WHERE correlation_id = pg_temp.corr('r1') AND inputs->>'event_type' = 'HITL_EXPIRED') = 'FAILURE/EXPIRED/false',
+  'sweep: no COMMITTED row for the expired request; HITL_EXPIRED (FAILURE, committed false) closes it (P3)');
 SELECT is(tests.run_state(pg_temp.corr('r1')), 'EXPIRED', 'sweep: the run of the expired request is EXPIRED');
 SELECT ok(EXISTS (SELECT 1 FROM jsonb_array_elements(pg_temp.g('s6')->'item_errors') e WHERE e->>'id' = pg_temp.id('r7')::text), 'sweep: the broken item lands in item_errors');
 SELECT is((SELECT decision::text FROM public.hitl_queue WHERE hitl_id = pg_temp.id('r7')), 'PENDING', 'sweep: the broken item is left as it was');

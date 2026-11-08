@@ -351,6 +351,7 @@
     "executionOrder": "v1",
     "binaryMode": "separate",
     "availableInMCP": false,
+    "executionTimeout": 120,
     "errorWorkflow": "FaoErrHandlerV01"
   },
   "versionId": "b4f2a5c1-0e57-4d0e-8a6b-25a000000002",

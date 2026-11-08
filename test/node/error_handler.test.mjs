@@ -12,7 +12,7 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runCodeNode, nodeOf, WORKFLOWS } from './harness.mjs';
-import { RULES, ERROR_SOURCES, upstreamOf, checkErrorHandler } from '../../scripts/check-exports.mjs';
+import { RULES, ERROR_SOURCES, upstreamOf, downstreamOf, preClaimNodesOf, checkErrorHandler } from '../../scripts/check-exports.mjs';
 
 const WF = 'fao_error_handler_v1.json';
 const FLAGSHIP = 'uhB2KjEaJDuviM4D';
@@ -107,16 +107,29 @@ test('the source map in Extract Failure equals the exports that name the handler
   }
 });
 
-test('every flagship node maps to flagship_pre_claim exactly when it is upstream of Claim Run', async () => {
+test('every flagship node maps to flagship_pre_claim exactly when it is not Respond 202 and not downstream of it', async () => {
+  // Round 6, P1 (red team r5 item 1): Claim Run and the refused and
+  // bad-input branches never hold a claimed run, so they are pre-claim too.
   const flagship = readWf('fao_reserve_recon_v1.json');
-  const pre = new Set(upstreamOf(flagship, 'Claim Run'));
-  assert.deepEqual([...pre].sort(), ['Body Valid?', 'Validate Invoke Body', 'Webhook: Invoke']);
+  const pre = new Set(preClaimNodesOf(flagship));
+  assert.deepEqual([...pre].sort(), [
+    'Body Valid?', 'Claim OK?', 'Claim Run', 'Respond 400', 'Respond Claim Refused', 'Validate Invoke Body', 'Webhook: Invoke',
+  ]);
+  // The set is the complement of Respond 202 and its downstream nodes, and
+  // it covers everything upstream of Claim Run.
+  const after = new Set(['Respond 202', ...downstreamOf(flagship, 'Respond 202')]);
+  for (const n of flagship.nodes) {
+    if (n.type === 'n8n-nodes-base.stickyNote') continue;
+    assert.equal(pre.has(n.name), !after.has(n.name), n.name);
+  }
+  for (const u of upstreamOf(flagship, 'Claim Run')) assert.ok(pre.has(u), u);
+  for (const n of ['Respond 202', 'Init Execution', 'Finalize Run', 'HITL Gateway']) assert.ok(!pre.has(n), n);
   for (const n of flagship.nodes) {
     if (n.type === 'n8n-nodes-base.stickyNote') continue;
     const v = values(await extract(errorItem('x', n.name)));
     assert.equal(v.source, pre.has(n.name) ? 'flagship_pre_claim' : 'flagship', n.name);
   }
-  for (const odd of ['', 'webhook: invoke', 'Body Valid', 'Claim Run ']) {
+  for (const odd of ['', 'webhook: invoke', 'Body Valid', 'Claim Run ', 'respond 400', 'Respond Claim Refused ']) {
     assert.equal(values(await extract(errorItem('x', odd))).source, 'flagship', JSON.stringify(odd));
   }
   const noLast = errorItem('x');
@@ -204,7 +217,14 @@ test('check-exports error_handler_map refuses a wrong map, a wrong pre-claim lis
   has(run((wf, e) => { e.parameters.jsCode = e.parameters.jsCode.replace(`  '${SWEEPER}': 'sweeper',`, `  '${SWEEPER}': 'sweeper',\n  'dQslIEVwF3WqMliT': 'flagship',`); }), /lists dQslIEVwF3WqMliT, which is not an export/);
   has(run((wf, e) => { e.parameters.jsCode = e.parameters.jsCode.replace(`  '${FLAGSHIP}': 'flagship',`, `  "${FLAGSHIP}": "flagship",`); }), /is not written '<id>': '<source>',/);
   has(run((wf, e) => { e.parameters.jsCode = `// '${FLAGSHIP}': 'flagship'\n${e.parameters.jsCode}`; }), /appears 2 times in Extract Failure/);
-  has(run((wf, e) => { e.parameters.jsCode = e.parameters.jsCode.replace("  'Body Valid?',\n", ''); }), /pre-claim list is .*expected the flagship nodes upstream of Claim Run/);
+  has(run((wf, e) => { e.parameters.jsCode = e.parameters.jsCode.replace("  'Body Valid?',\n", ''); }), /pre-claim list is .*expected the flagship nodes that are not Respond 202 and not downstream of it/);
+  // Round 6, P1: each node added to the list is required.
+  for (const name of ['Respond 400', 'Claim Run', 'Claim OK?', 'Respond Claim Refused']) {
+    has(run((wf, e) => { e.parameters.jsCode = e.parameters.jsCode.replace(`  '${name}',\n`, ''); }), /pre-claim list is .*expected the flagship nodes that are not Respond 202/);
+  }
+  // Respond 202 and a node after it are refused, and so is a repeat.
+  has(run((wf, e) => { e.parameters.jsCode = e.parameters.jsCode.replace("  'Body Valid?',", "  'Body Valid?',\n  'Respond 202',"); }), /pre-claim list is/);
+  has(run((wf, e) => { e.parameters.jsCode = e.parameters.jsCode.replace("  'Body Valid?',", "  'Body Valid?',\n  'Init Execution',"); }), /pre-claim list is/);
   has(run((wf, e) => { e.parameters.jsCode = e.parameters.jsCode.replace("  'Body Valid?',", "  'Body Valid?',\n  'Respond 400',"); }), /pre-claim list is/);
   has(run((wf, e) => { e.parameters.jsCode = e.parameters.jsCode.replace("  'Body Valid?',", "  'Body Valid?',\n  'Body Valid?',"); }), /pre-claim list is/);
   has(run((wf, e) => { e.parameters.jsCode = e.parameters.jsCode.replace("source = 'flagship_pre_claim'", "source = 'flagship'"); }), /does not map a pre-claim flagship failure/);
@@ -214,11 +234,25 @@ test('check-exports error_handler_map refuses a wrong map, a wrong pre-claim lis
   has(run((wf) => { wf.connections['Record Run Failure'] = { main: [[{ node: 'Error Trigger', type: 'main', index: 0 }]] }; }), /must be the last node/);
 
   // The pre-claim list follows the flagship's own connections: a new node
-  // before Claim Run makes the export's list stale.
+  // before Claim Run or an unconnected node makes the export's list stale, a
+  // new node after Respond 202 does not, and a flagship without Respond 202
+  // is refused.
   const flag = structuredClone(exportedById.get(FLAGSHIP));
   flag.connections['Body Valid?'].main[0] = [{ node: 'Pre Check', type: 'main', index: 0 }];
   flag.connections['Pre Check'] = { main: [[{ node: 'Claim Run', type: 'main', index: 0 }]] };
-  has(run(() => {}, new Map([...exportedById, [FLAGSHIP, flag]])), /expected the flagship nodes upstream of Claim Run \["Body Valid\?","Pre Check","Validate Invoke Body","Webhook: Invoke"\]/);
+  has(run(() => {}, new Map([...exportedById, [FLAGSHIP, flag]])), /expected the flagship nodes that are not Respond 202 and not downstream of it \["Body Valid\?","Claim OK\?","Claim Run","Pre Check","Respond 400","Respond Claim Refused","Validate Invoke Body","Webhook: Invoke"\]/);
+  const later = structuredClone(exportedById.get(FLAGSHIP));
+  later.nodes.push({ parameters: {}, type: 'n8n-nodes-base.noOp', typeVersion: 1, position: [0, 0], id: 'x1', name: 'After Run Complete' });
+  later.connections['Run Complete'] = { main: [[{ node: 'After Run Complete', type: 'main', index: 0 }]] };
+  assert.deepEqual(run(() => {}, new Map([...exportedById, [FLAGSHIP, later]])), [], 'a node after Respond 202 is not pre-claim');
+  const stray = structuredClone(exportedById.get(FLAGSHIP));
+  stray.nodes.push({ parameters: {}, type: 'n8n-nodes-base.noOp', typeVersion: 1, position: [0, 0], id: 'x2', name: 'Stray Node' });
+  has(run(() => {}, new Map([...exportedById, [FLAGSHIP, stray]])), /pre-claim list is .*"Stray Node"/);
+  const no202 = structuredClone(exportedById.get(FLAGSHIP));
+  no202.nodes = no202.nodes.filter((n) => n.name !== 'Respond 202');
+  delete no202.connections['Respond 202'];
+  no202.connections['Claim OK?'].main[0] = [{ node: 'Init Execution', type: 'main', index: 0 }];
+  has(run(() => {}, new Map([...exportedById, [FLAGSHIP, no202]])), /the flagship has no Respond 202 node/);
   // A workflow that names the handler without a source.
   const writer = structuredClone(exportedById.get('dQslIEVwF3WqMliT'));
   writer.settings.errorWorkflow = 'FaoErrHandlerV01';

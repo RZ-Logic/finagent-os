@@ -18,7 +18,7 @@
 --   journal_cap_per_minute  1000
 --   fao_reserve_recon_v1    max_runs_per_hour 60
 --   fao_ratelimit_test_v1   new agent: ACTIVE, GREEN, max_runs_per_hour 2,
---                           SLA 300 s and 24 h, owner Sarah Chen
+--                           SLA 900 s and 24 h, owner Sarah Chen
 --   ratelimit@local.test    process_owners row and an invoker grant on
 --                           fao_ratelimit_test_v1 only
 --
@@ -80,7 +80,7 @@ SELECT
   'Local test agent. Writes nothing outside the Shadow Ledger; an erroneous ledger row is corrected by a CORRECTION event that references the original ledger_id.',
   '{"note": "local test agent; no data sources"}'::jsonb,
   '{"note": "local test agent; no production targets"}'::jsonb,
-  300,
+  900,  -- at least 900 (patch round 6, P4; migration 0013 refuses lower)
   24,
   po.id,
   2

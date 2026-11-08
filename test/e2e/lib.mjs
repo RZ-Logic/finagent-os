@@ -137,6 +137,19 @@ export function nextExecutionId() {
   return Number(JSON.parse(r.stdout).next);
 }
 
+// Patch round 6 (P4, S23): each imported workflow's stored settings, by id,
+// and one environment variable of the e2e n8n container (null when unset).
+export function workflowSettings() {
+  const r = spawnSync('docker', ['exec', N8N_CONTAINER, 'node', '/e2e/n8n-executions.cjs', '--workflow-settings'], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  if (r.status !== 0) throw new Error(`test/e2e: reading n8n workflow settings failed: ${r.stderr}`);
+  return JSON.parse(r.stdout || '{}');
+}
+export function containerEnv(name) {
+  if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(name)) throw new Error(`test/e2e: bad env name ${name}`);
+  const r = spawnSync('docker', ['exec', N8N_CONTAINER, 'printenv', name], { encoding: 'utf8' });
+  return r.status === 0 ? r.stdout.trim() : null;
+}
+
 // The database clock, so "rows since" never depends on the host clock.
 export const dbNow = async () => (await one('SELECT clock_timestamp() AS t')).t;
 

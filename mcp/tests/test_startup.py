@@ -1,4 +1,4 @@
-"""Startup refusals: privileged keys, missing settings, reader identity (FAO-GOV-003)."""
+"""Startup refusals: privileged keys, missing settings, reader identity (FAO-GOV-015)."""
 from __future__ import annotations
 
 import base64

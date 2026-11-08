@@ -78,14 +78,19 @@ Notable: Kraken's BTC ratio shifted materially from 114.9% (March 2025) to
 100.3% (December 2025) — a documented buffer-reserve tightening. The
 agent's BTC fixture reflects this current state.
 
-Stablecoins: the seeded USDC and USDT `ratio_band_upper` is 1.005
-(`supabase/seeds/0006_materiality_thresholds_seed.sql`), below Kraken's
-published 105%+. A stablecoin reconciled at that posture (ratio about 1.05)
-would hit rule 4, ABOVE_BAND_UPPER, and escalate to REQUIRE_HUMAN STANDARD.
-Whether surplus at that level should escalate is a policy choice; the
-1.0050 band is a pending owner decision and is unchanged on this branch.
-Kraken's snapshot also covers more than Spot, so its ratios are not directly
-comparable with the Spot-only seeds.
+Stablecoins: the seeded USDC and USDT `ratio_band_upper` is 1.05
+(`supabase/seeds/0006_materiality_thresholds_seed.sql`, IC-38), following
+the owner's decision of 2026-11-07 that stablecoin reserves are held near
+105%. The floor and band lower stay at 1.00. A stablecoin ratio up to and
+including 1.05 is in band; above 1.05 it hits rule 4, ABOVE_BAND_UPPER, and
+escalates to REQUIRE_HUMAN STANDARD. Inside the band the USD materiality
+rule (rule 5) still applies. The v1 seed held 1.0050; the live table keeps
+that value until the cutover runbook step applies 1.05 through
+`fao_admin_set_threshold`. `policy_branches.json` carries the 1.05 band and
+two stablecoin cases: `stablecoin_in_band_near_105` (ratio 1.04, ALLOW,
+which the old 1.005 band escalated) and `stablecoin_above_band_upper`
+(ratio 1.051). Kraken's snapshot also covers more than Spot, so its ratios
+are not directly comparable with the Spot-only seeds.
 
 ## Real-world anchor: krakendb (2014)
 
@@ -100,11 +105,14 @@ reserve ratio is mathematically undefined when liability is negative.
 
 A naive "all real Dec 2025 numbers" fixture, under the seeded thresholds,
 would produce four ALLOWs (ETH, SOL, XRP, ADA), one ALLOW_WITH_OBLIGATIONS
-(BTC), and two REQUIRE_HUMAN STANDARD escalations (USDC and USDT above their
-1.005 band upper). The under-reservation, USD-materiality and
+(BTC), and two REQUIRE_HUMAN STANDARD escalations for USDC and USDT at
+105%+: ABOVE_BAND_UPPER for a ratio above the 1.05 band upper, or
+IN_BAND_USD_MATERIAL at 1.05, since a 5% surplus on any real stablecoin pool
+is far above the $10,000 materiality. The under-reservation and
 negative-liability paths would never fire and would have zero evidence of
-working. The mixed fixture design exercises those three paths in evidence;
-it does not exercise every rule (see the gaps listed above).
+working. The mixed fixture design exercises those two paths and the
+small-ratio USD-materiality breach (USDT, ratio 1.0000549) in evidence; it
+does not exercise every rule (see the gaps listed above).
 
 ## Provenance threading
 

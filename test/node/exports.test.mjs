@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, writeFileSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { checkExports, checkPublishDocs, RULES, WORKFLOWS_DIR, PUBLISH_ORDER, NODE_VERSIONS_N8N } from '../../scripts/check-exports.mjs';
+import { checkExports, checkPublishDocs, checkExecutionTimeout, RULES, WORKFLOWS_DIR, PUBLISH_ORDER, NODE_VERSIONS_N8N, EXECUTION_TIMEOUTS, SLA_MAX_EXECUTION_FLOOR } from '../../scripts/check-exports.mjs';
 
 test('check-exports reports zero violations', () => {
   const report = checkExports();
@@ -283,4 +283,45 @@ test('publish_docs: the README publishes the five production ids in PUBLISH_ORDE
   assert.equal(checkPublishDocs(doc([...ids, 'OV7ukqcVKYfNXKHa'])).length, 1, 'a harness published');
   assert.equal(checkPublishDocs(`${doc(ids)}\nThe Writer, notifier and error handler run only when called.`).length, 1, 'n8n 1.x wording');
   for (const id of ['OV7ukqcVKYfNXKHa', 'V87nEh6HALqINIDz']) assert.ok(!readme.includes(`--id=${id}`), `README never publishes harness ${id}`);
+});
+
+// ----------------------------------------------------------------------------
+// Round 6, P4 (red team r5 item 2): n8n ends a flagship execution before the
+// database could call its run stale. The flagship sets executionTimeout 600
+// (below the 900-second floor of sla_max_execution_seconds), the notifier
+// 120 and the sweeper 300; nothing else is checked.
+// ----------------------------------------------------------------------------
+
+test('execution_timeout: the flagship, notifier and sweeper set their limits and the flagship stays below 900 s', () => {
+  const rule = RULES.find((r) => r.id === 'execution_timeout');
+  assert.ok(rule, 'rule exists');
+  assert.deepEqual(EXECUTION_TIMEOUTS, {
+    'fao_reserve_recon_v1.json': 600,
+    'fao_hitl_gateway_v1.json': 120,
+    'fao_hitl_sweeper_v1.json': 300,
+  });
+  assert.equal(SLA_MAX_EXECUTION_FLOOR, 900);
+  assert.ok(EXECUTION_TIMEOUTS['fao_reserve_recon_v1.json'] < SLA_MAX_EXECUTION_FLOOR);
+  const read = (f) => JSON.parse(readFileSync(join(WORKFLOWS_DIR, f), 'utf8'));
+  for (const [f, sec] of Object.entries(EXECUTION_TIMEOUTS)) {
+    const wf = read(f);
+    assert.equal(wf.settings.executionTimeout, sec, f);
+    assert.deepEqual(rule.run({ file: f, wf }), [], `${f} passes`);
+    for (const bad of [undefined, -1, 0, '600', 600.5, null]) {
+      const copy = structuredClone(wf);
+      if (bad === undefined) delete copy.settings.executionTimeout; else copy.settings.executionTimeout = bad;
+      assert.ok(rule.run({ file: f, wf: copy }).some((v) => /settings\.executionTimeout is .*expected/.test(v)), `${f} with ${JSON.stringify(bad)}`);
+    }
+    const other = structuredClone(wf);
+    other.settings.executionTimeout = sec + 1;
+    assert.ok(rule.run({ file: f, wf: other }).some((v) => new RegExp(`is ${sec + 1}, expected ${sec}`).test(v)), `${f} off by one`);
+  }
+  const flag = read('fao_reserve_recon_v1.json');
+  for (const sec of [900, 3600]) {
+    flag.settings.executionTimeout = sec;
+    assert.ok(rule.run({ file: 'fao_reserve_recon_v1.json', wf: flag }).some((v) => /not below the sla_max_execution_seconds floor of 900/.test(v)), String(sec));
+  }
+  assert.ok(checkExecutionTimeout('fao_reserve_recon_v1.json', { settings: {} }).some((v) => /\(unset\)/.test(v)));
+  assert.deepEqual(rule.run({ file: 'writer.json', wf: read('writer.json') }), [], 'the Writer is not checked');
+  assert.deepEqual(rule.run({ file: 'fao_error_handler_v1.json', wf: read('fao_error_handler_v1.json') }), [], 'the error handler is not checked');
 });

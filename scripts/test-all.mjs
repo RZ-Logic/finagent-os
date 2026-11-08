@@ -318,9 +318,9 @@ function layerCommand(name, python) {
 }
 
 // Layers whose test count is fixed: a scenario that silently stops being
-// collected fails the layer. e2e: S01 to S20 in test/e2e/n8n.e2e.test.mjs
-// (round 5 added S15 to S20).
-export const EXPECTED_TESTS = { e2e: 20 };
+// collected fails the layer. e2e: S01 to S23 in test/e2e/n8n.e2e.test.mjs
+// (round 5 added S15 to S20; patch round 6 added S21 to S23).
+export const EXPECTED_TESTS = { e2e: 23 };
 
 export function judge(name, proc, counts) {
   if (!counts.found) return { result: 'ERROR', note: 'no test summary in the output' };

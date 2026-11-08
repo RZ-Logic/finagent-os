@@ -31,7 +31,7 @@
       "usd_per_unit": 1.00,
       "last_block": 19284739,
       "_provenance": "synthetic_clean_baseline",
-      "_scenario": "Exact match — exercises the in-band ALLOW path with zero discrepancy. Stablecoin band [1.0000, 1.0050] passed cleanly. Expected policy outcome: ALLOW."
+      "_scenario": "Exact match; exercises the in-band ALLOW path with zero discrepancy. Stablecoin band [1.0000, 1.0500] passed cleanly. Expected policy outcome: ALLOW."
     },
     {
       "asset": "USDT",
@@ -40,7 +40,7 @@
       "last_block": 19284739,
       "_provenance": "synthetic_anomaly",
       "_anomaly_control": "FAO-REC-002",
-      "_scenario": "Synthetic anomaly: ratio 1.0000549 sits within the tight stablecoin band [1.0000, 1.0050], BUT absolute USD discrepancy of $67,890.50 exceeds the USDT materiality threshold of $10,000. Stablecoin units are 1:1 USD; small ratio deviations on large pools are still material. Expected policy outcome: REQUIRE_HUMAN (STANDARD) per FAO-REC-002 USD-materiality breach."
+      "_scenario": "Synthetic anomaly: ratio 1.0000549 sits within the stablecoin band [1.0000, 1.0500], BUT absolute USD discrepancy of $67,890.50 exceeds the USDT materiality threshold of $10,000. Stablecoin units are 1:1 USD; small ratio deviations on large pools are still material. Expected policy outcome: REQUIRE_HUMAN (STANDARD) per FAO-REC-002 USD-materiality breach."
     },
     {
       "asset": "SOL",

@@ -2,7 +2,8 @@
   "_meta": {
     "description": "FAO-REC-001, FAO-REC-002, FAO-REC-004, FAO-REC-006, FAO-REC-007: one Per-Asset Reconcile input per policy branch and per bad-input class. Used by test/node/recon.test.mjs against the exported Code node. Thresholds mirror seeds/0006 (scope Spot) in the shape the Get Materiality Thresholds query returns.",
     "special_values": "A value written as {\"$special\": \"undefined\" | \"NaN\" | \"Infinity\" | \"-Infinity\"} stands for that JavaScript value, which JSON cannot carry. The key is kept present on that side.",
-    "expect_ratio": "number: inputs.ratio must be a finite number; null: inputs.ratio must be null; any: not checked."
+    "expect_ratio": "number: inputs.ratio must be a finite number; null: inputs.ratio must be null; any: not checked.",
+    "stablecoin_band": "IC-38 (owner decision 2026-11-07): the USDC and USDT ratio_band_upper is 1.05 because stablecoin reserves are held near 105%; floor and band lower stay 1.00. stablecoin_in_band_near_105 sits between the old 1.005 band and 1.05 and is ALLOW; stablecoin_above_band_upper is above 1.05."
   },
   "thresholds": [
     {
@@ -42,7 +43,7 @@
       "asset_class": "Stablecoin",
       "ratio_floor": 1,
       "ratio_band_lower": 1,
-      "ratio_band_upper": 1.005,
+      "ratio_band_upper": 1.05,
       "materiality_usd": 10000
     },
     {
@@ -50,7 +51,7 @@
       "asset_class": "Stablecoin",
       "ratio_floor": 1,
       "ratio_band_lower": 1,
-      "ratio_band_upper": 1.005,
+      "ratio_band_upper": 1.05,
       "materiality_usd": 10000
     },
     {
@@ -204,6 +205,42 @@
         "policy_outcome": "ALLOW",
         "policy_sub_tier": null,
         "hitl_status": "NOT_REQUIRED",
+        "ratio": "number"
+      }
+    },
+    {
+      "id": "stablecoin_in_band_near_105",
+      "branch": "IN_BAND",
+      "wallet": {
+        "USDC": 104000
+      },
+      "ledger": {
+        "USDC": 100000
+      },
+      "expect": {
+        "asset": "USDC",
+        "band_status": "IN_BAND",
+        "policy_outcome": "ALLOW",
+        "policy_sub_tier": null,
+        "hitl_status": "NOT_REQUIRED",
+        "ratio": "number"
+      }
+    },
+    {
+      "id": "stablecoin_above_band_upper",
+      "branch": "ABOVE_BAND_UPPER",
+      "wallet": {
+        "USDT": 105100
+      },
+      "ledger": {
+        "USDT": 100000
+      },
+      "expect": {
+        "asset": "USDT",
+        "band_status": "ABOVE_BAND_UPPER",
+        "policy_outcome": "REQUIRE_HUMAN",
+        "policy_sub_tier": "STANDARD",
+        "hitl_status": "PENDING",
         "ratio": "number"
       }
     },

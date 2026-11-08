@@ -1,7 +1,7 @@
 """
 FinAgent OS: thin PostgREST and webhook clients on httpx.
 
-FAO-GOV-003 (least privilege): the MCP server talks to Supabase only through
+FAO-GOV-015 (least privilege): the MCP server talks to Supabase only through
 PostgREST and Auth with the public key plus a signed-in user's own access
 token. No service key, no direct database connection.
 
@@ -66,7 +66,7 @@ class FaoError(Exception):
 
 # Hosts on which plain http is allowed (local stack only). Everywhere else the
 # URL must be https, because passwords, bearer tokens, the invoke key and run
-# tokens travel on the first request (FAO-GOV-003).
+# tokens travel on the first request (FAO-GOV-015).
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 

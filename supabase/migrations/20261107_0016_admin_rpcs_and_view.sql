@@ -658,15 +658,21 @@ COMMENT ON FUNCTION public.fao_ledger_correct(json) IS
 -- caller's own privileges and RLS on shadow_ledger, run_invocations and
 -- hitl_queue apply, so only members and the reader see rows. Named columns
 -- only; never reads fao_private. No aggregate ratio.
+-- Patch round 6 (P3): a COMMITTED row whose hitl_status is EXPIRED is never
+-- counted as a commit (committed_count, latest_committed_*). The sweep no
+-- longer writes one; the filter keeps any such row written before the patch
+-- from reading as a commit of the batch.
 CREATE VIEW public.fao_run_summary WITH (security_invoker = true) AS
 WITH ev AS (
   SELECT correlation_id, min(agent_id) AS agent_id,
          min(event_timestamp) AS started_at, max(event_timestamp) AS latest_event_at,
          count(*) AS event_count,
-         count(*) FILTER (WHERE inputs->>'event_type' = 'COMMITTED') AS committed_count,
+         count(*) FILTER (WHERE inputs->>'event_type' = 'COMMITTED'
+                            AND hitl_status IS DISTINCT FROM 'EXPIRED'::public.hitl_status) AS committed_count,
          coalesce(bool_or(inputs->>'event_type' = 'COMMIT_BLOCKED'), false) AS commit_blocked,
          count(*) FILTER (WHERE inputs->>'event_type' = 'CORRECTION') AS correction_count,
-         max(ledger_id) FILTER (WHERE inputs->>'event_type' = 'COMMITTED') AS last_committed_id
+         max(ledger_id) FILTER (WHERE inputs->>'event_type' = 'COMMITTED'
+                                AND hitl_status IS DISTINCT FROM 'EXPIRED'::public.hitl_status) AS last_committed_id
   FROM public.shadow_ledger GROUP BY correlation_id)
 SELECT ev.correlation_id, ev.agent_id, ri.invoker_id, ri.invoked_via, ri.state::text AS run_state,
        ev.started_at, ev.latest_event_at, ev.event_count,
@@ -688,7 +694,7 @@ CREATE TRIGGER fao_run_summary_read_only
   FOR EACH ROW EXECUTE FUNCTION fao_private.deny_row_mutation();
 
 COMMENT ON VIEW public.fao_run_summary IS
-  'FAO-GOV-015, FAO-GOV-008: one row per correlation id in the Shadow Ledger: run record fields, newest request and decision, latest COMMITTED outcome and status, commit-blocked and correction counts. Security invoker; readable by members and the reader under RLS.';
+  'FAO-GOV-015, FAO-GOV-008: one row per correlation id in the Shadow Ledger: run record fields, newest request and decision, latest COMMITTED outcome and status (a COMMITTED row with hitl_status EXPIRED is never counted: an expired request is not a commit), commit-blocked and correction counts. Security invoker; readable by members and the reader under RLS.';
 
 -- ----------------------------------------------------------------------------
 -- Revoke every function in this file and the view from every client role.

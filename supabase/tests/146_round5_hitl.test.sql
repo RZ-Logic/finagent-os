@@ -307,9 +307,9 @@ SELECT is((SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.prona
 -- F-28: seed 0003 sox_control_ids per agent (SOX-MAPPING.md)
 -- ============================================================================
 SELECT is((SELECT array_agg(c ORDER BY c) FROM public.agent_registry ar, unnest(ar.sox_control_ids) c WHERE ar.agent_id = 'fao_reserve_recon_v1'),
-  ARRAY['FAO-GOV-001', 'FAO-GOV-002', 'FAO-GOV-003', 'FAO-GOV-004', 'FAO-GOV-008', 'FAO-GOV-009', 'FAO-GOV-013', 'FAO-GOV-014', 'FAO-GOV-015',
+  ARRAY['FAO-GOV-001', 'FAO-GOV-002', 'FAO-GOV-003', 'FAO-GOV-004', 'FAO-GOV-006', 'FAO-GOV-007', 'FAO-GOV-008', 'FAO-GOV-009', 'FAO-GOV-013', 'FAO-GOV-014', 'FAO-GOV-015',
         'FAO-REC-001', 'FAO-REC-002', 'FAO-REC-003', 'FAO-REC-004', 'FAO-REC-006', 'FAO-REC-007', 'FAO-REC-008'],
-  'F-28: the flagship lists every live or partial control it exercises (REC-003, REC-004, REC-008, GOV-008, GOV-009, GOV-015 included)');
+  'F-28: the flagship lists every live or partial control it exercises (GOV-006, GOV-007, GOV-008, GOV-009, GOV-015, REC-003, REC-004, REC-008 included)');
 SELECT is((SELECT count(*) FROM public.agent_registry ar
             WHERE ar.agent_id IN ('fao_close_orchestrator_v1', 'fao_variance_analyzer_v1', 'fao_treasury_monitor_v1')
               AND (SELECT array_agg(c ORDER BY c) FROM unnest(ar.sox_control_ids) c)

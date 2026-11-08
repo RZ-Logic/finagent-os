@@ -42,12 +42,13 @@
 --   - Phase 2-5: the first statement sets fao.change_reason, which every
 --     change to agent_registry now needs (FAO-GOV-002).
 --   - sox_control_ids lists every control SOX-MAPPING.md says the agent
---     exercises (fix round 5, F-28): the flagship adds FAO-GOV-008,
---     FAO-GOV-009, FAO-GOV-015, FAO-REC-003, FAO-REC-004 and FAO-REC-008.
---     The stubs have no workflow, so they list only the inherited platform
---     controls. Planned controls (FAO-GOV-005, 010 to 012, FAO-REC-005,
+--     exercises (fix round 5, F-28; patch round 6 adds FAO-GOV-006 and
+--     FAO-GOV-007): the flagship adds FAO-GOV-006, FAO-GOV-007,
+--     FAO-GOV-008, FAO-GOV-009, FAO-GOV-015, FAO-REC-003, FAO-REC-004 and
+--     FAO-REC-008 to the platform set. The stubs have no workflow, so they
+--     list only the inherited platform controls. Planned controls (FAO-GOV-005, 010 to 012, FAO-REC-005,
 --     009) are not listed. supabase/tests/146_round5_hitl.test.sql asserts
---     the set per agent.
+--     the full set per agent.
 --   - The flagship rollback_procedure text below describes the correction
 --     procedure: an erroneous ledger row is corrected by a CORRECTION event
 --     that references the original ledger_id (fao_ledger_correct, phase
@@ -91,6 +92,8 @@ SELECT
     'FAO-GOV-002',  -- Agent Registry membership
     'FAO-GOV-003',  -- Risk-tier classification
     'FAO-GOV-004',  -- Segregation of Duties
+    'FAO-GOV-006',  -- Database-first vault capture (STARTED record before reconciliation)
+    'FAO-GOV-007',  -- Webhook-gated state progression (run token, HITL decide, notices)
     'FAO-GOV-008',  -- Correlation ID threading
     'FAO-GOV-009',  -- Policy outcome vocabulary
     'FAO-GOV-013',  -- Named Process Owner
@@ -119,7 +122,9 @@ SELECT
     "secondary": "public.hitl_queue (when policy_outcome = REQUIRE_HUMAN)",
     "notification": "Slack #fao-approvals (notification only, not authoritative)"
   }'::JSONB,
-  300,   -- 5 min max execution
+  900,   -- 15 min stale-run limit; at least 900 (patch round 6, P4: n8n
+         -- executionTimeout 600 s kills an execution first; migration 0013
+         -- refuses a lower value)
   24,    -- 24 hr max HITL resolution for RED-tier items
   (SELECT id FROM public.process_owners WHERE email = 'sarah.chen@finagent-os.demo');
 

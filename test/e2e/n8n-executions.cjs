@@ -11,6 +11,10 @@
 // Round 5 (S16): with `--next` it prints {"next": N} instead, the id the next
 // execution will get: one more than the larger of the AUTOINCREMENT sequence
 // and the highest stored id.
+//
+// Patch round 6 (P4, S23): with `--workflow-settings` it prints one JSON
+// object, workflow id to its stored settings object (workflow_entity, as
+// imported), for every workflow in the instance.
 // ============================================================================
 'use strict';
 
@@ -59,6 +63,20 @@ function summarise(raw) {
 }
 
 (async () => {
+  if (process.argv[2] === '--workflow-settings') {
+    const rows = await all('SELECT id, settings FROM workflow_entity ORDER BY id', []);
+    const out = {};
+    for (const r of rows) {
+      let settings = r.settings;
+      if (typeof settings === 'string') {
+        try { settings = JSON.parse(settings); } catch { settings = { parse_error: true }; }
+      }
+      out[String(r.id)] = settings && typeof settings === 'object' ? settings : {};
+    }
+    process.stdout.write(JSON.stringify(out));
+    db.close();
+    return;
+  }
   if (process.argv[2] === '--next') {
     const seq = await all("SELECT seq FROM sqlite_sequence WHERE name = 'execution_entity'", []);
     const max = await all('SELECT coalesce(max(id), 0) AS m FROM execution_entity', []);

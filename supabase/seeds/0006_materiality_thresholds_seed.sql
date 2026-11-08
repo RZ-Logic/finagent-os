@@ -9,8 +9,16 @@
 --                           period; band accommodates their documented
 --                           over-reservation posture.
 --   - ETH:       1.00-1.10  Major asset, moderate band.
---   - USDC/USDT: 1.00-1.005 Stablecoins. Tight band - any deviation from
---                           1:1 reflects operational or ledger error.
+--   - USDC/USDT: 1.00-1.05  Stablecoins. Floor and lower band stay at 1:1;
+--                           the upper band follows the owner's decision
+--                           (2026-11-07, F-24 / REG-A24, IC-38) that
+--                           stablecoin reserves are held near 105%, so a
+--                           surplus up to 1.05 is in band and only a ratio
+--                           above 1.05 is ABOVE_BAND_UPPER. Before patch
+--                           round 6 the upper band was 1.005. The live
+--                           table still holds 1.0050 from the v1 seed; the
+--                           cutover runbook applies 1.0500 through
+--                           fao_admin_set_threshold with a change reason.
 --   - SOL:       1.00-1.15  Mid-cap; wider band reflects volatility.
 --   - XRP/ADA:   1.00-1.10  Majors with moderate bands.
 --
@@ -42,11 +50,11 @@ VALUES
   ('ETH',  'Spot', 'Major',      250000.00, 1.0000, 1.0000, 1.1000,
    'Major asset with moderate over-reservation tolerance.'),
 
-  ('USDC', 'Spot', 'Stablecoin', 10000.00,  1.0000, 1.0000, 1.0050,
-   'Stablecoin. Tight band - 1:1 redemption is the peg; any meaningful deviation reflects operational or ledger error.'),
+  ('USDC', 'Spot', 'Stablecoin', 10000.00,  1.0000, 1.0000, 1.0500,
+   'Stablecoin. 1:1 redemption is the peg and the floor; the upper band of 1.05 follows the owner decision (2026-11-07) that stablecoin reserves are held near 105%. Below 1.00 investigate under-reserve; above 1.05 investigate unexpected surplus. USD materiality still applies inside the band.'),
 
-  ('USDT', 'Spot', 'Stablecoin', 10000.00,  1.0000, 1.0000, 1.0050,
-   'Stablecoin. Tight band - 1:1 redemption is the peg; any meaningful deviation reflects operational or ledger error.'),
+  ('USDT', 'Spot', 'Stablecoin', 10000.00,  1.0000, 1.0000, 1.0500,
+   'Stablecoin. 1:1 redemption is the peg and the floor; the upper band of 1.05 follows the owner decision (2026-11-07) that stablecoin reserves are held near 105%. Below 1.00 investigate under-reserve; above 1.05 investigate unexpected surplus. USD materiality still applies inside the band.'),
 
   ('SOL',  'Spot', 'Mid_cap',    100000.00, 1.0000, 1.0000, 1.1500,
    'Mid-cap with wider band reflecting price volatility and settlement timing.'),

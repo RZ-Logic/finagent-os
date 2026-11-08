@@ -91,7 +91,7 @@ SELECT is((SELECT count(*) FROM public.fao_admin_audit WHERE reason LIKE '%pgtap
 SELECT pg_temp.set_sla('fao_close_orchestrator_v1', 24, NULL);
 SELECT is(pg_temp.set_status('marcus.patel@finagent-os.demo', 'fao_close_orchestrator_v1', 'ACTIVE', 'pgtap 143 hitl sla only')->>'code', 'INVALID_INPUT',
   'R10: the HITL SLA alone is not enough (no execution SLA)');
-SELECT pg_temp.set_sla('fao_close_orchestrator_v1', NULL, 300);
+SELECT pg_temp.set_sla('fao_close_orchestrator_v1', NULL, 900);
 SELECT is(pg_temp.set_status('marcus.patel@finagent-os.demo', 'fao_close_orchestrator_v1', 'ACTIVE', 'pgtap 143 exec sla only')->>'code', 'INVALID_INPUT',
   'R10: the execution SLA alone is not enough (no HITL SLA)');
 SELECT is(pg_temp.set_status('sarah.chen@finagent-os.demo', 'fao_close_orchestrator_v1', 'ACTIVE', 'pgtap 143 not admin')->>'code', 'NOT_AUTHORISED',
@@ -103,7 +103,7 @@ SELECT is(pg_temp.set_status('marcus.patel@finagent-os.demo', 'fao_treasury_moni
 SELECT is(pg_temp.set_status('marcus.patel@finagent-os.demo', 'fao_reserve_recon_v1', 'ACTIVE', 'pgtap 143 flagship stays active')->>'ok', 'true',
   'R10: an agent with both SLAs can be set ACTIVE');
 
-SELECT pg_temp.set_sla('fao_close_orchestrator_v1', 24, 300);
+SELECT pg_temp.set_sla('fao_close_orchestrator_v1', 24, 900);
 INSERT INTO v VALUES ('act1', pg_temp.set_status('marcus.patel@finagent-os.demo', 'fao_close_orchestrator_v1', 'ACTIVE', 'pgtap 143 go live with sla'));
 SELECT ok(pg_temp.g('act1')->>'ok' = 'true' AND pg_temp.g('act1')->'after'->>'status' = 'ACTIVE'
           AND pg_temp.g('act1')->'before'->>'status' = 'STUB_DOCUMENTED',

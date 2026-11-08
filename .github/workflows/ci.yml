@@ -212,7 +212,8 @@ jobs:
       # Slack, and runs test/e2e under the same strict pass rule as the other
       # layers. db:reset above already ran local-setup, so --no-reset.
       # Round 5: the layer also runs the two harness exports with
-      # `n8n execute` (S17 to S19) and fails unless exactly 20 tests ran.
+      # `n8n execute` (S17 to S19) and fails unless exactly 23 tests ran
+      # (patch round 6 added S21 to S23).
       - name: n8n end-to-end tests
         run: node scripts/test-all.mjs --no-reset --layer e2e
       - name: Collect n8n logs

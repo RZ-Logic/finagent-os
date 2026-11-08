@@ -46,6 +46,13 @@
 //    d. The two harness exports (workflows/test_*.json) are imported
 //       unchanged and never published; S17 to S19 run them with
 //       `n8n execute` (lib.mjs runHarness).
+// 6. Patch round 6 (P1, FAO-GOV-008): the "respondfail" flagship variant
+//    has the in-band balances and one change more: the responseBody of
+//    Respond 400 and of Respond Claim Refused is invalid JSON, so the
+//    Respond to Webhook node itself fails ("Invalid JSON in 'Response Body'
+//    field") on the bad-input and refused branches. Node names, types,
+//    connections and settings stay the export's, so S21 and S22 drive a
+//    flagship failure at those two pre-claim nodes.
 // ============================================================================
 
 import { randomUUID } from 'node:crypto';
@@ -91,6 +98,10 @@ export const HARNESSES = {
 export const GATEWAY_CALLER_ID = 'FaoE2eGwCaller01';
 export const GATEWAY_CALLER_PATH = 'fao-e2e-gateway-bad-input';
 export const PRECLAIM_MESSAGE = 'FAO e2e: forced failure before Claim Run';
+// Patch round 6 (P1): the two Respond nodes the respondfail variant breaks,
+// and the body it gives them (unterminated JSON, so the node throws).
+export const RESPOND_FAIL_NODES = ['Respond 400', 'Respond Claim Refused'];
+export const RESPOND_FAIL_BODY = '{"e2e": "patch round 6 P1: invalid JSON on purpose"';
 // The error handler's map entries for the three exports (D4), exactly as the
 // export writes them.
 export const ERROR_MAP_ENTRIES = {
@@ -104,6 +115,10 @@ export const ERROR_MAP_ENTRIES = {
 export const MARKUP_NOTE = `<img src=x onerror="alert('e2e')"> & <!channel> <@U0E2E> '; DROP TABLE public.shadow_ledger; -- {{ $env.HOME }} \${process.env.HOME}`;
 export const MARKUP_NOTE_2 = '<script>alert(1)</script> </b> &amp; |pipe| *bold* _it_ `code`';
 
+// Patch round 6 (P9, IC-38): the in-band USDC ratio is 1.006, inside the
+// stablecoin band [1.0000, 1.0500] the owner set (reserves held near 105%)
+// and above the old 1.0050 upper, so S01 fails if the old band is still
+// stored. Its $6,000 discrepancy stays under the $10,000 USDC materiality.
 export const VARIANTS = {
   inband: {
     id: 'FaoE2eReconInbd1',
@@ -113,7 +128,7 @@ export const VARIANTS = {
   BTC:  1100,
   ETH:  1050,
   SOL:  1050,
-  USDC: 1000000,
+  USDC: 1006000,
   USDT: 500000,
   XRP:  1020
 }`,
@@ -131,7 +146,7 @@ export const VARIANTS = {
   BTC:  { source: 'e2e_inband', notes: 'ratio 1.10 in band [1.05, 1.25]' },
   ETH:  { source: 'e2e_inband', notes: 'ratio 1.05 in band [1.00, 1.10]' },
   SOL:  { source: 'e2e_inband', notes: 'ratio 1.05 in band [1.00, 1.15]' },
-  USDC: { source: 'e2e_inband', notes: 'exact match' },
+  USDC: { source: 'e2e_inband', notes: 'ratio 1.006 in band [1.00, 1.05], above the old 1.005 upper (IC-38); $6,000 under the $10,000 materiality' },
   USDT: { source: 'e2e_inband', notes: 'exact match' },
   XRP:  { source: 'e2e_inband', notes: 'ratio 1.02 in band [1.00, 1.10]' }
 }`,
@@ -234,6 +249,18 @@ VARIANTS.preclaim = {
   throwBeforeClaim: true,
 };
 
+// Patch round 6 (P1, S21 and S22): the in-band balances; Respond 400 and
+// Respond Claim Refused fail, so a bad body or a refused claim fails the
+// execution at a pre-claim Respond node.
+VARIANTS.respondfail = {
+  id: 'FaoE2eReconRspF1',
+  path: 'fao-e2e-recon-respondfail',
+  wallet: VARIANTS.inband.wallet,
+  ledger: VARIANTS.inband.ledger,
+  meta: VARIANTS.inband.meta.replace(/e2e_inband/g, 'e2e_respondfail'),
+  breakRespondNodes: RESPOND_FAIL_NODES,
+};
+
 function readExport(root, key) {
   return JSON.parse(readFileSync(join(root, 'workflows', EXPORTS[key].file), 'utf8'));
 }
@@ -282,12 +309,28 @@ export function flagshipVariant(root, name) {
     }
     validate.parameters.jsCode = `// E2E ONLY (test/e2e/variants.mjs): fail before Claim Run.\nthrow new Error(${JSON.stringify(PRECLAIM_MESSAGE)});\n${validate.parameters.jsCode}`;
   }
+  if (v.breakRespondNodes) breakRespondNodes(wf, v.breakRespondNodes, name);
   hook.webhookId = randomUUID();
   wf.id = v.id;
   wf.name = `fao_reserve_recon_v1 [e2e ${name}]`;
   wf.versionId = randomUUID();
   wf.tags = [];
   return wf;
+}
+
+// S21 and S22: each named node must be a Respond to Webhook node answering
+// JSON with no node after it; its responseBody becomes RESPOND_FAIL_BODY.
+// Anything else fails the build.
+function breakRespondNodes(wf, names, name) {
+  for (const n of names) {
+    const node = wf.nodes.find((x) => x.name === n);
+    const outs = (((wf.connections || {})[n] || {}).main || []).flat();
+    if (!node || node.type !== 'n8n-nodes-base.respondToWebhook' || node.parameters.respondWith !== 'json'
+        || typeof node.parameters.responseBody !== 'string' || outs.length !== 0) {
+      throw new Error(`variants: ${name}: expected ${n} to be a JSON Respond to Webhook node with no node after it`);
+    }
+    node.parameters.responseBody = RESPOND_FAIL_BODY;
+  }
 }
 
 // S14: Check Writer Count -> E2E Pause Before Finalize -> Finalize Run. The

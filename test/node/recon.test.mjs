@@ -240,6 +240,33 @@ test('Per-Asset Reconcile on the flagship fixtures gives the documented outcomes
   });
 });
 
+test('IC-38: the stablecoin band upper is 1.05 and a ratio between 1.005 and 1.05 is now in band', async () => {
+  // Owner decision 2026-11-07: stablecoin reserves are held near 105%, so
+  // the USDC and USDT band upper is 1.05 (floor and band lower stay 1.00).
+  const stable = FIX.thresholds.filter((t) => t.asset_class === 'Stablecoin');
+  assert.deepEqual(stable.map((t) => [t.asset_symbol, t.ratio_floor, t.ratio_band_lower, t.ratio_band_upper]).sort(), [
+    ['USDC', 1, 1, 1.05],
+    ['USDT', 1, 1, 1.05],
+  ]);
+  const at = async (asset, wallet, ledger, thresholds) => {
+    const out = await reconcile({ [asset]: wallet }, { [asset]: ledger }, thresholds);
+    const o = out.find((x) => x.inputs.asset === asset);
+    return [o.inputs.band_status, o.policy_outcome, o.policy_sub_tier ?? null];
+  };
+  // 1.04 with a $4,000 surplus (below the $10,000 materiality) is in band.
+  assert.deepEqual(await at('USDC', 104000, 100000), ['IN_BAND', 'ALLOW', null]);
+  // Exactly 1.05 is still in band (the rule is ratio > band upper).
+  assert.deepEqual(await at('USDC', 105000, 100000), ['IN_BAND', 'ALLOW', null]);
+  // Above 1.05 is unexpected surplus.
+  assert.deepEqual(await at('USDT', 105100, 100000), ['ABOVE_BAND_UPPER', 'REQUIRE_HUMAN', 'STANDARD']);
+  // Inside the band, USD materiality still applies.
+  assert.deepEqual(await at('USDT', 1040000, 1000000), ['IN_BAND_USD_MATERIAL', 'REQUIRE_HUMAN', 'STANDARD']);
+  // Under the old 1.005 upper the same 1.04 case escalated: the band change
+  // is what moves it.
+  const old = FIX.thresholds.map((t) => (t.asset_class === 'Stablecoin' ? { ...t, ratio_band_upper: 1.005 } : t));
+  assert.deepEqual(await at('USDC', 104000, 100000, old), ['ABOVE_BAND_UPPER', 'REQUIRE_HUMAN', 'STANDARD']);
+});
+
 // --- Check Thresholds ----------------------------------------------------------
 
 test('Check Thresholds throws on [{}] and on []', async () => {

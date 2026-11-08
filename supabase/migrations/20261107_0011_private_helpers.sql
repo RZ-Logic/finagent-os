@@ -16,6 +16,8 @@
 --                no-TRUNCATE triggers; admin audit images
 --   FAO-GOV-002  change reason required for configuration tables
 --   FAO-GOV-004  role checks (has_role, has_any_role) used by RLS and RPCs
+--                (patch round 6, P6: own uid and owner sessions answered
+--                before any PG_CONTEXT read; has_any_role tests grants inline)
 --   FAO-GOV-008  fixed result envelope, codes, HTTP statuses and messages;
 --                the client RPC body decoder client_args (IC-18)
 --
@@ -138,6 +140,11 @@ COMMENT ON FUNCTION fao_private.role_query_allowed(uuid, text) IS
 -- an active owner row. For admin and reader only global grants count.
 -- Round 5 (U12): false when a client asks about another user directly (see
 -- role_query_allowed).
+-- Patch round 6 (P6): the caller check short-circuits before any stack read.
+-- A question about the caller's own uid (every RLS policy passes auth.uid())
+-- and an owner-class session are answered at once; only a question about
+-- another user reads PG_CONTEXT. The read policies also wrap the call in a
+-- scalar subquery (0013), so it runs once per statement, not once per row.
 CREATE FUNCTION fao_private.has_role(p_uid uuid, p_role public.fao_app_role, p_agent_id text)
 RETURNS boolean
 LANGUAGE plpgsql
@@ -146,14 +153,23 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
+  v_me      uuid;
   v_context text;
 BEGIN
   IF p_uid IS NULL OR p_role IS NULL THEN
     RETURN false;
   END IF;
-  GET DIAGNOSTICS v_context = PG_CONTEXT;
-  IF NOT fao_private.role_query_allowed(p_uid, v_context) THEN
-    RETURN false;
+  BEGIN
+    v_me := auth.uid();
+  EXCEPTION WHEN others THEN
+    v_me := NULL;
+  END;
+  IF v_me IS DISTINCT FROM p_uid
+     AND fao_private.caller_role() NOT IN ('postgres', 'supabase_admin') THEN
+    GET DIAGNOSTICS v_context = PG_CONTEXT;
+    IF NOT fao_private.role_query_allowed(p_uid, v_context) THEN
+      RETURN false;
+    END IF;
   END IF;
   RETURN EXISTS (
            SELECT 1
@@ -173,10 +189,15 @@ END;
 $$;
 
 COMMENT ON FUNCTION fao_private.has_role(uuid, public.fao_app_role, text) IS
-  'FAO-GOV-004: unrevoked grant of the role for the agent (NULL agent grant covers all). Non-reader roles need an active owner row; admin and reader count only global grants. Executable by authenticated for RLS; a client asking directly about another user gets false (round 5, U12).';
+  'FAO-GOV-004: unrevoked grant of the role for the agent (NULL agent grant covers all). Non-reader roles need an active owner row; admin and reader count only global grants. Executable by authenticated for RLS; a client asking directly about another user gets false (round 5, U12). Own uid and owner sessions skip the stack read (patch round 6, P6).';
 
 -- FAO-GOV-004: true when has_role is true for some role and some agent.
 -- Round 5 (U12): the same caller check as has_role.
+-- Patch round 6 (P6): the same short-circuit as has_role, and the grant test
+-- is inline instead of one has_role call (and one stack read) per grant. A
+-- grant row satisfies has_role for its own role and agent exactly when it is
+-- global or its role is not admin or reader, and the role is reader or the
+-- owner row is active.
 CREATE FUNCTION fao_private.has_any_role(p_uid uuid)
 RETURNS boolean
 LANGUAGE plpgsql
@@ -185,27 +206,38 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
+  v_me      uuid;
   v_context text;
 BEGIN
   IF p_uid IS NULL THEN
     RETURN false;
   END IF;
-  GET DIAGNOSTICS v_context = PG_CONTEXT;
-  IF NOT fao_private.role_query_allowed(p_uid, v_context) THEN
-    RETURN false;
+  BEGIN
+    v_me := auth.uid();
+  EXCEPTION WHEN others THEN
+    v_me := NULL;
+  END;
+  IF v_me IS DISTINCT FROM p_uid
+     AND fao_private.caller_role() NOT IN ('postgres', 'supabase_admin') THEN
+    GET DIAGNOSTICS v_context = PG_CONTEXT;
+    IF NOT fao_private.role_query_allowed(p_uid, v_context) THEN
+      RETURN false;
+    END IF;
   END IF;
   RETURN EXISTS (
            SELECT 1
              FROM public.fao_user_roles r
             WHERE r.user_id = p_uid
               AND r.revoked_at IS NULL
-              AND fao_private.has_role(p_uid, r.role, r.agent_id)
+              AND (r.agent_id IS NULL
+                   OR r.role NOT IN ('admin'::public.fao_app_role, 'reader'::public.fao_app_role))
+              AND (r.role = 'reader'::public.fao_app_role OR fao_private.owner_active(p_uid))
          );
 END;
 $$;
 
 COMMENT ON FUNCTION fao_private.has_any_role(uuid) IS
-  'FAO-GOV-004: true when has_role holds for some role and some agent. Used by member read policies. Executable by authenticated for RLS; a client asking directly about another user gets false (round 5, U12).';
+  'FAO-GOV-004: true when has_role holds for some role and some agent. Used by member read policies. Executable by authenticated for RLS; a client asking directly about another user gets false (round 5, U12). Own uid and owner sessions skip the stack read; the grant test is inline (patch round 6, P6).';
 
 -- ----------------------------------------------------------------------------
 -- Fixed codes, HTTP statuses and messages (FAO-GOV-008). One table, shared by

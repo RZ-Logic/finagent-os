@@ -126,7 +126,7 @@ On this branch, one review run of the flagship writes 12 ledger rows (e2e scenar
 
 ### Component overview
 
-Counts are from the tree on this branch. The live stack runs the first ten migrations and three of the seeds (v1).
+Counts are from the tree on this branch. Per the v1 release record, the live stack runs the first ten migrations and three of the seeds; that count has not been checked against the live database for this build.
 
 | Component | What it is | Role of AI |
 |-----------|-----------|:-:|
@@ -205,13 +205,13 @@ npm test             # every layer; npm run test:offline runs the first three on
 | `pytest` | MCP server tests, offline (PostgREST mocked) |
 | `pgtap` | pgTAP files in `supabase/tests/` against the local database: grants, guards, decisions, runs, rollup, sweep, journal, admin |
 | `api` | Real sign-ins against the local Supabase API: SoD, spoofed identity, direct writes, body checks, status codes |
-| `e2e` | A fresh n8n 2.46.6 in Docker with a mock Slack: the exports are imported, published and run for real (scenarios S01 to S20) |
+| `e2e` | A fresh n8n 2.46.6 in Docker with a mock Slack: the exports are imported, published and run for real (scenarios S01 to S23) |
 
-The last full run (2026-11-07, fix round 5 tree on top of commit `65a9e7d`, fresh reset) passed every layer, with nothing skipped:
+The last full run (2026-11-08 01:11 UTC, patch round 6 tree on top of commit `34ba173`, not yet committed, fresh reset) passed every layer, with nothing skipped:
 
 | exports | node | pytest | pgtap | api | e2e | total |
 |---:|---:|---:|---:|---:|---:|---:|
-| 129 | 146 | 320 | 1164 | 44 | 20 | 1823 |
+| 136 | 150 | 320 | 1236 | 45 | 23 | 1910 |
 
 `python mcp/scripts/smoke_local.py` checks the six MCP read tools against the local stack; it is not part of `npm test`.
 
@@ -327,7 +327,7 @@ Rejected for `agent_registry.agent_id`. The agent_id appears in n8n workflow ref
 
 ## 📋 Known Limitations
 
-The gaps a reviewer would find are surfaced below. "Fixed" means built on this branch and covered by tests that pass in the fix round 5 run (1823 of 1823, see [Tests](#-tests)). None of it is live: the live stack runs v1, with every v1 gap, until the cutover.
+The gaps a reviewer would find are surfaced below. "Fixed" means built on this branch and covered by tests that pass in the patch round 6 run (1910 of 1910, see [Tests](#-tests)). None of it is live: the live stack runs v1, with every v1 gap, until the cutover.
 
 ### Control gaps: status after phases 2 to 5 (core)
 
@@ -336,13 +336,13 @@ The gaps a reviewer would find are surfaced below. "Fixed" means built on this b
 - **The approval endpoints were demo only: unauthenticated and not hardened. Fixed:** the n8n approval pages are retired. Approvers sign in on a static approval page and decide with their own session; the run-start webhook needs a header key and a single-use run token; response statuses match outcomes.
 - **HITL resolution and its ledger writes were not atomic. Fixed:** the decision and its ledger events commit in one transaction, and so do request creation and its ledger event.
 - **Not every failure was recorded to the ledger. Fixed in the database and the workflows:** an error workflow, a five-minute sweep and notification records. A failure that cannot attach to a run is kept in the append-only `workflow_failures` table. The workflows run end to end in the e2e layer against n8n 2.46.6 only, not yet on the live n8n. The Writer has no error workflow of its own; a failed Writer call fails the flagship, which is recorded.
-- **HITL timeout was not enforced. Fixed:** late decisions are refused; overdue requests expire and escalate once.
+- **HITL timeout was not enforced. Fixed:** late decisions are refused; overdue requests expire and escalate once. An expired request closes with HITL_EXPIRED and is never recorded as a commit.
 - **Append-only was not administrator-proof. Narrowed:** UPDATE, DELETE, TRUNCATE and direct INSERT are refused for every application role, and ledger rows are appended only through database functions with database-set timestamps. The database owner remains outside the control (the owner can disable or drop a trigger). There is no independent or write-once evidence store; trusting the owner is a design choice for now, and independent evidence storage is planned.
 - **The committed Writer export dropped batch items. Fixed:** the Writer stores a batch all or none and names every bad item.
 
 ### Remaining limits
 
-- The database owner, holders of the `postgres` password and holders of platform admin or secret keys are outside the control (they can change identities or disable triggers); after cutover only the owner's password manager holds them.
+- The database owner, holders of the `postgres` password and holders of platform admin or secret keys are outside the control (they can change identities or disable triggers); the plan is that after cutover only the owner's password manager holds them; that is not yet in place.
 - In the public demo one person holds every demo identity; the controls bind actions to identities, they cannot prove those identities are different people.
 - Policy inputs and per-asset outcomes are produced by the n8n workflow; the database checks shape, completeness, fail-closed inputs and chain integrity, not the policy result.
 - Approver authority beyond role membership (rank, limits per amount) is not modelled; it is a prerequisite for dual approval.
@@ -353,11 +353,12 @@ The gaps a reviewer would find are surfaced below. "Fixed" means built on this b
 - **Automated browser test of the approval page.** The approval page's logic is covered by unit tests and its sign-in and decision flow is checked by hand; there is no automated browser test yet.
 - **Python command-line tools (run start, admin).** There is no command-line tool yet for starting runs or for admin changes. Runs start through the MCP tool; admin changes go through the admin functions with the admin's own session, or through the documented SQL recipe with a change reason.
 - **Hosted rehearsal before cutover.** Behaviour that only a hosted project shows (pooler login, API key mode, Auth settings, page headers) is checked step by step during the live cutover, not first in a rehearsal on a scratch project.
-- **End-to-end run of the n8n workflows.** Planned as deferred, now built for local use: the e2e layer imports, publishes and runs the exports in a local n8n 2.46.6. They have not been run on the live n8n, whose version is not yet recorded.
+- **Automated end-to-end run of the n8n workflows (live n8n version).** The n8n workflows run end to end automatically on a local n8n 2.46.6 only: the e2e layer imports the exports, publishes them and runs scenarios S01 to S23 against local Supabase and a mock Slack in every `npm test`; the CI `e2e` job runs the same layer but has not yet run on GitHub. They are not run end to end against the live n8n version, and no failure path is exercised on live.
 - Dual approval (ADR-0001) is not yet enforced: each request records its configured approval count from the registry and the single approval that is enforced today.
 - The aggregate reserve ratio is planned (scope, valuation basis and floor first). There is no evidence package yet. FAO-REC-003, FAO-REC-004 and FAO-REC-008 in [`SOX-MAPPING.md`](./SOX-MAPPING.md) carry their status.
 - Requests that PostgREST refuses before a database function runs (an empty body, invalid JSON, GET or form-encoded calls) are not journaled. None of them changes anything; this was measured on the local PostgREST only.
-- A new n8n execution that reuses the execution id of a run still RUNNING inside its SLA window is refused at claim; if that execution then fails, its FAILED row can land on the older run, because the database cannot tell the two executions apart. Past the window, the claim fails the stale run first.
+- A new n8n execution that reuses the execution id of a run still RUNNING inside its SLA window is refused at claim. If that execution then fails at any node before Respond 202 (the refused branch included), the error handler records it as pre-claim and never touches the older run; past the window, the claim fails the stale run first. A claim that committed and then errored inside Claim Run leaves its run RUNNING until the sweep fails it as stale. The stale-run rule relies on n8n stopping the flagship at its 600-second `executionTimeout` before the 900-second floor of `sla_max_execution_seconds`; that holds only where n8n's `EXECUTIONS_TIMEOUT_MAX` is at least 600. The database still cannot tell two executions with the same id apart.
+- **Stablecoin band (F-24, decided 2026-11-07).** The owner decided that stablecoin reserves are held near 105%, so the seeded USDC and USDT upper band is 1.05 (floor and lower band stay 1.0000); a ratio above 1.05 escalates as ABOVE_BAND_UPPER. The live table holds 1.0050 until the cutover runbook applies 1.05 through `fao_admin_set_threshold` with a change reason (IC-38); until then live escalates a stablecoin ratio above 1.005.
 - A database error inside the notifier, or an unpublished notifier, fails the sweeper run visibly but does not count toward the notification retry limit. A notice target deactivated between an escalation and its first send gets no operator alert unless the notice is listed again. The wording of an expired escalation uses the n8n host clock.
 - Every member can read every request, ledger row and run across agents; only the decision view is limited to approvers, the invoker and admins.
 - A role grant created at the same moment as a decision or finalize is not waited for; this can only turn a refusal into an allow on a later decision, never the reverse.
@@ -374,7 +375,6 @@ These are built as described and wait for the owner's sign-off. Every interface 
 
 - **Notice window (R12).** A request with no sent notice after 5 minutes x (`notify_max_attempts` + 1), 20 minutes at the default, is escalated once as NOTIFICATION_FAILED, even with no recorded attempt, and is no longer retried.
 - **Invoker keys on STARTED (IC-11).** A STARTED item that carries `invoker_id`, `invoked_via` or `reason` is stored with those values overwritten from the run record, not refused. The other reserved keys are refused.
-- **Stablecoin band (F-24).** The seeded USDC and USDT upper band is 1.0050, below Kraken's published 105%+, so a live stablecoin feed at that posture would escalate every run. Whether that surplus should escalate is a policy choice.
 
 ### Wired but not yet complete
 

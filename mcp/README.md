@@ -22,7 +22,7 @@ Every read runs as the reader user. Lists page with `limit` and `offset` and rep
 | `get_agent_registry` | `status?` (ACTIVE, STUB_DOCUMENTED, DEPRECATED), `limit=50`, `offset=0` | agents with risk tier, status, run limit and owner (`process_owners` embed) |
 | `get_pending_hitl` | `limit=50`, `offset=0` | requests with `decision = PENDING`, the invoker embed, and `past_deadline` (UTC now at or after `timeout_at`) |
 | `get_materiality_thresholds` | `asset_symbol?` (upper-cased, `^[A-Z0-9]{1,12}$`), `scope?` (Spot, Futures, Spot_and_Futures) | thresholds; without `scope`, every scope for the symbol |
-| `get_recent_executions` | `limit=10`, `offset=0`, `failures_limit=10` (1 to 200) | one row per run from the database view `fao_run_summary`: `hitl_status`: the request's decision when there is a request; otherwise NOT_REQUIRED only for a committed run, NOT_YET_DETERMINED while the run is in flight (REQUESTED, RUNNING, AWAITING_HITL; the request opens at finalize), NONE when the run ended without one (FAILED, EXPIRED, commit blocked), `outcome` and `status` from the newest COMMITTED row, `conflict` (more than one COMMITTED), `commit_blocked` (audit chain, `AGENT_NOT_ACTIVE` or `INVOKER_NOT_ACTIVE` gate), `corrected`; plus `workflow_failures`: the newest rows of the append-only `workflow_failures` table (failures that attached no FAILED row to a run: `source` flagship, flagship_pre_claim, gateway or sweeper; `outcome` UNKNOWN_EXECUTION, ALREADY_TERMINAL, PRE_CLAIM or NOT_FLAGSHIP; `failed_node` and `message` under `untrusted_text`) and `workflow_failures_has_more` |
+| `get_recent_executions` | `limit=10`, `offset=0`, `failures_limit=10` (1 to 200) | one row per run from the database view `fao_run_summary`: `hitl_status`: the request's decision when there is a request; otherwise NOT_REQUIRED only for a committed run, NOT_YET_DETERMINED while the run is in flight (REQUESTED, RUNNING, AWAITING_HITL; the request opens at finalize), NONE when the run ended without one (FAILED, EXPIRED, commit blocked), `outcome` and `status` from the newest COMMITTED row, `conflict` (more than one COMMITTED; a COMMITTED row with hitl_status EXPIRED is never counted, and an expired run has none since the sweep writes HITL_EXPIRED as its closing record), `commit_blocked` (audit chain, `AGENT_NOT_ACTIVE` or `INVOKER_NOT_ACTIVE` gate), `corrected`; plus `workflow_failures`: the newest rows of the append-only `workflow_failures` table (failures that attached no FAILED row to a run: `source` flagship, flagship_pre_claim, gateway or sweeper; `outcome` UNKNOWN_EXECUTION, ALREADY_TERMINAL, PRE_CLAIM or NOT_FLAGSHIP; `failed_node` and `message` under `untrusted_text`) and `workflow_failures_has_more` |
 | `get_process_owners` | `limit=50`, `offset=0` | owners with `active` and `escalates_to_name` |
 
 `get_recent_executions` reads the run summaries from one view in one request, so no fetch window can split a run's history (the `workflow_failures` rows are a second, separate read), and the HITL status comes from the request itself (the v1 PENDING inversion is gone).
@@ -50,7 +50,7 @@ Every read runs as the reader user. Lists page with `limit` and `offset` and rep
 
 ## 🛠️ Architectural notes
 
-### Reads run as a dedicated reader user (FAO-GOV-003)
+### Reads run as a dedicated reader user (FAO-GOV-015)
 
 The server signs in as `FAO_READER_EMAIL` with the project's public key and sends that user's access token on every read. At startup it calls `fao_whoami` and refuses to start unless the reader's roles are exactly one global `reader` role. The reader can SELECT the FinAgent read tables and the summary view under RLS, and nothing else: writes and workflow functions are refused by the database.
 
@@ -73,7 +73,7 @@ Tools never raise to the client. Failures come back as structured results that c
 | Result | When |
 |---|---|
 | `{status:'error', kind, http_status}` | `kind` is `timeout`, `connect`, `http`, `bad_json`, `auth` (sign-in refused) or `internal` |
-| `{status:'refused', code, http_status, ref, idempotency_key}` | `fao_run_start` refused the run; `code` is the database result code (for example `RATE_LIMITED`, `NOT_AUTHORISED`, `AGENT_NOT_ACTIVE`) and `ref` the refusal journal id; `correlation_id` is added when the refusal names a run (`EXPIRED`: the key belongs to a run that expired, so start again with a new key) |
+| `{status:'refused', code, http_status, ref, idempotency_key}` | `fao_run_start` refused the run; `code` is the database result code (for example `RATE_LIMITED`, `NOT_AUTHORISED`, `AGENT_NOT_ACTIVE`) and `ref` the refusal journal id; `correlation_id` is added when the refusal names a run (`EXPIRED`: the key belongs to a run that expired, so start again with a new key; each such replay counts toward the agent's hourly run limit, and over it the replay is refused `RATE_LIMITED`) |
 | `{status:'replayed', correlation_id, state, idempotency_key}` | the key matched a run that has already started; no webhook call is made |
 | `{status:'invoked', correlation_id, idempotency_key}` | the webhook accepted the run (HTTP 202) |
 | `{status:'unknown', message, correlation_id, idempotency_key}` | the webhook call timed out or dropped after it was sent, so the run may have started. Check the ledger for the correlation id before retrying with the same key |

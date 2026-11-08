@@ -2,7 +2,8 @@
 // FinAgent OS API tests: round 5 contract over HTTP (K2, K3, K5)
 // Controls: FAO-GOV-004 (an approval never commits a run whose invoker lost
 // the right to run it; the decision view says why), FAO-GOV-008 (an expired
-// run's idempotency key answers EXPIRED, never a token).
+// run's idempotency key answers EXPIRED, never a token), FAO-GOV-003 (patch
+// round 6 P5: replays of an EXPIRED key count toward RATE_LIMITED).
 //
 // K2 changes Aisha's owner flag and invoker grant through the admin RPCs as
 // Marcus, as an operator would, and puts both back in a finally; every check
@@ -222,4 +223,80 @@ test('K5: replaying the idempotency key of an EXPIRED run is EXPIRED 410 with th
   }
   const runs = Number((await one('SELECT count(*) AS n FROM public.run_invocations WHERE invoker_id = $1 AND idempotency_key = $2', [uid('aisha'), idem])).n);
   assert.equal(runs, 1, 'no new run for the replayed key');
+});
+
+// Patch round 6 P5 (red team r5 item 6; FAO-GOV-003): replays of an EXPIRED
+// idempotency key count toward the same RATE_LIMITED rule as run starts
+// (max_runs_per_hour per invoker and agent over the last hour). Before P5
+// each replay journaled one EXPIRED refusal and never reached the limit.
+// Aisha (global invoker grant) on the local-only rate-limit agent, so the
+// rate-limit user's own window in start.test.mjs is untouched. The limit is
+// set to 3 above the runs already in the window and put back in a finally.
+test('P5: repeated replays of an EXPIRED key reach RATE_LIMITED 429, and a new start is then refused the same way', async () => {
+  const agent = 'fao_ratelimit_test_v1';
+  const aisha = uid('aisha');
+  const windowRuns = async () => Number((await one(
+    "SELECT count(*) AS n FROM public.run_invocations WHERE invoker_id = $1 AND agent_id = $2 AND requested_at > now() - interval '1 hour'",
+    [aisha, agent],
+  )).n);
+  const priorReplays = Number((await one(
+    `SELECT count(*) AS n FROM public.fao_refusal_journal
+      WHERE actor_uid = $1 AND entry_point = 'rpc:fao_run_start' AND code = 'EXPIRED'
+        AND attempted->>'agent_id' = $2 AND at > now() - interval '1 hour'`,
+    [aisha, agent],
+  )).n);
+  const existing = await windowRuns();
+  const seeded = (await one('SELECT max_runs_per_hour AS m FROM public.agent_registry WHERE agent_id = $1', [agent])).m;
+  const limit = existing + 3;
+  assert.ok(limit <= 60, `room to set the limit (${existing} runs already in the window)`);
+  const marcus = await signIn('marcus');
+  const setLimit = async (m, why) => {
+    const r = await rpc('fao_admin_set_agent', { p_agent_id: agent, p_status: null, p_ai_advisory_enabled: null, p_max_runs_per_hour: String(m), p_reason: `${TAG} ${why}` }, { token: marcus });
+    assert.equal(r.status, 200, `fao_admin_set_agent ${m} (${why}): ${r.status} ${r.body && r.body.code}`);
+  };
+  await setLimit(limit, 'P5 limit 3 above the runs in the window');
+  try {
+    const idem = newKey();
+    const reason = `${TAG} P5 expired replays`;
+    const s = await startRun('aisha', { agent, idem, reason });
+    assert.equal(s.status, 200, `start: ${s.status} ${JSON.stringify(s.body)}`);
+    const corr = s.body.correlation_id;
+    await ownerTx(async (c) => {
+      await c.query("SELECT set_config('fao.change_reason', $1, true)", [`${TAG} P5 expire one run token`]);
+      await c.query("UPDATE fao_private.run_tokens SET expires_at = now() - interval '1 second' WHERE correlation_id = $1", [corr]);
+    });
+
+    // The window now holds existing + 1 runs against a limit of existing + 3,
+    // so at most 3 replays (the first one expires the run) can answer EXPIRED
+    // before the replays themselves fill the window.
+    const codes = [];
+    for (let n = 1; n <= 8; n += 1) {
+      const r = await startRun('aisha', { agent, idem, reason });
+      assert.ok(r.body && !r.body.run_token, `replay ${n}: never a token (${r.status} ${r.body && r.body.code})`);
+      if (r.body.code === 'RATE_LIMITED') {
+        assert.equal(r.status, 429, `replay ${n}`);
+        assert.equal(r.body.message, MESSAGES.RATE_LIMITED, `replay ${n}`);
+      } else {
+        assert.equal(r.body.code, 'EXPIRED', `replay ${n}: ${r.status} ${JSON.stringify(r.body)}`);
+        assert.equal(r.status, 410, `replay ${n}`);
+      }
+      codes.push(r.body.code);
+    }
+    const seq = codes.map((c) => (c === 'EXPIRED' ? 'E' : 'R')).join('');
+    assert.match(seq, /^E{0,3}R+$/, `replay codes ${codes.join(',')}: EXPIRED at most 3 times, then RATE_LIMITED every time`);
+    if (existing === 0 && priorReplays === 0) assert.ok(seq.startsWith('E'), `fresh window: the first replay answers EXPIRED (${codes.join(',')})`);
+    assert.equal((await one('SELECT state::text AS s FROM public.run_invocations WHERE correlation_id = $1', [corr])).s, 'EXPIRED');
+    assert.equal(Number((await one('SELECT count(*) AS n FROM public.run_invocations WHERE invoker_id = $1 AND idempotency_key = $2', [aisha, idem])).n), 1, 'no new run for the replayed key');
+
+    // Same rule as run starts: with the window filled by replays, a fresh key
+    // is refused RATE_LIMITED too, and no run is created.
+    const runsBefore = await windowRuns();
+    assert.equal(runsBefore, existing + 1, 'only the one run in the window');
+    const fresh = await startRun('aisha', { agent, reason: `${TAG} P5 fresh start after the replays` });
+    assert.equal(fresh.status, 429, `fresh start: ${fresh.status} ${JSON.stringify(fresh.body)}`);
+    assert.equal(fresh.body.code, 'RATE_LIMITED');
+    assert.equal(await windowRuns(), runsBefore, 'the refused start created no run');
+  } finally {
+    await setLimit(seeded, 'P5 restore the seeded limit');
+  }
 });

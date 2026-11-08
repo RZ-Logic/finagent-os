@@ -10,6 +10,10 @@
 --                        registry, role, idempotency key and rate limit, and
 --                        returns a single-use run token (stored only as a
 --                        hash)
+--                        (patch round 6, P5: EXPIRED replay refusals count
+--                        toward the rate limit, fao_private.run_start_count;
+--                        P7: inputs keys NFKC-folded, no whitespace or
+--                        control characters)
 -- Workflow RPCs (n8n over the fao_workflow connection, typed parameters):
 --   fao_run_claim()            consumes the run token; the run starts
 --   fao_ledger_append_batch()  Writer events, all or none
@@ -116,6 +120,36 @@ COMMENT ON FUNCTION public.fao_whoami(json) IS
 -- ----------------------------------------------------------------------------
 -- fao_run_start (FAO-GOV-008, FAO-GOV-002, FAO-GOV-003, FAO-GOV-004)
 -- ----------------------------------------------------------------------------
+-- Patch round 6 (P5): the count the fao_run_start rate limit compares with
+-- max_runs_per_hour: this invoker's runs of the agent requested in the last
+-- hour plus this invoker's EXPIRED replay refusals for the agent journaled
+-- in the last hour (same clock). A refusal the journal flood cap dropped is
+-- not counted; it also wrote nothing.
+CREATE FUNCTION fao_private.run_start_count(p_uid uuid, p_agent_id text, p_entry_point text)
+RETURNS int
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+  SELECT (SELECT count(*)
+            FROM public.run_invocations ri
+           WHERE ri.invoker_id = p_uid
+             AND ri.agent_id = p_agent_id
+             AND ri.requested_at > fao_private.clock() - interval '1 hour')::int
+       + (SELECT count(*)
+            FROM public.fao_refusal_journal j
+           WHERE j.actor_uid = p_uid
+             AND j.entry_point = p_entry_point
+             AND j.code = 'EXPIRED'
+             AND j.target_key = left(p_agent_id, 64)
+             AND j.at > fao_private.clock() - interval '1 hour')::int
+$$;
+
+COMMENT ON FUNCTION fao_private.run_start_count(uuid, text, text) IS
+  'FAO-GOV-003 (patch round 6, P5): runs of the agent this invoker requested in the last hour plus this invoker''s EXPIRED replay refusals for the agent journaled in the last hour. fao_run_start refuses RATE_LIMITED at max_runs_per_hour. Never granted to a client role.';
+
+-- ----------------------------------------------------------------------------
 -- Body (IC-18): required p_agent_id, p_reason, p_idempotency_key; optional
 -- p_invoked_via (default "mcp"); every value a JSON string or null. In order,
 -- after client_args:
@@ -134,6 +168,12 @@ COMMENT ON FUNCTION public.fao_whoami(json) IS
 --      max_runs_per_hour RUN_REFUSED rows for the agent in the last hour)
 --   8. rate limit (RATE_LIMITED)
 --   9. new run and single-use token (only its SHA-256 hash is stored)
+-- Patch round 6 (P5): the rate limit counts run starts and EXPIRED replay
+-- refusals together. Each replay of an expired key that is refused EXPIRED
+-- writes one journal row (entry point rpc:fao_run_start, code EXPIRED, actor
+-- the invoker, target the agent); those rows count toward max_runs_per_hour
+-- like run starts, and a replay over the limit is refused RATE_LIMITED
+-- (step 6 and step 8 use the same count).
 CREATE FUNCTION public.fao_run_start(json)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -254,6 +294,13 @@ BEGIN
       UPDATE public.run_invocations
          SET state = 'EXPIRED', finished_at = now()
        WHERE correlation_id = v_run.correlation_id;
+      -- Patch round 6 (P5): the EXPIRED refusal counts toward the rate
+      -- limit; over the limit the replay is refused RATE_LIMITED (the run
+      -- stays EXPIRED).
+      v_recent := fao_private.run_start_count(v_uid, p_agent_id, c_entry);
+      IF v_recent >= v_agent.max_runs_per_hour THEN
+        RETURN fao_private.refuse(c_entry, 'run_invocations', v_key, v_attempt, 'RATE_LIMITED');
+      END IF;
       RETURN fao_private.refuse(c_entry, 'run_invocations', v_key, v_attempt, 'EXPIRED')
         || jsonb_build_object(
              'correlation_id',   v_run.correlation_id,
@@ -263,6 +310,11 @@ BEGIN
              'replayed',         true);
     ELSIF v_run.state = 'EXPIRED'::public.fao_run_state THEN
       -- Round 5 (K5): an EXPIRED run is never restarted by its key.
+      -- Patch round 6 (P5): the refusal counts toward the rate limit.
+      v_recent := fao_private.run_start_count(v_uid, p_agent_id, c_entry);
+      IF v_recent >= v_agent.max_runs_per_hour THEN
+        RETURN fao_private.refuse(c_entry, 'run_invocations', v_key, v_attempt, 'RATE_LIMITED');
+      END IF;
       RETURN fao_private.refuse(c_entry, 'run_invocations', v_key, v_attempt, 'EXPIRED')
         || jsonb_build_object(
              'correlation_id',   v_run.correlation_id,
@@ -320,13 +372,9 @@ BEGIN
     RETURN fao_private.refuse(c_entry, 'agent_registry', v_key, v_attempt, 'AGENT_NOT_ACTIVE');
   END IF;
 
-  -- 8. Rate limit per invoker and agent over the last hour
-  SELECT count(*)
-    INTO v_recent
-    FROM public.run_invocations ri
-   WHERE ri.invoker_id = v_uid
-     AND ri.agent_id = p_agent_id
-     AND ri.requested_at > fao_private.clock() - interval '1 hour';
+  -- 8. Rate limit per invoker and agent over the last hour (run starts and
+  --    EXPIRED replay refusals, patch round 6 P5)
+  v_recent := fao_private.run_start_count(v_uid, p_agent_id, c_entry);
   IF v_recent >= v_agent.max_runs_per_hour THEN
     RETURN fao_private.refuse(c_entry, 'run_invocations', v_key, v_attempt, 'RATE_LIMITED');
   END IF;
@@ -353,7 +401,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.fao_run_start(json) IS
-  'FAO-GOV-008, FAO-GOV-002, FAO-GOV-003, FAO-GOV-004: starts a run for the signed-in invoker (identity from auth.uid() only). One json body (IC-18): p_agent_id, p_reason, p_idempotency_key, optional p_invoked_via (default mcp). Body and input checks, active owner, invoker role, idempotency replay (no new token once the agent is not ACTIVE; an expired run is refused EXPIRED 410 with its correlation id, round 5 K5), registry status gate with a committed RUN_REFUSED row (RATE_LIMITED with no row once the invoker has max_runs_per_hour of them in the last hour), rate limit, then a single-use run token stored only as its hash.';
+  'FAO-GOV-008, FAO-GOV-002, FAO-GOV-003, FAO-GOV-004: starts a run for the signed-in invoker (identity from auth.uid() only). One json body (IC-18): p_agent_id, p_reason, p_idempotency_key, optional p_invoked_via (default mcp). Body and input checks, active owner, invoker role, idempotency replay (no new token once the agent is not ACTIVE; an expired run is refused EXPIRED 410 with its correlation id, round 5 K5, and that refusal counts toward the rate limit, patch round 6 P5), registry status gate with a committed RUN_REFUSED row (RATE_LIMITED with no row once the invoker has max_runs_per_hour of them in the last hour), rate limit (run starts plus EXPIRED replay refusals), then a single-use run token stored only as its hash.';
 
 -- ----------------------------------------------------------------------------
 -- fao_run_claim (FAO-GOV-008, FAO-GOV-002, FAO-GOV-004)
@@ -561,7 +609,9 @@ COMMENT ON FUNCTION public.fao_run_claim(text, text, text) IS
 -- and on a Writer FAILED (source, stage, n8n_execution_id), and failed_node,
 -- which a Writer FAILED names itself (fix round 2 R07). Round 5 (U10): the
 -- reserved names are refused at any depth of inputs (arrays included) and
--- in any letter case; the overwrites are allowed only at the top level in
+-- in any letter case (patch round 6, P7: compared as
+-- normalize(lower(btrim(key)), NFKC), and any key holding whitespace or a
+-- control character is refused); the overwrites are allowed only at the top level in
 -- their exact spelling, and the one nested exception is STARTED
 -- inputs.fixture_provenance.<asset>.source (the flagship's documented
 -- fixture provenance). Round 5 (U16 (c)): an inputs.asset on STARTED or a
@@ -775,7 +825,18 @@ BEGIN
         FROM walk w
        CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(w.v) = 'object' THEN w.v END) AS k(key)
     LOOP
-      IF lower(v_key) = ANY (c_reserved)
+      -- Patch round 6 (P7): no inputs key at any depth may hold whitespace,
+      -- a control character or an invisible format character (zero-width
+      -- spaces and joiners, word joiner, byte order mark, soft hyphen), and
+      -- the reserved match folds case and Unicode compatibility forms
+      -- (NFKC, so full-width letters match), so no spelling variant can pass
+      -- for a database-set key.
+      IF v_key ~ '[[:space:][:cntrl:]\u0085\u00a0\u00ad\u1680\u180e\u2000-\u200f\u2028-\u202f\u205f-\u2064\u3000\ufeff]' THEN
+        RAISE EXCEPTION 'FAO-GOV-001 ledger_append: item %: an inputs key at % holds whitespace or a control character', v_i,
+          coalesce(nullif(left(regexp_replace(array_to_string(v_path, '.'), '[[:cntrl:]]', ' ', 'g'), 200), ''), 'the top level')
+          USING ERRCODE = '22023';
+      END IF;
+      IF lower(normalize(lower(btrim(v_key)), NFKC)) = ANY (c_reserved)
          AND NOT (cardinality(v_path) = 0 AND v_et = 'STARTED' AND v_key = ANY (c_started_set))
          AND NOT (cardinality(v_path) = 0 AND v_et = 'FAILED' AND v_key = ANY (c_failed_set))
          AND NOT (v_et = 'STARTED' AND cardinality(v_path) = 2 AND v_path[1] = 'fixture_provenance'
@@ -1444,3 +1505,4 @@ REVOKE ALL ON FUNCTION public.fao_run_claim(text, text, text)     FROM PUBLIC, a
 REVOKE ALL ON FUNCTION public.fao_ledger_append_batch(jsonb)      FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION public.fao_run_finalize(uuid)              FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION public.fao_run_fail(text, text, text, text) FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
+REVOKE ALL ON FUNCTION fao_private.run_start_count(uuid, text, text) FROM PUBLIC, anon, authenticated, service_role, fao_workflow;

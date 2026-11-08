@@ -60,6 +60,19 @@ export const ERROR_SOURCES = {
   'fao_hitl_gateway_v1.json': 'gateway',
   'fao_hitl_sweeper_v1.json': 'sweeper',
 };
+// Round 6 (P4, red team r5 item 2): n8n ends an execution of these
+// workflows after settings.executionTimeout seconds. The flagship's limit
+// must stay below the database floor of sla_max_execution_seconds (900), so
+// n8n kills a slow flagship execution before the sweep or a later claim can
+// call its run stale; a killed execution can then never write to a run that
+// was already failed and reused. n8n caps every limit at
+// EXECUTIONS_TIMEOUT_MAX, which must be at least 600 on the instance.
+export const EXECUTION_TIMEOUTS = {
+  'fao_reserve_recon_v1.json': 600,
+  'fao_hitl_gateway_v1.json': 120,
+  'fao_hitl_sweeper_v1.json': 300,
+};
+export const SLA_MAX_EXECUTION_FLOOR = 900;
 const WRITER_ID = 'dQslIEVwF3WqMliT';
 const NOTIFIER_ID = 'mUAC9qIMkVzlV5qw';
 
@@ -418,9 +431,18 @@ export const RULES = [
     },
   },
   {
-    // FAO-GOV-008 (round 5, F-20, K1): the error handler maps the failed
-    // workflow id to the fao_run_fail source with a fixed map, and a flagship
-    // failure upstream of Claim Run to flagship_pre_claim.
+    // Round 6 (P4): the flagship, the notifier and the sweeper each set
+    // settings.executionTimeout to the value in EXECUTION_TIMEOUTS, and the
+    // flagship's is below the 900-second floor of sla_max_execution_seconds.
+    id: 'execution_timeout',
+    text: 'executionTimeout set on the flagship (below 900 s), the notifier and the sweeper',
+    run: ({ file, wf }) => checkExecutionTimeout(file, wf),
+  },
+  {
+    // FAO-GOV-008 (round 5, F-20, K1; round 6, P1): the error handler maps
+    // the failed workflow id to the fao_run_fail source with a fixed map, and
+    // a flagship failure at any node that is not Respond 202 and not
+    // downstream of it to flagship_pre_claim.
     id: 'error_handler_map',
     text: 'the error handler source map and pre-claim list match the exports, and Record Run Failure passes the source as $4',
     run: ({ file, wf, exportedById }) => (file === ERROR_HANDLER_FILE ? checkErrorHandler(wf, exportedById) : []),
@@ -760,12 +782,77 @@ export function upstreamOf(wf, target) {
   return [...seen].sort();
 }
 
+// Round 6 (P4). The flagship, the notifier and the sweeper set
+// settings.executionTimeout to exactly the value in EXECUTION_TIMEOUTS (an
+// integer number of seconds); the flagship's must be below
+// SLA_MAX_EXECUTION_FLOOR. Other workflows are not checked.
+export function checkExecutionTimeout(file, wf) {
+  if (!Object.prototype.hasOwnProperty.call(EXECUTION_TIMEOUTS, file)) return [];
+  const want = EXECUTION_TIMEOUTS[file];
+  const got = (wf && wf.settings ? wf.settings : {}).executionTimeout;
+  const v = [];
+  if (!Number.isInteger(got) || got <= 0) {
+    v.push(`settings.executionTimeout is ${got === undefined ? '(unset)' : JSON.stringify(got)}, expected ${want} (a positive whole number of seconds)`);
+    return v;
+  }
+  if (got !== want) v.push(`settings.executionTimeout is ${got}, expected ${want}`);
+  if (file === FLAGSHIP_FILE && got >= SLA_MAX_EXECUTION_FLOOR) {
+    v.push(`settings.executionTimeout is ${got}, which is not below the sla_max_execution_seconds floor of ${SLA_MAX_EXECUTION_FLOOR}`);
+  }
+  return v;
+}
+
+// Every node reachable from `source` through main connections, sorted by
+// name (`source` itself only when a cycle leads back to it).
+export function downstreamOf(wf, source) {
+  const out = new Map();
+  for (const [from, c] of Object.entries((wf && wf.connections) || {})) {
+    for (const o of ((c || {}).main || [])) {
+      for (const x of (o || [])) {
+        if (!x || !x.node) continue;
+        if (!out.has(from)) out.set(from, new Set());
+        out.get(from).add(x.node);
+      }
+    }
+  }
+  const seen = new Set();
+  const stack = [source];
+  while (stack.length) {
+    for (const n of out.get(stack.pop()) || []) {
+      if (!seen.has(n)) { seen.add(n); stack.push(n); }
+    }
+  }
+  return [...seen].sort();
+}
+
+// FAO-GOV-008 (round 6, P1). The flagship nodes an execution can fail at
+// before it holds a claimed run: every node that can run (not a sticky
+// note; nodes are read from the node list and from the connections) that is
+// not Respond 202 and not downstream of Respond 202. Claim Run, Claim OK?,
+// Respond 400 and Respond Claim Refused are in it. A claim that committed
+// and then errored inside Claim Run or Claim OK? is left to the sweep's
+// stale-run rule. Null when the flagship has no Respond 202.
+export const CLAIMED_ANCHOR = 'Respond 202';
+export function preClaimNodesOf(wf) {
+  const names = new Set();
+  for (const n of nodesOf(wf)) {
+    if (n && n.name && n.type !== T.sticky) names.add(n.name);
+  }
+  for (const [from, c] of Object.entries((wf && wf.connections) || {})) {
+    names.add(from);
+    for (const o of ((c || {}).main || [])) for (const x of (o || [])) if (x && x.node) names.add(x.node);
+  }
+  if (!names.has(CLAIMED_ANCHOR)) return null;
+  const after = new Set([CLAIMED_ANCHOR, ...downstreamOf(wf, CLAIMED_ANCHOR)]);
+  return [...names].filter((n) => !after.has(n)).sort();
+}
+
 // FAO-GOV-008 (round 5, F-20, K1, D4). The source map in Extract Failure is
 // one entry per line, '<id>': '<source>', and equals ERROR_SOURCES; each
 // entry's text appears exactly once (test/e2e/variants.mjs patches e2e ids in
 // next to them); every exported workflow that names this handler has a
-// source. The pre-claim list equals the flagship nodes upstream of Claim
-// Run. Record Run Failure is the last node and calls the 4-argument
+// source. The pre-claim list equals preClaimNodesOf(flagship) (round 6,
+// P1). Record Run Failure is the last node and calls the 4-argument
 // fao_run_fail with the source as $4.
 export function checkErrorHandler(wf, exportedById) {
   const v = [];
@@ -813,9 +900,11 @@ export function checkErrorHandler(wf, exportedById) {
       if (!m) { v.push(`error handler: pre-claim line ${JSON.stringify(l)} is not written '<node name>',`); continue; }
       names.push(m[1]);
     }
-    const upstream = upstreamOf(flagship, 'Claim Run');
-    if (new Set(names).size !== names.length || JSON.stringify([...names].sort()) !== JSON.stringify(upstream)) {
-      v.push(`error handler: pre-claim list is ${JSON.stringify(names)}, expected the flagship nodes upstream of Claim Run ${JSON.stringify(upstream)}`);
+    const expected = preClaimNodesOf(flagship);
+    if (!expected) {
+      v.push(`error handler: the flagship has no ${CLAIMED_ANCHOR} node, so the pre-claim list cannot be computed`);
+    } else if (new Set(names).size !== names.length || JSON.stringify([...names].sort()) !== JSON.stringify(expected)) {
+      v.push(`error handler: pre-claim list is ${JSON.stringify(names)}, expected the flagship nodes that are not ${CLAIMED_ANCHOR} and not downstream of it ${JSON.stringify(expected)}`);
     }
   }
   const live = stripComments(code);

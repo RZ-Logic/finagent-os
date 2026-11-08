@@ -185,8 +185,9 @@ SELECT ok(pg_temp.target('rC') = 'null'::jsonb
 SELECT ok(pg_temp.g('s6')->'escalations' @> jsonb_build_array(jsonb_build_object('hitl_id', pg_temp.id('rC'), 'level', 1, 'reason', 'TIMEOUT')),
   'C: the escalation is still listed for the channel notice');
 SELECT ok(pg_temp.has_err('s6', 'expire_request', 'rC', 'NO_ESCALATION_TARGET'), 'C: reported in item_errors as NO_ESCALATION_TARGET');
-SELECT is((SELECT status::text || '/' || hitl_status::text FROM public.shadow_ledger WHERE correlation_id = pg_temp.corr('rC') AND inputs->>'event_type' = 'COMMITTED'),
-  'FAILURE/EXPIRED', 'C: COMMITTED with FAILURE is still written');
+SELECT ok(tests.ledger_count(pg_temp.corr('rC'), 'COMMITTED') = 0
+          AND (SELECT status::text || '/' || hitl_status::text || '/' || (inputs->>'committed') FROM public.shadow_ledger WHERE correlation_id = pg_temp.corr('rC') AND inputs->>'event_type' = 'HITL_EXPIRED') = 'FAILURE/EXPIRED/false',
+  'C: no COMMITTED row; HITL_EXPIRED (FAILURE, committed false) is the closing record (P3)');
 INSERT INTO v VALUES ('ctxC', pg_temp.ctx(pg_temp.id('rC'), 'ESCALATED', 1));
 SELECT ok(pg_temp.g('ctxC')->>'send' = 'true' AND pg_temp.g('ctxC')->'target_name' = 'null'::jsonb
           AND position('Sarah' IN (pg_temp.g('ctxC'))::text) = 0, 'C: context names no target and never the invoker');

@@ -92,6 +92,15 @@ test('S01 all-in-band run commits SUCCESS with 7 asset rows and no request', T, 
     assert.equal(a.inputs.band_status, 'IN_BAND');
     assert.equal(a.hitl_status, 'NOT_REQUIRED');
   }
+  // Patch round 6 (P9, IC-38): the stablecoin band read from the database is
+  // [1.0000, 1.0500], and USDC at 1.006 (above the old 1.0050) is IN_BAND.
+  const byAsset = Object.fromEntries(assets(rows).map((a) => [a.inputs.asset, a]));
+  for (const s of ['USDC', 'USDT']) {
+    const th = byAsset[s].inputs.threshold || {};
+    assert.deepEqual([Number(th.ratio_floor), Number(th.ratio_band_lower), Number(th.ratio_band_upper)], [1, 1, 1.05], `${s} band ${JSON.stringify(th)}`);
+  }
+  assert.equal(Number(byAsset.USDC.inputs.ratio), 1.006);
+  assert.equal(Number(byAsset.USDC.inputs.discrepancy), 6000);
   const committed = rows.at(-1);
   assert.equal(committed.status, 'SUCCESS');
   assert.equal(committed.outcome, 'ALLOW');
@@ -337,7 +346,7 @@ async function ensureMarkupAgent() {
        SELECT $1, $2, 'RED', 'ACTIVE', NULL, 2, ARRAY['FAO-GOV-004','FAO-GOV-007']::text[], FALSE,
          'Local e2e test agent. Writes nothing outside the Shadow Ledger; an erroneous ledger row is corrected by a CORRECTION event that references the original ledger_id.',
          '{"note": "local e2e agent; no data sources"}'::jsonb, '{"note": "local e2e agent; no production targets"}'::jsonb,
-         300, 24, po.id, 60
+         900, 24, po.id, 60
          FROM public.process_owners po WHERE po.email = 'sarah.chen@finagent-os.demo'
        ON CONFLICT (agent_id) DO NOTHING`,
       [L.MARKUP_AGENT, MARKUP_AGENT_NAME],
@@ -511,12 +520,17 @@ test('S08 expiry and one escalation through the sweeper with the owner-only test
   assert.equal(after.decision, 'EXPIRED');
   const rows = await L.ledger(corr);
   const tail = rows.map((r) => r.t).slice(rows.findIndex((r) => r.t === 'HITL_EXPIRED'));
-  assert.deepEqual(tail, ['HITL_EXPIRED', 'HITL_ESCALATED', 'COMMITTED', 'NOTIFICATION_SENT']);
+  assert.deepEqual(tail, ['HITL_EXPIRED', 'HITL_ESCALATED', 'NOTIFICATION_SENT']);
   const esc1 = rows.find((r) => r.t === 'HITL_ESCALATED');
   assert.equal(esc1.inputs.level, 1);
   assert.equal(esc1.inputs.reason, 'TIMEOUT');
   assert.equal(esc1.inputs.target_owner_id, L.uid('marcus'));
-  assert.equal(rows.find((r) => r.t === 'COMMITTED').status, 'FAILURE');
+  // Patch round 6 (P3): HITL_EXPIRED is the closing record; no COMMITTED row.
+  const closing = rows.find((r) => r.t === 'HITL_EXPIRED');
+  assert.equal(closing.status, 'FAILURE');
+  assert.equal(closing.inputs.committed, false);
+  assert.equal(closing.inputs.run_state, 'EXPIRED');
+  assert.ok(!rows.some((r) => r.t === 'COMMITTED'), 'no COMMITTED row for an expired request');
   assert.equal((await L.run(corr)).state, 'EXPIRED');
   await L.waitNotifications(req.hitl_id, 2);
   const all = await L.slack.forHitl(req.hitl_id);
@@ -594,14 +608,15 @@ test('S13 a notifier failure and a sweep item error in the same sweep both fail 
   assert.equal((await L.q('SELECT count(*)::int AS n FROM fao_private.test_clock')).at(0).n, 0, 'test clock cleared');
   assert.equal((await L.one('SELECT escalation_to FROM public.process_owners WHERE id = $1', [L.uid('sarah')])).escalation_to, L.uid('marcus'), 'escalation_to restored');
 
-  // The database side: expired, escalated with no target, COMMITTED FAILURE.
+  // The database side: expired (closing record, no COMMITTED), escalated with no target.
   const rows = await L.ledger(corr);
   const tail = rows.map((r) => r.t).slice(rows.findIndex((r) => r.t === 'HITL_EXPIRED'));
-  assert.deepEqual(tail, ['HITL_EXPIRED', 'HITL_ESCALATED', 'COMMITTED']);
+  assert.deepEqual(tail, ['HITL_EXPIRED', 'HITL_ESCALATED']);
   const esc1 = rows.find((r) => r.t === 'HITL_ESCALATED');
   assert.equal(esc1.inputs.reason, 'TIMEOUT');
   assert.equal(esc1.inputs.target_owner_id, null, 'never the invoker');
-  assert.equal(rows.at(-1).status, 'FAILURE');
+  assert.equal(rows.find((r) => r.t === 'HITL_EXPIRED').status, 'FAILURE');
+  assert.equal(rows.find((r) => r.t === 'HITL_EXPIRED').inputs.committed, false);
   assert.equal((await L.run(corr)).state, 'EXPIRED');
 
   // The n8n side: the stand-in was called and failed, and the sweeper
@@ -687,7 +702,7 @@ async function ensureDeprecateAgent() {
        SELECT $1, 'E2E deprecate-before-finalize agent', 'RED', 'ACTIVE', NULL, 2, ARRAY['FAO-GOV-002','FAO-GOV-008']::text[], FALSE,
          'Local e2e test agent. Writes nothing outside the Shadow Ledger; an erroneous ledger row is corrected by a CORRECTION event that references the original ledger_id.',
          '{"note": "local e2e agent; no data sources"}'::jsonb, '{"note": "local e2e agent; no production targets"}'::jsonb,
-         300, 24, po.id, 60
+         900, 24, po.id, 60
          FROM public.process_owners po WHERE po.email = 'sarah.chen@finagent-os.demo'
        ON CONFLICT (agent_id) DO NOTHING`,
       [DEPRECATE_AGENT],
@@ -1100,4 +1115,122 @@ test('S20 the provenance query printed in fixtures/README.md returns the source 
   const d = await L.decide('sarah', req.hitl_id, 'REJECTED', 'e2e cleanup: provenance query run');
   assert.equal(d.status, 200, JSON.stringify(d.body));
   record(t, 'S20', { corr, provenance: Object.fromEntries(rows.map((x) => [x.asset, x.provenance])), executions: L.brief(ex) });
+});
+
+// ===========================================================================
+// Patch round 6 scenarios (P1, P4)
+// ===========================================================================
+
+// S21 and S22 (P1, FAO-GOV-008): the pre-claim set is every flagship node
+// that is not Respond 202 and not downstream of it. An older run is claimed
+// with the id the next n8n execution will get and taken to AWAITING_HITL, as
+// in S16; then that execution, the respondfail copy, fails at a pre-claim
+// Respond node. The error handler must send 'flagship_pre_claim' (PRE_CLAIM,
+// one workflow_failures row) and leave the older run untouched; before P1 it
+// sent 'flagship' and fao_run_fail attached a FAILED row to the older run.
+async function olderRunOnNextId(scenario) {
+  const t0 = await L.dbNow();
+  const ledgerBefore = await maxLedgerId();
+  const next = String(L.nextExecutionId());
+  const old = await L.startRun('aisha', { reason: `e2e ${scenario} older run holding the next execution id` });
+  const c = await L.claim(old.token, next);
+  assert.equal(c.ok, true, `claim with execution id ${next}: ${JSON.stringify(c)}`);
+  await L.append([L.startedEvent(old.corr, ['USDT'])]);
+  await L.append([L.assetEvent(old.corr, 'USDT', 'REQUIRE_HUMAN', 'STANDARD')]);
+  const f = await L.finalize(old.corr);
+  assert.equal(f.hitl_required, true, JSON.stringify(f));
+  const oldRun = await L.run(old.corr);
+  assert.equal(oldRun.state, 'AWAITING_HITL');
+  assert.equal(oldRun.n8n_execution_id, next);
+  const oldRows = await L.ledger(old.corr);
+  const req = await openRequest(old.corr);
+  assert.equal(req.decision, 'PENDING');
+  assert.equal(String(L.nextExecutionId()), next, 'no n8n execution started while the older run was set up');
+  return { t0, ledgerBefore, next, old, oldRun, oldRows, req };
+}
+
+async function assertPreClaimRespondFailure(ctx, w, failedNode, mustRun) {
+  const { t0, ledgerBefore, next, old, oldRun, oldRows, req } = ctx;
+  assert.ok(w.status < 200 || w.status > 299, `the webhook did not answer 2xx: ${w.status} ${w.text}`);
+  const ex = await waitFor(`respondfail copy failing at ${failedNode} and the error handler`, Number(next) - 1, { [VARIANTS.respondfail.id]: 1, [ERROR_WF]: 1 });
+
+  const flag = byWorkflow(ex, VARIANTS.respondfail.id);
+  assert.equal(flag.length, 1, L.brief(ex));
+  assert.equal(flag[0].id, next, `the failing execution has the older run's id: ${L.brief(ex)}`);
+  assert.equal(flag[0].status, 'error');
+  assert.equal(flag[0].lastNodeExecuted, failedNode);
+  assert.equal(flag[0].error && flag[0].error.node, failedNode, L.brief(flag));
+  for (const n of mustRun) assert.ok((flag[0].nodes || []).includes(n), `${n} ran`);
+  for (const n of ['Respond 202', 'Init Execution', 'Writer: STARTED']) assert.ok(!(flag[0].nodes || []).includes(n), `${n} never ran`);
+
+  const handler = byWorkflow(ex, ERROR_WF);
+  assert.equal(handler.length, 1, L.brief(ex));
+  assert.equal(handler[0].status, 'success', L.brief(handler));
+  const r = failResult(handler[0]);
+  assert.deepEqual([r.ok, r.code, r.outcome, r.correlation_id, r.ledger_id, r.state], [true, 'OK', 'PRE_CLAIM', null, null, null], JSON.stringify(r));
+
+  const rows = await L.workflowFailures(next, t0);
+  assert.equal(rows.length, 1, JSON.stringify(rows));
+  assert.deepEqual([rows[0].source, rows[0].outcome, rows[0].failed_node, rows[0].correlation_id],
+    ['flagship_pre_claim', 'PRE_CLAIM', failedNode, null]);
+  assert.equal(rows[0].message, L.cleanText(flag[0].error.message, 500));
+
+  // The older run: same rows, same state, request still pending.
+  assert.deepEqual((await L.ledger(old.corr)).map((x) => x.ledger_id), oldRows.map((x) => x.ledger_id), 'no row on the older run');
+  const after = await L.run(old.corr);
+  assert.equal(after.state, 'AWAITING_HITL');
+  assert.equal(after.last_error, oldRun.last_error);
+  assert.equal((await openRequest(old.corr)).decision, 'PENDING');
+  assert.deepEqual(await strayFailed(next, ledgerBefore), [], 'no FAILED ledger row for that execution id');
+
+  const d = await L.decide('sarah', req.hitl_id, 'REJECTED', 'e2e cleanup: older run on a reused execution id');
+  assert.equal(d.status, 200, JSON.stringify(d.body));
+  return { ex, row: rows[0] };
+}
+
+test('S21 a flagship failure at Respond 400 (bad body) records PRE_CLAIM and leaves an older AWAITING_HITL run on the same id untouched', T, async (t) => {
+  const ctx = await olderRunOnNextId('S21');
+  const w = await L.webhook(P.respondfail, {});
+  const { ex, row } = await assertPreClaimRespondFailure(ctx, w, 'Respond 400', ['Validate Invoke Body', 'Body Valid?']);
+  assert.ok(!(byWorkflow(ex, VARIANTS.respondfail.id)[0].nodes || []).includes('Claim Run'), 'Claim Run never ran');
+  record(t, 'S21', { corr: ctx.old.corr, execution_id: ctx.next, webhook_http: w.status, workflow_failure: row.id, executions: L.brief(ex) });
+});
+
+test('S22 a flagship failure at Respond Claim Refused (replayed token) records PRE_CLAIM and leaves an older AWAITING_HITL run on the same id untouched', T, async (t) => {
+  const ctx = await olderRunOnNextId('S22');
+  const refusalsBefore = Number((await L.one('SELECT coalesce(max(refusal_id), 0) AS m FROM public.fao_refusal_journal')).m);
+  // The older run's own token, already consumed: Claim Run refuses it
+  // ALREADY_CLAIMED, so the refused branch runs and its Respond node fails.
+  const w = await L.webhook(P.respondfail, { run_token: ctx.old.token });
+  const { ex, row } = await assertPreClaimRespondFailure(ctx, w, 'Respond Claim Refused', ['Validate Invoke Body', 'Body Valid?', 'Claim Run', 'Claim OK?']);
+  const refusals = await L.q(
+    "SELECT code, target_key FROM public.fao_refusal_journal WHERE refusal_id > $1 AND entry_point = 'rpc:fao_run_claim' ORDER BY refusal_id",
+    [refusalsBefore],
+  );
+  assert.deepEqual(refusals.map((x) => [x.code, x.target_key]), [['ALREADY_CLAIMED', ctx.old.corr]], 'Claim Run refused the replayed token once');
+  record(t, 'S22', { corr: ctx.old.corr, execution_id: ctx.next, webhook_http: w.status, workflow_failure: row.id, executions: L.brief(ex) });
+});
+
+// S23 (P4, K4; FAO-GOV-008): n8n stops a flagship execution at 600 s, before
+// the claim's stale-run rule (sla_max_execution_seconds, at least 900) can
+// fail its run for a new execution on the same id. The imported workflows
+// (as n8n stored them) carry the export timeouts, every flagship copy keeps
+// the flagship's, and the container's EXECUTIONS_TIMEOUT_MAX does not cap
+// the flagship's below what the export sets.
+test('S23 the imported flagship has executionTimeout 600, below the agent SLA, and the notifier and sweeper carry 120 and 300', T, async (t) => {
+  const s = L.workflowSettings();
+  const timeout = (id) => (s[id] || {}).executionTimeout;
+  assert.equal(timeout(FLAGSHIP_WF), 600, `flagship settings ${JSON.stringify(s[FLAGSHIP_WF])}`);
+  assert.equal(timeout(GATEWAY_WF), 120, `notifier settings ${JSON.stringify(s[GATEWAY_WF])}`);
+  assert.equal(timeout('FaoSweeperV1x001'), 300, `sweeper settings ${JSON.stringify(s.FaoSweeperV1x001)}`);
+  for (const [name, v] of Object.entries(VARIANTS)) assert.equal(timeout(v.id), 600, `flagship copy ${name}`);
+  for (const id of [SWEEP_WF, SWEEP_NFAIL_ID]) assert.equal(timeout(id), 300, `sweeper copy ${id}`);
+
+  const max = L.containerEnv('EXECUTIONS_TIMEOUT_MAX');
+  assert.ok(max !== null && Number(max) >= 600, `EXECUTIONS_TIMEOUT_MAX is at least 600 (got ${max})`);
+
+  const sla = Number((await L.one('SELECT sla_max_execution_seconds AS s FROM public.agent_registry WHERE agent_id = $1', [L.FLAGSHIP])).s);
+  assert.ok(sla >= 900, `flagship sla_max_execution_seconds ${sla} is at least 900`);
+  assert.ok(timeout(FLAGSHIP_WF) < sla, `executionTimeout ${timeout(FLAGSHIP_WF)} is below the SLA ${sla}`);
+  record(t, 'S23', { flagship: timeout(FLAGSHIP_WF), notifier: timeout(GATEWAY_WF), sweeper: timeout('FaoSweeperV1x001'), timeout_max: Number(max), sla });
 });

@@ -959,9 +959,12 @@ COMMENT ON FUNCTION public.fao_notification_record(bigint, text, int, text, text
 --      row; nothing started)
 --   2. RUNNING runs past the agent execution SLA (900 s when unset): FAILED
 --      event from the sweep, run FAILED
---   3. PENDING requests past their deadline: EXPIRED, HITL_EXPIRED, one
---      level-1 escalation (TIMEOUT) unless one exists, rollup, then COMMITTED
---      with FAILURE or COMMIT_BLOCKED, run EXPIRED
+--   3. PENDING requests past their deadline: EXPIRED, HITL_EXPIRED (the
+--      closing record: inputs run_state EXPIRED and committed false), one
+--      level-1 escalation (TIMEOUT) unless one exists, rollup, COMMIT_BLOCKED
+--      only when the audit chain is incomplete, run EXPIRED. No COMMITTED
+--      row: an expired request is never a commit of the batch (patch
+--      round 6, P3)
 --   4. PENDING requests not yet due with no SENT REQUESTED notification,
 --      whose latest attempt FAILED or which are older than 5 minutes with no
 --      attempt: renotify while failures are below notify_max_attempts, then
@@ -1027,8 +1030,6 @@ DECLARE
   v_last        text;
   v_failed      int;
   r             jsonb;
-  v_obl         text[];
-  v_symbols     jsonb;
   c             record;
 BEGIN
   PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('fao_sweep'));
@@ -1198,6 +1199,12 @@ BEGIN
          SET decision = 'EXPIRED', decided_at = v_now
        WHERE hitl_id = v_hid;
 
+      -- Patch round 6 (P3): HITL_EXPIRED is the run's closing record. An
+      -- expired request is never committed, so the sweep writes no
+      -- COMMITTED row (before this patch it wrote COMMITTED with FAILURE,
+      -- which the run summary view counted as a commit). The record says
+      -- so in its inputs and rationale; the rollup below only checks the
+      -- audit chain and records COMMIT_BLOCKED when it is incomplete.
       PERFORM fao_private.append_event(
         v_req.correlation_id,
         'HITL_EXPIRED',
@@ -1205,10 +1212,12 @@ BEGIN
           'hitl_id',    v_req.hitl_id,
           'timeout_at', v_req.timeout_at,
           'expired_at', v_now,
-          'source',     'sweep'),
+          'source',     'sweep',
+          'run_state',  'EXPIRED',
+          'committed',  false),
         'REQUIRE_HUMAN'::public.policy_outcome,
         v_req.sub_tier,
-        format('FAO-GOV-004 hitl_id %s expired without a decision (%s)', v_req.hitl_id, 'sweep'),
+        format('FAO-GOV-004 hitl_id %s expired without a decision (%s); run closed EXPIRED, batch not committed', v_req.hitl_id, 'sweep'),
         NULL,
         'EXPIRED'::public.hitl_status,
         NULL,
@@ -1247,34 +1256,9 @@ BEGIN
           NULL);
       END IF;
 
+      -- FAO-GOV-001: an incomplete audit chain is still recorded.
       r := fao_private.run_rollup(v_req.correlation_id);
-      IF (r->>'chain_ok')::boolean IS TRUE THEN
-        SELECT coalesce(array_agg(o.v ORDER BY o.ord), ARRAY[]::text[])
-          INTO v_obl
-          FROM jsonb_array_elements_text(coalesce(r->'obligations', '[]'::jsonb)) WITH ORDINALITY AS o(v, ord);
-        SELECT coalesce(jsonb_agg(e.value->'asset' ORDER BY e.ord), '[]'::jsonb)
-          INTO v_symbols
-          FROM jsonb_array_elements(coalesce(r->'escalated_assets', '[]'::jsonb)) WITH ORDINALITY AS e(value, ord);
-
-        PERFORM fao_private.append_event(
-          v_req.correlation_id,
-          'COMMITTED',
-          jsonb_build_object(
-            'per_asset_summary', r->'per_asset_summary',
-            'counts',            r->'counts',
-            'escalated_assets',  v_symbols,
-            'hitl_id',           v_req.hitl_id,
-            'decision',          'EXPIRED'),
-          (r->>'rollup_outcome')::public.policy_outcome,
-          (r->>'rollup_sub_tier')::public.policy_sub_tier,
-          fao_private.compose_rationale(r, 'COMMITTED')
-            || format(' HITL decision: %s (hitl_id %s).', 'EXPIRED', v_req.hitl_id),
-          v_obl,
-          'EXPIRED'::public.hitl_status,
-          NULL,
-          'FAILURE'::public.execution_status,
-          NULL);
-      ELSE
+      IF (r->>'chain_ok')::boolean IS NOT TRUE THEN
         PERFORM fao_private.append_event(
           v_req.correlation_id,
           'COMMIT_BLOCKED',
@@ -1493,7 +1477,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.fao_maintenance_sweep() IS
-  'FAO-GOV-004, FAO-GOV-007, FAO-GOV-008, FAO-GOV-015: the five-minute sweep. Expires unclaimed run tokens and overdue requests (HITL_EXPIRED, one escalation, COMMITTED with FAILURE or COMMIT_BLOCKED), fails stale runs, lists notifications that are due, and reports privilege drift and any test clock offset. One failing item never stops the others.';
+  'FAO-GOV-004, FAO-GOV-007, FAO-GOV-008, FAO-GOV-015: the five-minute sweep. Expires unclaimed run tokens and overdue requests (HITL_EXPIRED as the closing record, one escalation, COMMIT_BLOCKED when the audit chain is incomplete; never COMMITTED), fails stale runs, lists notifications that are due, and reports privilege drift and any test clock offset. One failing item never stops the others.';
 
 -- ----------------------------------------------------------------------------
 -- 7. Revoke every function in this file from every client role. 0017 grants:

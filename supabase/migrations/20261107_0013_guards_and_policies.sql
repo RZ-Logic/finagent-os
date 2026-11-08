@@ -17,6 +17,9 @@
 -- workflow_failures (K1); the v1 append-only trigger function's search_path
 -- pinned (B-28); the hitl_queue catalog comments rewritten for the current
 -- controls (F-09).
+-- Patch round 6: the execution SLA floor on agent_registry (P4); the read
+-- policies call has_role and has_any_role through a scalar subquery so each
+-- runs once per statement instead of once per row (P6).
 --
 -- Control IDs implemented:
 --   FAO-GOV-001  no TRUNCATE for any role (the owner included, unless the
@@ -415,9 +418,45 @@ $$;
 COMMENT ON FUNCTION fao_private.user_roles_guard_row() IS
   'FAO-GOV-004: row trigger on fao_user_roles: no DELETE; only revoked_at may change, once, from NULL.';
 
+-- Patch round 6 (P4, K4 invariant): a run is called stale (by the sweep and
+-- by fao_run_claim) once it has been RUNNING longer than its agent's
+-- sla_max_execution_seconds. n8n must kill an execution before that, so a
+-- slow but live execution is never failed under it: the flagship's
+-- settings.executionTimeout is 600 s (check-exports), and the database
+-- refuses any write that sets sla_max_execution_seconds below 900 s. Every
+-- write to agent_registry passes here (seeds, the owner's audited direct
+-- edit, any function), for every role, the owner included. NULL stays
+-- allowed (the stale rule reads it as 900; ACTIVE needs it set, R10). A row
+-- that already holds a lower value is not rewritten by this file; an UPDATE
+-- that leaves the value unchanged is not refused, so the cutover runbook
+-- raises the live value with a change reason.
+CREATE FUNCTION fao_private.agent_registry_sla_guard_row()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = ''
+AS $$
+BEGIN
+  IF NEW.sla_max_execution_seconds IS NOT NULL
+     AND NEW.sla_max_execution_seconds < 900
+     AND (TG_OP = 'INSERT' OR NEW.sla_max_execution_seconds IS DISTINCT FROM OLD.sla_max_execution_seconds) THEN
+    RAISE EXCEPTION 'FAO-GOV-008: sla_max_execution_seconds must be at least 900 (agent %); n8n executionTimeout must stay below it', NEW.agent_id
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+COMMENT ON FUNCTION fao_private.agent_registry_sla_guard_row() IS
+  'FAO-GOV-008 (patch round 6, P4): row trigger on agent_registry: an INSERT or UPDATE that sets sla_max_execution_seconds below 900 is refused (23514), for every role, so the stale-run rule never fires before n8n executionTimeout (600 s on the flagship).';
+
 -- ----------------------------------------------------------------------------
 -- 6. Policies on hitl_queue (FAO-GOV-004): members read; no write policy.
 -- ----------------------------------------------------------------------------
+-- Patch round 6 (P6): every role helper in a policy is written as
+-- (select fao_private.has_...((select auth.uid()))). The argument does not
+-- depend on the row, so the planner runs the call once per statement (an
+-- InitPlan) instead of once per row checked.
 DROP POLICY IF EXISTS "Authenticated users can read hitl_queue"            ON public.hitl_queue;
 DROP POLICY IF EXISTS "Only service_role can insert hitl_queue"            ON public.hitl_queue;
 DROP POLICY IF EXISTS "Service role can update hitl_queue"                 ON public.hitl_queue;
@@ -428,7 +467,7 @@ CREATE POLICY "FAO members read hitl_queue"
   ON public.hitl_queue
   FOR SELECT
   TO authenticated
-  USING (fao_private.has_any_role((select auth.uid())));
+  USING ((select fao_private.has_any_role((select auth.uid()))));
 
 -- F-09 (round 5): the 0005 catalog comments described the v1 controls (SoD
 -- in the RLS layer, an RLS WITH CHECK on approver_id), which this file
@@ -451,7 +490,7 @@ CREATE POLICY "FAO members read shadow_ledger"
   ON public.shadow_ledger
   FOR SELECT
   TO authenticated
-  USING (fao_private.has_any_role((select auth.uid())));
+  USING ((select fao_private.has_any_role((select auth.uid()))));
 
 -- B-28 (round 5): the v1 append-only trigger function (0004) is the one
 -- function in public or fao_private without a pinned search_path. Its body
@@ -469,7 +508,7 @@ CREATE POLICY "FAO members read run_invocations"
   ON public.run_invocations
   FOR SELECT
   TO authenticated
-  USING (fao_private.has_any_role((select auth.uid())));
+  USING ((select fao_private.has_any_role((select auth.uid()))));
 
 -- Round 5 (K1): workflow failures that attach to no run; members read them
 -- like run_invocations (the MCP reader included). No write policy.
@@ -477,7 +516,7 @@ CREATE POLICY "FAO members read workflow_failures"
   ON public.workflow_failures
   FOR SELECT
   TO authenticated
-  USING (fao_private.has_any_role((select auth.uid())));
+  USING ((select fao_private.has_any_role((select auth.uid()))));
 
 CREATE POLICY "Own, admin or reader reads roles"
   ON public.fao_user_roles
@@ -485,8 +524,8 @@ CREATE POLICY "Own, admin or reader reads roles"
   TO authenticated
   USING (
     user_id = (select auth.uid())
-    OR fao_private.has_role((select auth.uid()), 'admin', NULL)
-    OR fao_private.has_role((select auth.uid()), 'reader', NULL)
+    OR (select fao_private.has_role((select auth.uid()), 'admin', NULL))
+    OR (select fao_private.has_role((select auth.uid()), 'reader', NULL))
   );
 
 CREATE POLICY "Admin or reader reads fao_refusal_journal"
@@ -494,8 +533,8 @@ CREATE POLICY "Admin or reader reads fao_refusal_journal"
   FOR SELECT
   TO authenticated
   USING (
-    fao_private.has_role((select auth.uid()), 'admin', NULL)
-    OR fao_private.has_role((select auth.uid()), 'reader', NULL)
+    (select fao_private.has_role((select auth.uid()), 'admin', NULL))
+    OR (select fao_private.has_role((select auth.uid()), 'reader', NULL))
   );
 
 CREATE POLICY "Admin or reader reads fao_admin_audit"
@@ -503,8 +542,8 @@ CREATE POLICY "Admin or reader reads fao_admin_audit"
   FOR SELECT
   TO authenticated
   USING (
-    fao_private.has_role((select auth.uid()), 'admin', NULL)
-    OR fao_private.has_role((select auth.uid()), 'reader', NULL)
+    (select fao_private.has_role((select auth.uid()), 'admin', NULL))
+    OR (select fao_private.has_role((select auth.uid()), 'reader', NULL))
   );
 
 CREATE POLICY "Admin or reader reads fao_notifications"
@@ -512,8 +551,8 @@ CREATE POLICY "Admin or reader reads fao_notifications"
   FOR SELECT
   TO authenticated
   USING (
-    fao_private.has_role((select auth.uid()), 'admin', NULL)
-    OR fao_private.has_role((select auth.uid()), 'reader', NULL)
+    (select fao_private.has_role((select auth.uid()), 'admin', NULL))
+    OR (select fao_private.has_role((select auth.uid()), 'reader', NULL))
   );
 
 CREATE POLICY "Admin or reader reads fao_settings"
@@ -521,8 +560,8 @@ CREATE POLICY "Admin or reader reads fao_settings"
   FOR SELECT
   TO authenticated
   USING (
-    fao_private.has_role((select auth.uid()), 'admin', NULL)
-    OR fao_private.has_role((select auth.uid()), 'reader', NULL)
+    (select fao_private.has_role((select auth.uid()), 'admin', NULL))
+    OR (select fao_private.has_role((select auth.uid()), 'reader', NULL))
   );
 
 CREATE POLICY "Workflow reads thresholds"
@@ -666,6 +705,10 @@ CREATE TRIGGER run_tokens_guard_row
 CREATE TRIGGER user_roles_guard_row
   BEFORE UPDATE OR DELETE ON public.fao_user_roles
   FOR EACH ROW EXECUTE FUNCTION fao_private.user_roles_guard_row();
+-- Patch round 6 (P4): execution SLA floor (900 s) on every write.
+CREATE TRIGGER agent_registry_sla_guard_row
+  BEFORE INSERT OR UPDATE OF sla_max_execution_seconds ON public.agent_registry
+  FOR EACH ROW EXECUTE FUNCTION fao_private.agent_registry_sla_guard_row();
 
 -- ----------------------------------------------------------------------------
 -- 10. Revoke every function in this file from every client role. Trigger
@@ -676,4 +719,5 @@ REVOKE ALL ON FUNCTION fao_private.hitl_queue_guard_row()      FROM PUBLIC, anon
 REVOKE ALL ON FUNCTION fao_private.run_invocations_guard_row() FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION fao_private.run_tokens_guard_row()      FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION fao_private.user_roles_guard_row()      FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
+REVOKE ALL ON FUNCTION fao_private.agent_registry_sla_guard_row() FROM PUBLIC, anon, authenticated, service_role, fao_workflow;
 REVOKE ALL ON FUNCTION fao_private.close_legacy_requests()     FROM PUBLIC, anon, authenticated, service_role, fao_workflow;

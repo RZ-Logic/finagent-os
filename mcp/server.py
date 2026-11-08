@@ -8,7 +8,7 @@ observer and trigger; humans decide through the approval page with their own
 signed-in session.
 
 Controls:
-- FAO-GOV-003 least privilege: reads run as the dedicated reader Auth user,
+- FAO-GOV-015 least privilege: reads run as the dedicated reader Auth user,
   which holds only the global `reader` application role. The server refuses
   to start when a service or secret key is in its environment, when the
   reader cannot sign in, or when the reader holds any other role.
@@ -142,7 +142,7 @@ def load_config(env: Mapping[str, str]) -> Config:
         if not isinstance(value, str) or not value.strip():
             raise SystemExit(MSG_MISSING.format(key=key))
         values[key] = value.strip()
-    # FAO-GOV-003: passwords, tokens, the invoke key and run tokens go out on
+    # FAO-GOV-015: passwords, tokens, the invoke key and run tokens go out on
     # the first request, so a non-loopback URL must be https.
     for key in ("SUPABASE_URL", "N8N_INVOKE_WEBHOOK_URL"):
         if not url_is_secure(values[key]):
@@ -699,7 +699,7 @@ StrArg = Annotated[Any, Field(description="String, or null for no filter.")]
 
 
 def _check_reader(rest: RestClient, reader_session: UserSession) -> None:
-    """Startup gate (FAO-GOV-003): the reader holds exactly one global reader role."""
+    """Startup gate (FAO-GOV-015): the reader holds exactly one global reader role."""
     try:
         token = reader_session.bearer()
     except FaoError:

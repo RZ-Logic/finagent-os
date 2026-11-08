@@ -5,7 +5,7 @@
 -- FAO-GOV-008 (run records hold no token material).
 -- ============================================================================
 BEGIN;
-SELECT plan(47);
+SELECT plan(48);
 
 -- New tables
 SELECT has_table('public', 'run_invocations', 'run_invocations exists');
@@ -16,6 +16,7 @@ SELECT has_table('fao_private', 'test_clock', 'fao_private.test_clock exists');
 SELECT has_table('public', 'fao_refusal_journal', 'fao_refusal_journal exists');
 SELECT has_table('public', 'fao_admin_audit', 'fao_admin_audit exists');
 SELECT has_table('public', 'fao_notifications', 'fao_notifications exists');
+SELECT has_table('public', 'hitl_approvals', 'hitl_approvals exists (dual approval, 0018)');
 
 -- Enums and values
 SELECT enum_has_labels('public', 'hitl_decision', ARRAY['PENDING','APPROVED','REJECTED','EXPIRED'], 'hitl_decision labels');
@@ -91,7 +92,8 @@ SELECT is_empty(
     WHERE c.contype = 'f'
       AND c.conrelid IN ('public.process_owners'::regclass, 'public.agent_registry'::regclass, 'public.shadow_ledger'::regclass,
                          'public.hitl_queue'::regclass, 'public.materiality_thresholds'::regclass, 'public.run_invocations'::regclass,
-                         'fao_private.run_tokens'::regclass, 'public.fao_user_roles'::regclass, 'public.fao_notifications'::regclass)
+                         'fao_private.run_tokens'::regclass, 'public.fao_user_roles'::regclass, 'public.fao_notifications'::regclass,
+                         'public.hitl_approvals'::regclass)
       AND c.confdeltype <> 'r'$$,
   'every FinAgent foreign key is ON DELETE RESTRICT');
 SELECT results_eq(
@@ -99,13 +101,15 @@ SELECT results_eq(
     FROM (VALUES ('process_owners','id'), ('process_owners','escalation_to'), ('hitl_queue','approver_id'), ('hitl_queue','agent_invoker_id'),
                  ('shadow_ledger','hitl_approver_id'), ('shadow_ledger','corrects_ledger_id'), ('materiality_thresholds','last_reviewed_by'),
                  ('run_invocations','agent_id'), ('run_invocations','invoker_id'), ('fao_user_roles','user_id'), ('fao_user_roles','agent_id'),
-                 ('fao_user_roles','granted_by'), ('fao_notifications','hitl_id'), ('fao_notifications','recipient_owner_id')) AS x(t, col)
+                 ('fao_user_roles','granted_by'), ('fao_notifications','hitl_id'), ('fao_notifications','recipient_owner_id'),
+                 ('hitl_approvals','hitl_id'), ('hitl_approvals','approver_id')) AS x(t, col)
     WHERE EXISTS (
       SELECT 1 FROM pg_constraint c
       JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
       WHERE c.contype = 'f' AND c.conrelid = ('public.' || x.t)::regclass AND a.attname = x.col AND c.confdeltype = 'r')
     ORDER BY 1$$,
   $$SELECT x FROM unnest(ARRAY['fao_notifications.hitl_id','fao_notifications.recipient_owner_id','fao_user_roles.agent_id','fao_user_roles.granted_by',
+    'hitl_approvals.approver_id','hitl_approvals.hitl_id',
     'fao_user_roles.user_id','hitl_queue.agent_invoker_id','hitl_queue.approver_id','materiality_thresholds.last_reviewed_by','process_owners.escalation_to',
     'process_owners.id','run_invocations.agent_id','run_invocations.invoker_id','shadow_ledger.corrects_ledger_id','shadow_ledger.hitl_approver_id']) AS x ORDER BY 1$$,
   'each history column has a RESTRICT foreign key');

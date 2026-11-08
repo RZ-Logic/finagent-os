@@ -2,13 +2,13 @@
 
 | | |
 |---|---|
-| **Status** | Accepted. Updated 2026-11 for the phases 2 to 5 core (branch `phase2-5-core-2026-11-07`, not yet deployed). |
+| **Status** | Superseded by ADR-0004 (2026-11-08): dual approval is built and tested on branch `phase2-5-core-2026-11-07`, not yet deployed. Kept as the record. |
 | **Date** | 2026-04-25 (decision); 2026-11 (update) |
 | **Discovered by** | Claude Opus, via MCP self-audit ([transcript](https://claude.ai/share/5f0eb294-e658-42b5-a876-8164a0049960)) |
 | **Author** | Rizwan Ahmed, ACCA · Velocyt Consulting |
 | **Reviewed by** | External review pending. Two external reviews of v1 (November 2026) corrected parts of this ADR; see the addendum. |
 | **Supersedes** | None |
-| **Superseded by** | None yet. Dual approval is the last planned edit; it gets its own ADR when it is built. |
+| **Superseded by** | [ADR-0004](0004-dual-approval-enforced.md) |
 
 > *This is an **Architecture Decision Record**: a short document capturing an engineering choice, the situation that drove it, and the trade-offs that follow. Each ADR in this repo is numbered, dated, and supersedes or is superseded by other ADRs as the system evolves.*
 
@@ -17,8 +17,9 @@
 ## Where things stand (2026-11)
 
 - **Live** still runs v1 until the cutover. Everything in v1's description below is what the live system does today.
-- **The phases 2 to 5 core** is built and tested on the branch `phase2-5-core-2026-11-07` (local Supabase and a local n8n only). It binds the invoker and the approver to their own Supabase Auth sessions. It does not enforce dual approval.
-- **Dual approval is excluded from the core.** It is the last planned edit. The core leaves the hooks for it (see "How dual approval plugs in later"); no part of it is built.
+- **The phases 2 to 5 core** is built and tested on the branch `phase2-5-core-2026-11-07` (local Supabase and a local n8n only). It binds the invoker and the approver to their own Supabase Auth sessions. At the time of the core build (2026-11-07) it did not enforce dual approval.
+- **At the time of the core build, dual approval was excluded from the core.** It was the last planned edit. The core left the hooks for it (see "How dual approval plugs in later"); no part of it was built then.
+- **Dual approval is now built on the branch (2026-11-08, [ADR-0004](0004-dual-approval-enforced.md)).** CRITICAL review needs the configured count (two for the RED flagship) from different approvers, never the invoker, each through an approver grant made before the request, not by the invoker and not by another approver of it; one rejection closes the request. Tested locally only; live still runs v1.
 
 The 2026-04-25 context and decision are kept below as the record. The v1.1 implementation sketch that used to follow them has been removed, because its design no longer fits the schema (see the addendum). The earlier text is in git history.
 

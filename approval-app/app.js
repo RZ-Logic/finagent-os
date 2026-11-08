@@ -9,8 +9,16 @@
 // are the fixed texts below, chosen by result code (never server error text);
 // a journal reference id from `ref` is shown when present.
 //
-// The pure functions parseHitlId, statusMessage and buildViewModel are
-// exported for the offline Node tests. The browser bootstrap runs only when
+// Dual approval (FAO-GOV-004, ADR-0004): a CRITICAL request can need more
+// than one approval from different approvers. An approval that does not yet
+// complete the count returns AWAITING_FURTHER_APPROVAL; the page then shows
+// the approvals received and, on reload, only Reject for that approver.
+// Which approvals count is the database's decision (counted_approvals); the
+// page only reads approvals_received, enforced_approvals and the viewer flags.
+//
+// The pure functions parseHitlId, statusMessage, approvalsText,
+// approvalsComplete and buildViewModel are exported for the offline Node
+// tests. The browser bootstrap runs only when
 // window.document exists.
 
 // Fixed messages per result code (shared contract, section 2.6).
@@ -41,6 +49,8 @@ export const CODE_MESSAGES = Object.freeze(
     ALREADY_TERMINAL: 'The run has already finished.',
     NOT_PENDING: 'Nothing to send.',
     ALREADY_SENT: 'Already sent.',
+    AWAITING_FURTHER_APPROVAL: 'Approval recorded. This request needs more approvals before it is decided.',
+    ALREADY_APPROVED: 'You have already approved this request.',
   }),
 );
 
@@ -78,6 +88,12 @@ export const PAGE_TEXT = Object.freeze({
   signedInAs: 'Signed in as ',
   referencePrefix: 'Reference id: ',
   deciding: 'Sending your decision.',
+  // The viewer's approval is recorded but the request still needs approvals
+  // from others (dual approval): only Reject is offered.
+  approvedAwaiting:
+    'You have approved this request. It needs more approvals before it is decided. You can still reject it.',
+  // Joins the two counts of "<n> of <e>"; never used on its own.
+  approvalsOf: ' of ',
 });
 
 const HITL_ID_RE = /^\d{1,12}$/;
@@ -95,6 +111,23 @@ export function noteLength(text) {
 
 function hasOwn(obj, key) {
   return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+function validCounts(received, enforced) {
+  return Number.isSafeInteger(received) && received >= 0 && Number.isSafeInteger(enforced) && enforced >= 1;
+}
+
+// "<received> of <enforced>" when both counts are valid (received a safe
+// integer of at least 0, enforced a safe integer of at least 1), else ''.
+export function approvalsText(received, enforced) {
+  if (!validCounts(received, enforced)) return '';
+  return String(received) + PAGE_TEXT.approvalsOf + String(enforced);
+}
+
+// True when both counts are valid and the approvals received reach the
+// enforced count, else false.
+export function approvalsComplete(received, enforced) {
+  return validCounts(received, enforced) && received >= enforced;
 }
 
 // Returns the hitl id as a canonical decimal string, or null when the query
@@ -207,6 +240,7 @@ function emptyModel() {
     assets: [],
     note: '',
     canDecide: false,
+    canApprove: false,
     isInvoker: false,
     needsSignIn: false,
     retry: false,
@@ -242,6 +276,14 @@ export function buildViewModel(result) {
     model.title = `Request ${model.hitlId}`;
     model.canDecide = request.viewer_can_decide === true;
     model.isInvoker = request.viewer_is_invoker === true;
+    // May approve: may decide, and either has not approved yet or every
+    // approval needed already counts (the restore case, W23: a repeat approve
+    // then decides). The database is the control: a repeat approve while the
+    // counted approvals are short is ALREADY_APPROVED whatever this shows.
+    model.canApprove =
+      model.canDecide &&
+      (request.viewer_has_approved !== true ||
+        approvalsComplete(request.approvals_received, request.enforced_approvals));
     model.fields = filled([
       field('Request id', request.hitl_id),
       field('Agent', request.agent_name),
@@ -251,6 +293,7 @@ export function buildViewModel(result) {
       field('Policy rationale', request.policy_rationale),
       field('Configured approvals', request.configured_approvals),
       field('Enforced approvals', request.enforced_approvals),
+      field('Approvals received', approvalsText(request.approvals_received, request.enforced_approvals)),
       field('Requested at', request.created_at),
       field('Decide by', request.timeout_at),
       field('Decision', request.decision),
@@ -267,7 +310,28 @@ export function buildViewModel(result) {
     }
     // The status line already carries this text; it is not repeated as a
     // note under the request (B4).
-    model.message = model.canDecide ? PAGE_TEXT.review : note;
+    if (model.canDecide) {
+      model.message = model.canApprove ? PAGE_TEXT.review : PAGE_TEXT.approvedAwaiting;
+    } else {
+      model.message = note;
+    }
+    return model;
+  }
+
+  // An approval recorded that does not yet decide the request (dual
+  // approval): the request stays PENDING and nothing is committed.
+  if (result.ok && code === 'AWAITING_FURTHER_APPROVAL') {
+    model.kind = 'decided';
+    model.hitlId = toText(result.hitl_id);
+    model.title = `Request ${model.hitlId}`;
+    model.message = CODE_MESSAGES.AWAITING_FURTHER_APPROVAL;
+    model.fields = filled([
+      field('Request id', result.hitl_id),
+      field('Decision', result.decision),
+      field('Approvals received', approvalsText(result.approvals_received, result.enforced_approvals)),
+      field('Approved at', result.approved_at),
+      field('Committed', PAGE_TEXT.committedNo),
+    ]);
     return model;
   }
 
@@ -500,6 +564,10 @@ async function bootstrap(win) {
       ui.show('request', true);
     }
     if (model.kind === 'request' && model.canDecide) {
+      // An approver whose approval is recorded but not yet complete sees
+      // Reject only (dual approval).
+      ui.show('approve', model.canApprove);
+      ui.show('reject', true);
       ui.show('decide', true);
     } else {
       // The decision form is gone for good on this view: drop any draft.

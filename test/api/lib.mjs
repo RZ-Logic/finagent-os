@@ -55,6 +55,9 @@ export const MESSAGES = {
   INVALID_TOKEN: 'The run token is not valid.',
   RATE_LIMITED: 'Too many runs in the last hour.',
   AUDIT_CHAIN_MISMATCH: "Recorded, but the run's ledger chain is incomplete, so it was not committed.",
+  // Dual approval (DUAL-APPROVAL.md 4.2).
+  AWAITING_FURTHER_APPROVAL: 'Approval recorded. This request needs more approvals before it is decided.',
+  ALREADY_APPROVED: 'You have already approved this request.',
 };
 
 function assertLocal(urlText, label) {
@@ -281,6 +284,35 @@ export async function makeRequest(invokerKey = 'aisha') {
   const f = await finalize(corr);
   if (!f.hitl_required || !f.hitl_id) throw new Error('test/api: finalize did not open a request');
   return { hitlId: Number(f.hitl_id), corr, approvalUrl: f.approval_url };
+}
+
+// Dual approval (DUAL-APPROVAL.md 9.2): a run with one SOL REQUIRE_HUMAN
+// CRITICAL asset taken to AWAITING_HITL. On the flagship (approval_threshold
+// 2) the request has configured_approvals 2 and enforced_approvals 2 (DA-1).
+// Returns { hitlId, corr, approvalUrl }.
+export async function makeCriticalRequest(invokerKey = 'aisha') {
+  const corr = await makeRun(invokerKey, ['SOL']);
+  await append([assetEvent(corr, 'SOL', 'REQUIRE_HUMAN', 'CRITICAL')]);
+  const f = await finalize(corr);
+  if (!f.hitl_required || !f.hitl_id) throw new Error('test/api: finalize did not open a critical request');
+  return { hitlId: Number(f.hitl_id), corr, approvalUrl: f.approval_url };
+}
+
+// One owner transaction (assertion set-up such as a grant with a change
+// reason); rolled back when fn throws.
+export async function ownerTx(fn) {
+  const c = await owner().connect();
+  try {
+    await c.query('BEGIN');
+    const out = await fn(c);
+    await c.query('COMMIT');
+    return out;
+  } catch (e) {
+    await c.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    c.release();
+  }
 }
 
 export const ledgerTypes = async (corr) => (await q(

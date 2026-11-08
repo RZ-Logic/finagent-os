@@ -162,8 +162,8 @@ SELECT is_empty($$SELECT p.tablename || ' ' || p.policyname FROM pg_policies p
                   WHERE p.schemaname = 'public'
                     AND regexp_count(coalesce(p.qual, ''), 'fao_private\.has_') <> regexp_count(coalesce(p.qual, ''), 'SELECT fao_private\.has_')$$,
   'P6: every policy calls has_role / has_any_role only inside a scalar subquery');
-SELECT is((SELECT count(*) FROM pg_policies p WHERE p.schemaname = 'public' AND p.qual LIKE '%SELECT fao_private.has_%'), 9::bigint,
-  'P6: the nine FinAgent read policies use the wrapped form');
+SELECT is((SELECT count(*) FROM pg_policies p WHERE p.schemaname = 'public' AND p.qual LIKE '%SELECT fao_private.has_%'), 10::bigint,
+  'P6: the ten FinAgent read policies use the wrapped form');
 SELECT is((SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
             WHERE n.nspname = 'fao_private' AND p.proname IN ('has_role', 'has_any_role') AND p.provolatile = 's' AND p.prosecdef), 2::bigint,
   'P6: has_role and has_any_role are STABLE and SECURITY DEFINER');

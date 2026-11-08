@@ -5,7 +5,7 @@
 | **Status** | Accepted pending owner sign-off. Built on branch `phase2-5-core-2026-11-07`; not yet deployed (live runs v1 until the cutover). |
 | **Date** | 2026-11-07 |
 | **Author** | Rizwan Ahmed, ACCA · Velocyt Consulting |
-| **Supersedes** | None. Extends ADR-0001's context: identity is now bound, dual approval is still the remaining gap. |
+| **Supersedes** | None. Extends ADR-0001's context: identity is now bound; dual approval was the remaining gap when this was written and is now built ([ADR-0004](0004-dual-approval-enforced.md)). |
 | **Superseded by** | None |
 
 ## Context
@@ -29,4 +29,4 @@ A TOTP second factor for approvers and admins is planned for wave 2. Session bin
 
 - The controls bind actions to identities; they cannot prove two identities are different people. In the public demo one person holds every demo identity.
 - The database owner, holders of the `postgres` password and holders of platform admin or secret keys stay outside the control.
-- Dual approval (ADR-0001) can be added on top: the request already records its configured approval count and the single approval enforced today.
+- Dual approval (ADR-0001) can be added on top: the request already records its configured approval count and the single approval enforced when this was written. It was added in [ADR-0004](0004-dual-approval-enforced.md): CRITICAL requests on the flagship now need two approvals.

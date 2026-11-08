@@ -81,7 +81,7 @@ While narrating the most recent execution, Claude observed that `agent_registry.
   <img src="docs/evidence/mcp/mcp_03_dual_approval_gap_surfaced.png" alt="MCP self-audit surfacing dual-approval gap" width="800"/>
 </p>
 
-Documented as **[ADR-0001](docs/adr/0001-dual-approval-not-yet-enforced.md)** the same hour. Dual approval is still not enforced: phases 2 to 5 exclude it on purpose, and each request now records its configured approval count from the registry next to the single approval that is enforced.
+Documented as **[ADR-0001](docs/adr/0001-dual-approval-not-yet-enforced.md)** the same hour. Dual approval is now built on this branch and tested locally ([ADR-0004](docs/adr/0004-dual-approval-enforced.md)): a request whose review sub-tier is CRITICAL needs two approvals from different approvers, never the invoker. It is not live; the live stack still runs v1 with one approval.
 
 Full evidence preserved at [`docs/evidence/mcp/`](./docs/evidence/mcp/).
 
@@ -178,7 +178,7 @@ For a reviewer with limited time, here's the recommended path:
 
 1. **[`SOX-MAPPING.md`](./SOX-MAPPING.md)**: start with the *Where-is-the-AI* table. ~90 seconds. Tells you the architecture's stance on AI authority.
 2. **[The MCP self-audit transcript](https://claude.ai/share/5f0eb294-e658-42b5-a876-8164a0049960)**: ~5 minutes. Claude Opus interrogating the audit trail and red-teaming the surface.
-3. **[ADR-0001](docs/adr/0001-dual-approval-not-yet-enforced.md)**: the dual-approval gap that surfaced during the audit. ~3 minutes.
+3. **[ADR-0001](docs/adr/0001-dual-approval-not-yet-enforced.md)**: the dual-approval gap that surfaced during the audit, and **[ADR-0004](docs/adr/0004-dual-approval-enforced.md)**, how it is now built on this branch. ~4 minutes.
 4. **[`supabase/migrations/0013_guards_and_policies.sql`](supabase/migrations/20261107_0013_guards_and_policies.sql)** + **[`0015_hitl_rpcs.sql`](supabase/migrations/20261107_0015_hitl_rpcs.sql)**: the guard triggers and the decision function (`fao_hitl_decide`). ~10 minutes. Read the code that enforces SoD, immutable decisions and one-transaction resolution. The v1 triggers stay in [`0004`](supabase/migrations/20260420_0004_shadow_ledger.sql) (append-only, still in use) and [`0005b`](supabase/migrations/20260420_0005b_hitl_queue_sod_trigger.sql) (SoD, dropped by 0013).
 5. **[`workflows/fao_reserve_recon_v1.json`](workflows/fao_reserve_recon_v1.json)**: the flagship's policy decision matrix. The relevant code is in the *Per-Asset Reconcile* node's `jsCode` block. [`workflows/README.md`](workflows/README.md) walks through the run flow.
 
@@ -205,19 +205,19 @@ npm test             # every layer; npm run test:offline runs the first three on
 | `pytest` | MCP server tests, offline (PostgREST mocked) |
 | `pgtap` | pgTAP files in `supabase/tests/` against the local database: grants, guards, decisions, runs, rollup, sweep, journal, admin |
 | `api` | Real sign-ins against the local Supabase API: SoD, spoofed identity, direct writes, body checks, status codes |
-| `e2e` | A fresh n8n 2.46.6 in Docker with a mock Slack: the exports are imported, published and run for real (scenarios S01 to S23) |
+| `e2e` | A fresh n8n 2.46.6 in Docker with a mock Slack: the exports are imported, published and run for real (scenarios S01 to S27) |
 
-The last full run (2026-11-08 02:21 UTC, patch round 7 tree on top of commit `96c14eb`, not yet committed, fresh reset) passed every layer, with nothing skipped:
+The last full run (2026-11-08 06:04 UTC, dual approval fix round 2, the dual approval tree on top of commit `e12f7d1`, not yet committed, fresh reset) passed every layer, with nothing skipped:
 
 | exports | node | pytest | pgtap | api | e2e | total |
 |---:|---:|---:|---:|---:|---:|---:|
-| 143 | 157 | 320 | 1264 | 46 | 23 | 1953 |
+| 143 | 176 | 344 | 1563 | 60 | 27 | 2313 |
 
 `python mcp/scripts/smoke_local.py` checks the six MCP read tools against the local stack; it is not part of `npm test`.
 
 **CI.** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs the same command in four jobs (static, mcp, db, e2e) on pinned versions. It has not yet run on GitHub, so there is no status badge yet.
 
-**Manual page check.** There is no automated browser test of the approval page, in CI or locally. Its sign-in and decision flow is checked by hand once per release: no session, invoker view (no buttons), approver decision, reload, an invalid link, and no CSP report in the console. That check has not yet been run against the local stack for this branch.
+**Manual page check.** There is no automated browser test of the approval page, in CI or locally. Its sign-in and decision flow is checked by hand once per release: no session, invoker view (no buttons), approver decision, reload, an invalid link, and no CSP report in the console; on a two-approval request, a first approval that is recorded but not committed, then a second approver's decision. For this branch the whole check (steps 1 to 15 of [`approval-app/README.md`](approval-app/README.md)) was done on 2026-11-08 against the local stack, in the built-in Chromium browser of the Claude desktop app, driven by Claude Code (an AI agent) rather than by a person with seed test users (phase 2-5 RUNS.md, dual approval fix rounds 1 and 2).
 
 These are local results. Nothing here has run against the live stack.
 
@@ -257,7 +257,7 @@ A change without a reason is refused, and every changed row is audited with the 
 | **Channel separation defends in depth** | The MCP surface and the approval page share no transport, and no MCP tool calls `fao_hitl_decide`. The MCP reads as a dedicated reader user, and the database refuses a decision from anyone but an approver for the agent who is not the run's invoker. |
 | **No mutation tools on the AI surface** | The MCP server has six read tools and one bounded invoke. There is no `approve_hitl`, no `update_threshold`, no `register_agent`. The asymmetry IS the architecture. |
 | **Documented gaps and preserved iteration history** | Known gaps (ADR-0001 and the list under Known Limitations) ship publicly with roadmap entries. The git history of Migration 0005 → 0005b → 0005c is preserved as evidence of how SoD enforcement evolved. |
-| **Risk-tier classification before build** | Every agent is GREEN/AMBER/RED before code is written. RED tier agents are configured for 2 approvers (`approval_threshold = 2`), but one approver is enforced; each request records both counts. Dual approval is excluded from phases 2 to 5 (see ADR-0001). |
+| **Risk-tier classification before build** | Every agent is GREEN/AMBER/RED before code is written. RED tier agents are configured for 2 approvers (`approval_threshold = 2`). On this branch two approvals are enforced for CRITICAL review and one for STANDARD, and each request records both counts (ADR-0004); live v1 enforces one. |
 
 ---
 
@@ -327,7 +327,7 @@ Rejected for `agent_registry.agent_id`. The agent_id appears in n8n workflow ref
 
 ## 📋 Known Limitations
 
-The gaps a reviewer would find are surfaced below. "Fixed" means built on this branch and covered by tests that pass in the patch round 7 run (1953 of 1953, see [Tests](#-tests)). None of it is live: the live stack runs v1, with every v1 gap, until the cutover.
+The gaps a reviewer would find are surfaced below. "Fixed" means built on this branch and covered by tests that pass in dual approval fix round 2 (2313 of 2313, see [Tests](#-tests)). None of it is live: the live stack runs v1, with every v1 gap, until the cutover.
 
 ### Control gaps: status after phases 2 to 5 (core)
 
@@ -339,13 +339,14 @@ The gaps a reviewer would find are surfaced below. "Fixed" means built on this b
 - **HITL timeout was not enforced. Fixed:** late decisions are refused; overdue requests expire and escalate once. HITL_EXPIRED is the expiry record of an expired request (its escalation can follow it), and the request is never recorded as a commit.
 - **Append-only was not administrator-proof. Narrowed:** UPDATE, DELETE, TRUNCATE and direct INSERT are refused for every application role, and ledger rows are appended only through database functions with database-set timestamps. The database owner remains outside the control (the owner can disable or drop a trigger). There is no independent or write-once evidence store; trusting the owner is a design choice for now, and independent evidence storage is planned.
 - **The committed Writer export dropped batch items. Fixed:** the Writer stores a batch all or none and names every bad item.
+- **Dual approval was named, not wired (ADR-0001). Fixed on this branch for CRITICAL review ([ADR-0004](docs/adr/0004-dual-approval-enforced.md)):** a request whose review sub-tier is CRITICAL needs two approvals (the registry count for the RED flagship) from different approvers, never the invoker, each through an approver grant made before the request was opened, not by the invoker and not by another approver of it; one rejection closes the request. STANDARD review keeps one approval. Tested locally only; live runs v1.
 
 ### Remaining limits
 
 - The database owner, holders of the `postgres` password and holders of platform admin or secret keys are outside the control (they can change identities or disable triggers); the plan is that after cutover only the owner's password manager holds them; that is not yet in place.
 - In the public demo one person holds every demo identity; the controls bind actions to identities, they cannot prove those identities are different people.
 - Policy inputs and per-asset outcomes are produced by the n8n workflow; the database checks shape, completeness, fail-closed inputs and chain integrity, not the policy result.
-- Approver authority beyond role membership (rank, limits per amount) is not modelled; it is a prerequisite for dual approval.
+- Approver authority beyond role membership (rank, limits per amount, named roles) is not modelled (DL-1).
 - A request whose sign-in token fails verification is refused by the API layer and recorded only in platform logs; above the journal cap only one marker row per minute is written, while refusals continue.
 - One escalation level; no notification after a decision.
 - **TOTP second factor for approvals and admin changes.** Approvals and admin changes require the person's own signed-in session, but not yet a second factor. A TOTP second factor for approvers and admins is planned. Until it ships, a stored password is enough to approve for any user who holds the approver role, so run-start credentials kept on an agent host should belong to a user without that role.
@@ -353,8 +354,10 @@ The gaps a reviewer would find are surfaced below. "Fixed" means built on this b
 - **Automated browser test of the approval page.** The approval page's logic is covered by unit tests and its sign-in and decision flow is checked by hand; there is no automated browser test yet.
 - **Python command-line tools (run start, admin).** There is no command-line tool yet for starting runs or for admin changes. Runs start through the MCP tool; admin changes go through the admin functions with the admin's own session, or through the documented SQL recipe with a change reason.
 - **Hosted rehearsal before cutover.** Behaviour that only a hosted project shows (pooler login, API key mode, Auth settings, page headers) is checked step by step during the live cutover, not first in a rehearsal on a scratch project.
-- **Automated end-to-end run of the n8n workflows (live n8n version).** The n8n workflows run end to end automatically on a local n8n 2.46.6 only: the e2e layer imports the exports, publishes them and runs scenarios S01 to S23 against local Supabase and a mock Slack in every `npm test`; the CI `e2e` job runs the same layer but has not yet run on GitHub. They are not run end to end against the live n8n version, and no failure path is exercised on live.
-- Dual approval (ADR-0001) is not yet enforced: each request records its configured approval count from the registry and the single approval that is enforced today.
+- **Automated end-to-end run of the n8n workflows (live n8n version).** The n8n workflows run end to end automatically on a local n8n 2.46.6 only: the e2e layer imports the exports, publishes them and runs scenarios S01 to S27 against local Supabase and a mock Slack in every `npm test`; the CI `e2e` job runs the same layer but has not yet run on GitHub. They are not run end to end against the live n8n version, and no failure path is exercised on live.
+- **Named roles are not modelled (DL-1).** Dual approval counts distinct users who hold the approver role for the agent. Roles such as Controller and CFO are not modelled, so the two approvals can come from any two eligible approvers. The flagship's rationale text "Controller + CFO review required" describes the intended pairing; the system does not check it.
+- **STANDARD review keeps one approval (DL-2).** A request whose review sub-tier is STANDARD needs one approval, also for a RED agent whose registry count is two (owner decision DA-1). Its ledger row says "approvals enforced 1 of configured 2".
+- **Two identities, not proven two people (DL-8).** Two approvals need two signed-in identities, but there is still no second factor (TOTP second factor, above), and in the public demo one person holds every demo identity. Dual approval binds the approvals to two identities; it cannot prove they are two different people. DA-4 only stops a grant made by the invoker or by another approver of the same request, so an admin can still prepare a second approval before a request indirectly: make a second identity an admin, and have that identity grant the approver role to a third; the third identity's approval counts, because its granter did not approve. Every grant records who made it and when.
 - The aggregate reserve ratio is planned (scope, valuation basis and floor first). There is no evidence package yet. FAO-REC-003, FAO-REC-004 and FAO-REC-008 in [`SOX-MAPPING.md`](./SOX-MAPPING.md) carry their status.
 - Requests that PostgREST refuses before a database function runs (an empty body, invalid JSON, GET or form-encoded calls) are not journaled. None of them changes anything; this was measured on the local PostgREST only.
 - A new n8n execution that reuses the execution id of a run still RUNNING inside its SLA window is refused at claim. If that execution then fails at any node before Respond 202 (the refused branch included), the error handler records it as pre-claim and never touches the older run; past the window, the claim fails the stale run first. A claim that committed and then errored inside Claim Run leaves its run RUNNING until the sweep fails it as stale. The stale-run rule relies on n8n stopping the flagship at its 600-second `executionTimeout` before the 900-second floor of `sla_max_execution_seconds`; that holds only where n8n's `EXECUTIONS_TIMEOUT_MAX` is at least 600. The database still cannot tell two executions with the same id apart.
@@ -366,7 +369,7 @@ The gaps a reviewer would find are surfaced below. "Fixed" means built on this b
 - Ids the database checks only by pattern (asset symbols, `agent_id`) can still spell words; the MCP marks free text as untrusted.
 - The sweeper's last check relies on n8n's documented branch order; `check-exports` holds the layout, and a reversed order would fail loudly, not silently.
 - The rollback script's privileges were compared with a local database only, never with the live v1 grants.
-- CI has not run on GitHub, and Node 22 and Python 3.12 have not been used locally (CI pins them). The approval page has not been run in a real browser against the stack.
+- CI has not run on GitHub, and Node 22 and Python 3.12 have not been used locally (CI pins them). The approval page has been checked only against the local stack, in the built-in Chromium browser of the Claude desktop app, driven by Claude Code (an AI agent) rather than by a person; not in another browser and not against a hosted project.
 - Some api and e2e tests briefly change shared demo users, roles or the test clock and restore them afterwards; run those layers with nothing else on the stack.
 
 ### Owner decisions (2026-11-08)
@@ -381,7 +384,6 @@ These were open in earlier rounds and are now decided. Every interface change ma
 
 These features are scaffolded (registry rows, schema columns, control IDs) and ship in a later release to close the loop.
 
-- **Dual-approval enforcement is named, not wired.** [ADR-0001](docs/adr/0001-dual-approval-not-yet-enforced.md) documents the gap. `agent_registry.approval_threshold=2` is stored. On this branch every request records `configured_approvals` (from the registry) and `enforced_approvals` (1); there are no `required_approvals` or `approvals_received` columns.
 - **The Weekly Rubric Audit (FAO-GOV-012) is referenced in [`SOX-MAPPING.md`](./SOX-MAPPING.md) but not yet implemented.** Cron-scheduled n8n job aggregating drift signals from `shadow_ledger`; ships in v1.1.
 
 ### Deliberately deferred until the threat model ships
@@ -411,7 +413,7 @@ Most items above have a roadmap entry below or are named in [`SOX-MAPPING.md`](.
 
 - [ ] **v1.1: AI advisory wiring (`FAO_AI_ASSIST_ENABLED=true`).** Claude API integration in the flagship producing `ai_human_brief` for HITL approvers. Gated, read-only on the policy path, with input sanitization for fixture-provenance fields. Ships with its own ADR documenting the threat model.
 - [ ] **Phases 2 to 5 cutover.** Deploy this branch's core to the live stack: migrations, workflows, approval page and MCP reader user, with the live-only checks done step by step. Until then the live stack runs v1.
-- [ ] **Later: Dual approval.** Excluded from phases 2 to 5. The hooks exist: every request freezes its configured and enforced approval counts, HITL_RESOLVED carries an `approvers` list, and `fao_hitl_decide` has a single update step where an approvals table would plug in. Approver authority beyond role membership has to be modelled first. Closes ADR-0001.
+- [x] **Later: Dual approval.** Built on this branch and tested locally ([ADR-0004](docs/adr/0004-dual-approval-enforced.md), closes ADR-0001): CRITICAL review needs the registry count of approvals (two for RED), each through a qualifying approver grant; not live until a landing path has run with the cutover or after it. Named approver roles are not modelled (DL-1).
 - [ ] **Later: TOTP second factor, journal for refused direct writes, automated browser test of the approval page, command-line tools.** Deferred from phases 2 to 5 (see Remaining limits).
 - [ ] **v1.1: Weekly Rubric Audit (FAO-GOV-012).** Cron-scheduled n8n job. Aggregates HITL count by asset, ratio variance, approval-time distribution. AI advisory narrative section gated by feature flag.
 - [ ] **v1.2: HTTP transport for MCP server.** Streamable HTTP per MCP spec, behind Caddy at `mcp.velocyt.ca`, with OAuth 2.1 per-user identity (not demo emails).

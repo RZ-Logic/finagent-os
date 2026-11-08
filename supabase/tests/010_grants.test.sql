@@ -6,7 +6,7 @@
 -- Schema tests is ignored.
 -- ============================================================================
 BEGIN;
-SELECT plan(48);
+SELECT plan(50);
 
 CREATE TEMP TABLE fin_rel AS
 SELECT c.oid, n.nspname::text COLLATE "default" AS sch, c.relname::text COLLATE "default" AS obj,
@@ -14,7 +14,7 @@ SELECT c.oid, n.nspname::text COLLATE "default" AS sch, c.relname::text COLLATE 
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE (n.nspname = 'public' AND c.relname IN ('shadow_ledger','hitl_queue','agent_registry','process_owners','materiality_thresholds',
                                               'run_invocations','fao_user_roles','fao_settings','fao_refusal_journal','fao_admin_audit',
-                                              'fao_notifications','fao_run_summary'))
+                                              'fao_notifications','fao_run_summary','hitl_approvals'))
    OR (n.nspname = 'fao_private' AND c.relname IN ('run_tokens','test_clock'));
 
 INSERT INTO fin_rel
@@ -39,6 +39,7 @@ INSERT INTO expected_acl VALUES
   ('table','public','shadow_ledger','authenticated','SELECT'),
   ('table','public','run_invocations','authenticated','SELECT'),
   ('table','public','hitl_queue','authenticated','SELECT'),
+  ('table','public','hitl_approvals','authenticated','SELECT'),
   ('table','public','agent_registry','authenticated','SELECT'),
   ('table','public','process_owners','authenticated','SELECT'),
   ('table','public','materiality_thresholds','authenticated','SELECT'),
@@ -204,6 +205,11 @@ SELECT throws_ok($$SELECT tests.do_as('service_role', 'SELECT 1 FROM public.mate
 SELECT throws_ok($$SELECT tests.do_as('service_role', 'SELECT 1 FROM public.fao_run_summary LIMIT 1')$$, '42501', NULL, 'service_role cannot read fao_run_summary');
 SELECT throws_ok($$SELECT tests.do_as('service_role', 'SELECT public.fao_run_start(json_build_object(''p_agent_id'', ''fao_reserve_recon_v1'', ''p_reason'', ''x'', ''p_idempotency_key'', ''abcdefgh''))')$$, '42501', NULL, 'service_role cannot execute fao_run_start');
 SELECT throws_ok($$SELECT tests.do_as('service_role', 'SELECT public.fao_maintenance_sweep()')$$, '42501', NULL, 'service_role cannot execute fao_maintenance_sweep');
+
+-- Dual approval (0018 to 0020): hitl_approvals is read-only for members and
+-- closed to every other client role; its sequence is in the checks above.
+SELECT throws_ok($$SELECT tests.do_as('anon', 'SELECT 1 FROM public.hitl_approvals LIMIT 1')$$, '42501', NULL, 'anon cannot read hitl_approvals');
+SELECT throws_ok($$SELECT tests.do_as('sarah.chen@finagent-os.demo', 'SELECT nextval(''public.hitl_approvals_approval_id_seq'')')$$, '42501', NULL, 'authenticated cannot use the hitl_approvals sequence');
 
 -- 44 to 48. temp tables named like FinAgent tables change nothing
 CREATE TEMP TABLE probe (k text PRIMARY KEY, v jsonb);

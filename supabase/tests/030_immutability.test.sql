@@ -5,7 +5,7 @@
 -- leave), FAO-GOV-008 (run and token state machines).
 -- ============================================================================
 BEGIN;
-SELECT plan(61);
+SELECT plan(65);
 
 CREATE TEMP TABLE v (k text PRIMARY KEY, j jsonb);
 INSERT INTO v VALUES ('pending', to_jsonb(tests.make_request('aisha.okonkwo@finagent-os.demo')));
@@ -40,6 +40,16 @@ SELECT throws_ok(format('SELECT tests.do_as(%L, %L)', 'fao_workflow', (SELECT sq
 SELECT throws_ok(format('SELECT tests.do_as(%L, %L)', 'service_role', (SELECT sql FROM probes WHERE k = 'insert')), '42501', NULL, 'service_role: direct INSERT on hitl_queue is refused');
 SELECT throws_ok(format('SELECT tests.do_as(%L, %L)', 'service_role', (SELECT sql FROM probes WHERE k = 'update')), '42501', NULL, 'service_role: direct UPDATE on hitl_queue is refused');
 SELECT throws_ok(format('SELECT tests.do_as(%L, %L)', 'service_role', (SELECT sql FROM probes WHERE k = 'delete')), '42501', NULL, 'service_role: direct DELETE on hitl_queue is refused');
+
+-- Dual approval (0018): hitl_approvals takes no direct write from any client
+-- role either (no write grant; the statement guard backs it up).
+SELECT throws_ok(format('SELECT tests.do_as(%L, %L)', 'sarah.chen@finagent-os.demo',
+  format($$INSERT INTO public.hitl_approvals (hitl_id, approver_id, approved_at) VALUES (%s, %L, now())$$,
+         (SELECT j::text FROM v WHERE k = 'pending'), tests.uid('sarah.chen@finagent-os.demo'))), '42501', NULL, 'Sarah: direct INSERT on hitl_approvals is refused');
+SELECT throws_ok(format('SELECT tests.do_as(%L, %L)', 'fao_workflow',
+  format($$INSERT INTO public.hitl_approvals (hitl_id, approver_id, approved_at) VALUES (%s, %L, now())$$,
+         (SELECT j::text FROM v WHERE k = 'pending'), tests.uid('sarah.chen@finagent-os.demo'))), '42501', NULL, 'fao_workflow: direct INSERT on hitl_approvals is refused');
+SELECT throws_ok(format('SELECT tests.do_as(%L, %L)', 'service_role', 'DELETE FROM public.hitl_approvals'), '42501', NULL, 'service_role: direct DELETE on hitl_approvals is refused');
 
 -- A pre-decided insert is refused by every route, the owner included
 SELECT throws_ok(format($$INSERT INTO public.hitl_queue (correlation_id, agent_id, agent_invoker_id, risk_tier, policy_rationale, decision, approver_id, decided_at, timeout_at)
@@ -85,6 +95,10 @@ SELECT throws_ok(format($$UPDATE public.hitl_queue SET decision = 'APPROVED', ap
   tests.uid('sarah.chen@finagent-os.demo'), (SELECT j::text FROM v WHERE k = 'pending')), '42501', NULL, 'pending row: correlation_id is frozen');
 SELECT throws_ok(format($$UPDATE public.hitl_queue SET decision_notes = 'only notes' WHERE hitl_id = %s$$, (SELECT j::text FROM v WHERE k = 'pending')),
   '42501', NULL, 'pending row: PENDING to PENDING is refused');
+-- Dual approval (0018): an APPROVED decision needs its approval row, so the
+-- control first records Sarah's approval as the owner with Sarah's claims.
+SELECT lives_ok(format($$INSERT INTO public.hitl_approvals (hitl_id, approver_id, approved_at) VALUES (%s, %L, fao_private.clock())$$,
+  (SELECT j::text FROM v WHERE k = 'pending'), tests.uid('sarah.chen@finagent-os.demo')), 'control setup: Sarah''s approval row is recorded');
 SELECT lives_ok(format($$UPDATE public.hitl_queue SET decision = 'APPROVED', approver_id = %L, decided_at = now() WHERE hitl_id = %s$$,
   tests.uid('sarah.chen@finagent-os.demo'), (SELECT j::text FROM v WHERE k = 'pending')), 'control: the same decision without a frozen-field change passes the guard');
 SELECT tests.as_owner();

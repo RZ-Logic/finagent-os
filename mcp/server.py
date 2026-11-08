@@ -179,6 +179,7 @@ EVENT_TYPES = (
     "NOTIFICATION_SENT",
     "NOTIFICATION_FAILED",
     "HITL_RESOLVED",
+    "HITL_APPROVAL_RECORDED",
     "HITL_EXPIRED",
     "HITL_ESCALATED",
     "COMMITTED",
@@ -213,13 +214,15 @@ NOTIFICATION_CHANNELS = ("slack",)
 LEDGER_SOURCES = ("writer", "error_workflow", "sweep", "cutover")
 LEDGER_STAGES = ("before_request", "after_request")
 #   0011 code_http: every result and journal code; any other code raises
+#   (0018 replaces it and adds AWAITING_FURTHER_APPROVAL and ALREADY_APPROVED)
 RESULT_CODES = (
     "OK", "NO_SESSION", "INVALID_INPUT", "NOT_AN_OWNER", "NOT_AUTHORISED",
     "SOD_SELF_APPROVAL", "SELF_CHANGE", "NOT_FOUND", "UNKNOWN_AGENT",
     "AGENT_NOT_ACTIVE", "INVOKER_NOT_ACTIVE", "BUSY", "NO_RUN_RECORD", "ALREADY_CLAIMED",
     "ALREADY_DECIDED", "EXPIRED", "TOKEN_EXPIRED", "INVALID_TOKEN",
     "RATE_LIMITED", "AUDIT_CHAIN_MISMATCH", "UNKNOWN_EXECUTION",
-    "ALREADY_TERMINAL", "NOT_PENDING", "ALREADY_SENT", "JOURNAL_SUPPRESSED",
+    "ALREADY_TERMINAL", "NOT_PENDING", "ALREADY_SENT",
+    "AWAITING_FURTHER_APPROVAL", "ALREADY_APPROVED", "JOURNAL_SUPPRESSED",
     "GRANTS_DRIFT", "TEST_CLOCK_SET",
 )
 #   0010 workflow_failures CHECK (source IN (...)): the p_source values of
@@ -514,9 +517,17 @@ REGISTRY_SCHEMA = {
     "sla_max_hitl_resolution_hrs": K_INT,
     "process_owner_id": K_UUID,
 }
+# hitl_approvals (0018, dual approval): ids, the approver's UUID and the
+# FinAgent clock time. decision_notes is never fetched.
+APPROVAL_ITEM_SCHEMA = {
+    "approval_id": K_INT,
+    "approver_id": K_UUID,
+    "approved_at": K_TS,
+}
+APPROVALS_EMBED = "approvals:hitl_approvals!hitl_approvals_hitl_id_fkey(approval_id,approver_id,approved_at)"
 # hitl_queue: the approval link carries the admin-set base URL and the
 # invoker embed carries admin-written name, role and email, so both are
-# marked.
+# marked. approvals and approvals_recorded are added by get_pending_hitl.
 HITL_SCHEMA = {
     "hitl_id": K_INT,
     "correlation_id": K_UUID,
@@ -530,6 +541,8 @@ HITL_SCHEMA = {
     "enforced_approvals": K_INT,
     "escalated_assets": ListOf(ASSET_ITEM_SCHEMA, ASSET_ITEM_TEXT_KEYS),
     "decision": K_HITL_DECISION,
+    "approvals": ListOf(APPROVAL_ITEM_SCHEMA),
+    "approvals_recorded": K_INT,
 }
 # materiality_thresholds: scope and asset_class are enum columns; 0016
 # fao_admin_set_threshold checks asset_symbol against ^[A-Z0-9]{1,12}$.
@@ -564,6 +577,8 @@ EXECUTION_SCHEMA = {
     "corrected": K_BOOL,
     "correction_count": K_INT,
     "has_run_record": K_BOOL,
+    "approvals_required": K_INT,
+    "approvals_recorded": K_INT,
 }
 # workflow_failures (round 5, K1): one row per fao_run_fail call that did
 # not attach a FAILED row to a run. failed_node and message come from the n8n
@@ -632,6 +647,40 @@ def _split(value: Any, spec: Any) -> tuple:
                 return t, _MISSING
         return _MISSING, value
     return (value, _MISSING) if spec(value) else (_MISSING, value)
+
+
+def _approval_sort_key(item: Any) -> Any:
+    return item["approval_id"]
+
+
+def _with_approvals(row: Mapping[str, Any]) -> dict:
+    """A hitl_queue row with `approvals` sorted by approval_id and counted.
+
+    No `approvals` key, or null, reads as [] (approvals_recorded 0), so a
+    row from before dual approval keeps its shape. A list whose elements
+    are not all objects with an integer approval_id keeps its order (the
+    ListOf rule then moves it under `untrusted_text`); a value that is not
+    a list is left as it is, with approvals_recorded null.
+    """
+    out = dict(row)
+    approvals = out.get("approvals")
+    if approvals is None:
+        approvals = []
+    if isinstance(approvals, list):
+        if all(isinstance(a, dict) and _is_int(a.get("approval_id")) for a in approvals):
+            approvals = sorted(approvals, key=_approval_sort_key)
+        out["approvals"] = approvals
+        out["approvals_recorded"] = len(approvals)
+    else:
+        out["approvals_recorded"] = None
+    return out
+
+
+def _request_value(row: Mapping[str, Any], key: str) -> Any:
+    """A view column about the run's newest request: null without a request."""
+    if row.get("hitl_id") is None:
+        return None
+    return row.get(key)
 
 
 def mark_untrusted(row: Mapping[str, Any], schema: Mapping[str, Any]) -> dict:
@@ -783,8 +832,8 @@ def build_server(
             agent_id: agent id, lower-case letters, digits and underscores.
             event_type: one of STARTED, ASSET_RECONCILED, FAILED, RUN_REFUSED,
                 HITL_REQUESTED, NOTIFICATION_SENT, NOTIFICATION_FAILED,
-                HITL_RESOLVED, HITL_EXPIRED, HITL_ESCALATED, COMMITTED,
-                COMMIT_BLOCKED, CORRECTION.
+                HITL_RESOLVED, HITL_APPROVAL_RECORDED, HITL_EXPIRED,
+                HITL_ESCALATED, COMMITTED, COMMIT_BLOCKED, CORRECTION.
             hours_lookback: integer 1 to 8760 (default 24).
             limit: integer 1 to 200 (default 25).
             offset: integer 0 to 100000 (default 0).
@@ -896,6 +945,14 @@ def build_server(
         `timeout_at`; such a request can no longer be decided and the sweep
         will expire it. This tool cannot decide a request.
 
+        Each row lists the approvals recorded so far (approval_id,
+        approver_id, approved_at) and approvals_recorded counts them. A
+        request is decided by the approval that brings the approvals of
+        still-eligible approvers to enforced_approvals, or by the first
+        rejection; the database rechecks eligibility, so approvals_recorded
+        can be higher than the approvals that count. This tool cannot
+        approve or reject.
+
         Args:
             limit: integer 1 to 200 (default 50).
             offset: integer 0 to 100000 (default 0).
@@ -916,7 +973,8 @@ def build_server(
                     "hitl_id,correlation_id,agent_id,agent_invoker_id,created_at,risk_tier,"
                     "sub_tier,policy_rationale,ai_human_brief,timeout_at,configured_approvals,"
                     "enforced_approvals,escalated_assets,approval_url,decision,"
-                    "invoker:process_owners!agent_invoker_id(name,role,email)",
+                    "invoker:process_owners!agent_invoker_id(name,role,email),"
+                    + APPROVALS_EMBED,
                 ),
                 ("decision", "eq.PENDING"),
                 ("order", "created_at.desc,hitl_id.desc"),
@@ -925,7 +983,7 @@ def build_server(
             now = now_utc()
             out = []
             for r in rows:
-                row = mark_untrusted(r, HITL_SCHEMA)
+                row = mark_untrusted(_with_approvals(r), HITL_SCHEMA)
                 deadline = _parse_ts(r.get("timeout_at"))
                 row["past_deadline"] = deadline is not None and now >= deadline
                 out.append(row)
@@ -1007,6 +1065,12 @@ def build_server(
         held the invoker grant for the agent) stopped the commit;
         `corrected` is true when a CORRECTION references the run.
 
+        Per run, approvals_required is the newest request's enforced
+        approval count and approvals_recorded the approvals recorded for it
+        (null without a request). approver_id is the user whose call decided
+        the request; every counted approver is in the approvers list of the
+        run's HITL_RESOLVED row (query_shadow_ledger).
+
         `workflow_failures` lists the newest rows of the append-only
         workflow_failures table, newest first: workflow failures that did
         not attach a FAILED row to a run. `source` is flagship,
@@ -1072,6 +1136,8 @@ def build_server(
                             "corrected": correction_count > 0,
                             "correction_count": correction_count,
                             "has_run_record": r.get("has_run_record"),
+                            "approvals_required": _request_value(r, "enforced_approvals"),
+                            "approvals_recorded": _request_value(r, "approvals_recorded"),
                         },
                         EXECUTION_SCHEMA,
                     )

@@ -28,6 +28,8 @@
 -- or 'owner'.
 -- Run helpers: tests.set_clock, tests.make_run, tests.make_request,
 -- tests.journal_count and small builders for Writer-shaped events.
+-- Dual approval helpers (0018 to 0020): tests.make_critical_request,
+-- tests.approval_count and tests.grant_approver.
 -- IC-18: every client RPC takes one unnamed json body. The helpers build it
 -- with json_build_object under today's argument names (a NULL value becomes
 -- JSON null, the old explicit NULL); tests.rpc_body(who, rpc, body) sends a
@@ -477,6 +479,64 @@ BEGIN
     RAISE EXCEPTION 'tests.make_request: finalize did not open a request: %', v_fin;
   END IF;
   RETURN (v_fin->>'hitl_id')::bigint;
+END;
+$$;
+
+-- Dual approval (FAO-GOV-004, DA-1): like tests.make_request, but the one
+-- escalated asset is SOL with REQUIRE_HUMAN CRITICAL, so on the flagship
+-- (approval_threshold 2) the request has configured 2 and enforced 2.
+-- Returns the hitl id.
+CREATE OR REPLACE FUNCTION tests.make_critical_request(p_invoker_email text)
+RETURNS bigint
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_corr uuid;
+  v_fin jsonb;
+BEGIN
+  v_corr := tests.make_run(p_invoker_email, ARRAY['SOL']);
+  PERFORM tests.append(jsonb_build_array(tests.asset_event(v_corr, 'SOL', 'REQUIRE_HUMAN', 'CRITICAL')));
+  v_fin := tests.finalize(v_corr);
+  IF coalesce((v_fin->>'hitl_required')::boolean, false) IS NOT TRUE OR v_fin->>'hitl_id' IS NULL THEN
+    RAISE EXCEPTION 'tests.make_critical_request: finalize did not open a request: %', v_fin;
+  END IF;
+  RETURN (v_fin->>'hitl_id')::bigint;
+END;
+$$;
+
+-- Dual approval: the hitl_approvals rows of a request (owner read).
+CREATE OR REPLACE FUNCTION tests.approval_count(p_hitl_id bigint)
+RETURNS bigint
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  PERFORM tests.as_owner();
+  RETURN (SELECT count(*) FROM public.hitl_approvals a WHERE a.hitl_id = p_hitl_id);
+END;
+$$;
+
+-- Dual approval (DA-4): as the owner, one approver grant for the user with
+-- granted_by and granted_at exactly as given (agent_id NULL for a global
+-- grant). A grant made inside a test qualifies for a request made in the
+-- same test only with an explicit earlier granted_at (now() is one value in a
+-- test transaction). Returns the grant id.
+CREATE OR REPLACE FUNCTION tests.grant_approver(p_email text, p_agent_id text, p_granted_by uuid, p_granted_at timestamptz)
+RETURNS bigint
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_uid uuid := tests.uid(p_email);
+  v_id  bigint;
+BEGIN
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'tests.grant_approver: no auth user %', p_email;
+  END IF;
+  PERFORM tests.as_owner();
+  PERFORM set_config('fao.change_reason', 'pgtap grant_approver', true);
+  INSERT INTO public.fao_user_roles (user_id, role, agent_id, granted_by, granted_at, reason)
+  VALUES (v_uid, 'approver'::public.fao_app_role, p_agent_id, p_granted_by, p_granted_at, 'pgtap grant_approver')
+  RETURNING id INTO v_id;
+  RETURN v_id;
 END;
 $$;
 

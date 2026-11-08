@@ -341,3 +341,139 @@ test('Classify Slack Result: the n8n 2.46 HTTP error item keeps the status and t
   const o4 = await classify([{ error: { message: 'connect ECONNREFUSED 127.0.0.1:8099', name: 'NodeApiError', cause: { message: 'connect ECONNREFUSED 127.0.0.1:8099' } } }]);
   assert.equal(o4.error, 'http error: connect ECONNREFUSED 127.0.0.1:8099');
 });
+
+// --- Compose Slack Message: dual approval (DUAL-APPROVAL.md 8.2, 9.3 N1 to N7) ---
+
+const CORE_CLOSING = '_Sign in on the approval page to approve or reject. The person who started the run cannot decide it._';
+const DUAL_CLOSING = '_Sign in on the approval page to approve or reject. The person who started the run cannot decide it. Each approver counts once; one rejection closes the request._';
+const EXPIRED_CLOSING = '_No decision can be recorded now: the request expired unanswered and the run was closed with status FAILURE. Please review why it was not decided in time._';
+const NEEDED_2 = '*Approvals needed:* 2 from different approvers';
+const WARNING = '*Warning:* fewer eligible approvers than approvals needed; this request can only be rejected or expire';
+const APPROVER_MARK = '<b>Sarah</b> & <!here>';
+
+const linesOf = (msg) => msg.body.text.split('\n');
+const indexOf = (lines, prefix) => lines.findIndex((l) => l.startsWith(prefix));
+
+// N7 for every dual case: exactly one URL, the request page.
+function oneUrl(r, msg, label) {
+  const urls = msg.body.text.match(/https?:\/\/[^\s|>]+/g) || [];
+  assert.deepEqual(urls, [r.approval_url], `${label}: exactly one URL, the request page`);
+}
+
+test('N1: enforced_approvals 1, absent, null or a string: no approval lines and the core closing line', async () => {
+  for (const [kind, level] of [['REQUESTED', 0], ['ESCALATED', 1]]) {
+    for (const over of [
+      { enforced_approvals: 1, approvals_received: 1, approved_by: [{ name: 'Sarah Chen' }] },
+      {},
+      { enforced_approvals: null },
+      { enforced_approvals: '2', approvals_received: 1, approved_by: [{ name: 'Sarah Chen' }] },
+      { enforced_approvals: 2.5 },
+      { enforced_approvals: 0 },
+    ]) {
+      const label = `${kind} ${JSON.stringify(over)}`;
+      const { r, msg } = await compose(kind, level, over);
+      assert.equal(msg.compose_ok, true, label);
+      const lines = linesOf(msg);
+      assert.ok(!lines.some((l) => l.startsWith('*Approvals') || l.startsWith('*Warning:*')), `${label}: no approval line`);
+      assert.equal(lines.at(-1), CORE_CLOSING, `${label}: core closing line`);
+      assert.ok(!msg.body.text.includes('Each approver counts once'), label);
+      oneUrl(r, msg, `N1 ${label}`);
+    }
+  }
+});
+
+test('N2: REQUESTED with 2: one Approvals needed line right after Eligible approvers, and the dual closing line', async () => {
+  const { r, msg } = await compose('REQUESTED', 0, { enforced_approvals: 2, approvals_received: 0, approved_by: [] });
+  const lines = linesOf(msg);
+  assert.equal(lines.filter((l) => l === NEEDED_2).length, 1, 'exactly one needed line');
+  assert.equal(lines.filter((l) => l.startsWith('*Approvals needed:*')).length, 1);
+  const i = indexOf(lines, '*Eligible approvers:*');
+  assert.ok(i >= 0, 'eligible approvers line present');
+  assert.equal(lines[i + 1], NEEDED_2, 'needed line right after the eligible approvers line');
+  assert.ok(!lines.some((l) => l.startsWith('*Approvals received:*')), 'no received line with 0 received');
+  assert.ok(!lines.some((l) => l.startsWith('*Warning:*')), 'two candidates: no warning');
+  assert.equal(lines.at(-1), DUAL_CLOSING);
+  oneUrl(r, msg, 'N2');
+});
+
+test('N3: REQUESTED with 2 and one approval received: the received line, names escaped, after the needed line', async () => {
+  const { r, msg } = await compose('REQUESTED', 0, { enforced_approvals: 2, approvals_received: 1, approved_by: [{ name: APPROVER_MARK }] });
+  const lines = linesOf(msg);
+  const i = lines.indexOf(NEEDED_2);
+  assert.ok(i >= 0, 'needed line present');
+  assert.equal(lines[i + 1], `*Approvals received:* 1 of 2 (${esc(APPROVER_MARK)})`);
+  assert.equal(lines[i + 1], '*Approvals received:* 1 of 2 (&lt;b&gt;Sarah&lt;/b&gt; &amp; &lt;!here&gt;)');
+  for (const bad of ['<b>', '<!here>', 'Sarah</b>']) assert.ok(!msg.body.text.includes(bad), `text contains ${bad}`);
+  assert.equal(lines.at(-1), DUAL_CLOSING);
+  oneUrl(r, msg, 'N3');
+});
+
+test('N4: REQUESTED with 2 and one eligible candidate: the warning line, last of the approval lines', async () => {
+  for (const [received, approved_by, expected] of [
+    [0, [], [NEEDED_2, WARNING]],
+    [1, [{ name: 'Sarah Chen' }], [NEEDED_2, '*Approvals received:* 1 of 2 (Sarah Chen)', WARNING]],
+  ]) {
+    const { r, msg } = await compose('REQUESTED', 0, {
+      enforced_approvals: 2, approvals_received: received, approved_by, approver_candidates: [{ name: 'Sarah Chen' }],
+    });
+    const lines = linesOf(msg);
+    const i = indexOf(lines, '*Eligible approvers:*');
+    assert.equal(lines[i], '*Eligible approvers:* Sarah Chen');
+    assert.deepEqual(lines.slice(i + 1, i + 1 + expected.length), expected, `received ${received}: lines in order`);
+    assert.equal(lines.filter((l) => l === WARNING).length, 1, 'one warning line');
+    assert.equal(lines[i + 1 + expected.length], '', 'the warning is the last approval line');
+    oneUrl(r, msg, `N4 received ${received}`);
+  }
+  const { msg } = await compose('REQUESTED', 0, { enforced_approvals: 2, approver_candidates: [] });
+  assert.ok(linesOf(msg).includes(WARNING), 'no candidate at all: warning');
+});
+
+test('N5: ESCALATED with 2 and none received: "0 of 2" with no parentheses, right after the escalation target', async () => {
+  for (const approved_by of [[], [{ name: 'Sarah Chen' }]]) {
+    const { r, msg } = await compose('ESCALATED', 1, { enforced_approvals: 2, approvals_received: 0, approved_by });
+    const lines = linesOf(msg);
+    const i = indexOf(lines, '*Escalation target:*');
+    assert.ok(i >= 0, 'escalation target line present');
+    assert.equal(lines[i + 1], '*Approvals received:* 0 of 2', `approved_by ${JSON.stringify(approved_by)}`);
+    assert.ok(!lines[i + 1].includes('('), 'no parentheses');
+    assert.ok(!lines.some((l) => l.startsWith('*Approvals needed:*') || l.startsWith('*Warning:*')), 'REQUESTED-only lines absent');
+    assert.equal(lines.at(-1), DUAL_CLOSING);
+    oneUrl(r, msg, 'N5');
+  }
+  const { msg } = await compose('ESCALATED', 1, { enforced_approvals: 2, approvals_received: 1, approved_by: [{ name: APPROVER_MARK }] });
+  const lines = linesOf(msg);
+  assert.equal(lines[indexOf(lines, '*Escalation target:*') + 1], `*Approvals received:* 1 of 2 (${esc(APPROVER_MARK)})`);
+});
+
+test('N6: ESCALATED after the deadline: the expired closing line unchanged, the received line present', async () => {
+  const { r, msg } = await compose('ESCALATED', 1, {
+    timeout_at: PAST, enforced_approvals: 2, approvals_received: 1, approved_by: [{ name: 'Sarah Chen' }],
+  });
+  const lines = linesOf(msg);
+  assert.match(lines[0], /expired without a decision\*$/);
+  assert.equal(lines[indexOf(lines, '*Escalation target:*') + 1], '*Approvals received:* 1 of 2 (Sarah Chen)');
+  assert.equal(lines.at(-1), EXPIRED_CLOSING, 'expired closing line unchanged');
+  assert.ok(!msg.body.text.includes('Each approver counts once'), 'no dual closing line after the deadline');
+  assert.ok(!/approve or reject/i.test(msg.body.text), 'no call to decide');
+  oneUrl(r, msg, 'N6');
+});
+
+test('N7: every dual-approval notice has exactly one URL, the request page, and never names the invoker', async () => {
+  const variants = [
+    ['REQUESTED', 0, { enforced_approvals: 2 }],
+    ['REQUESTED', 0, { enforced_approvals: 3, approvals_received: 2, approved_by: [{ name: 'Sarah Chen' }, { name: APPROVER_MARK }] }],
+    ['REQUESTED', 0, { enforced_approvals: 2, approver_candidates: [] }],
+    ['ESCALATED', 1, { enforced_approvals: 2, approvals_received: 1, approved_by: [{ name: 'Sarah Chen' }] }],
+    ['ESCALATED', 1, { enforced_approvals: 2, timeout_at: PAST }],
+  ];
+  for (const [kind, level, over] of variants) {
+    const label = `${kind} ${JSON.stringify(over)}`;
+    const { r, msg } = await compose(kind, level, over);
+    assert.equal(msg.compose_ok, true, label);
+    const text = msg.body.text;
+    const urls = text.match(/https?:\/\/[^\s|>]+/g) || [];
+    assert.deepEqual(urls, [r.approval_url], `${label}: exactly one URL`);
+    assert.equal((text.match(/<http/g) || []).length, 1, `${label}: one Slack link`);
+    assert.ok(!JSON.stringify(msg).includes(MARK.invoker), `${label}: never names the invoker`);
+  }
+});

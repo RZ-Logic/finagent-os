@@ -53,6 +53,11 @@
 //    field") on the bad-input and refused branches. Node names, types,
 //    connections and settings stay the export's, so S21 and S22 drive a
 //    flagship failure at those two pre-claim nodes.
+// 7. Dual approval (DUAL-APPROVAL.md 9.5, FAO-GOV-004): the "standard"
+//    flagship variant has the in-band balances except one ETH surplus above
+//    the band upper, so its only escalated asset is REQUIRE_HUMAN STANDARD
+//    and the request enforces one approval (S26). Only the three literal
+//    blocks change, as for every fixture variant.
 // ============================================================================
 
 import { randomUUID } from 'node:crypto';
@@ -269,6 +274,25 @@ VARIANTS.respondfail = {
   meta: VARIANTS.inband.meta.replace(/e2e_inband/g, 'e2e_respondfail'),
   breakRespondNodes: RESPOND_FAIL_NODES,
 };
+
+// Dual approval (DUAL-APPROVAL.md 9.5, S26; FAO-GOV-004 DA-1): the in-band
+// balances except ETH, whose wallet 1200 over ledger 1000 is ratio 1.20,
+// above the ETH band upper 1.10 (seed 0006): REQUIRE_HUMAN STANDARD
+// (ABOVE_BAND_UPPER), the only escalated asset. The request is STANDARD, so
+// it enforces one approval although the flagship registry threshold is 2.
+// The flagship agent and its own Claim Run are kept.
+VARIANTS.standard = {
+  id: 'FaoE2eReconStd01',
+  path: 'fao-e2e-recon-standard',
+  wallet: VARIANTS.inband.wallet.replace('ETH:  1050,', 'ETH:  1200,'),
+  ledger: VARIANTS.inband.ledger,
+  meta: VARIANTS.inband.meta
+    .replace(/e2e_inband/g, 'e2e_standard')
+    .replace("notes: 'ratio 1.05 in band [1.00, 1.10]' },\n  SOL", "notes: 'ratio 1.20 above band upper 1.10, REQUIRE_HUMAN STANDARD' },\n  SOL"),
+};
+if (!VARIANTS.standard.wallet.includes('ETH:  1200,') || !VARIANTS.standard.meta.includes('ratio 1.20 above band upper')) {
+  throw new Error('variants: standard: the in-band ETH lines were not found');
+}
 
 function readExport(root, key) {
   return JSON.parse(readFileSync(join(root, 'workflows', EXPORTS[key].file), 'utf8'));

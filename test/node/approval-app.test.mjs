@@ -42,12 +42,16 @@ const MESSAGES = {
   ALREADY_TERMINAL: 'The run has already finished.',
   NOT_PENDING: 'Nothing to send.',
   ALREADY_SENT: 'Already sent.',
+  // Dual approval (DUAL-APPROVAL.md 4.2).
+  AWAITING_FURTHER_APPROVAL: 'Approval recorded. This request needs more approvals before it is decided.',
+  ALREADY_APPROVED: 'You have already approved this request.',
 };
 const HTTP = {
   OK: 200, NO_SESSION: 401, INVALID_INPUT: 400, NOT_AN_OWNER: 403, NOT_AUTHORISED: 403, SOD_SELF_APPROVAL: 403,
   SELF_CHANGE: 403, NOT_FOUND: 404, UNKNOWN_AGENT: 404, AGENT_NOT_ACTIVE: 409, INVOKER_NOT_ACTIVE: 409, BUSY: 409, NO_RUN_RECORD: 409,
   ALREADY_CLAIMED: 409, ALREADY_DECIDED: 410, EXPIRED: 410, TOKEN_EXPIRED: 410, INVALID_TOKEN: 401, RATE_LIMITED: 429,
   AUDIT_CHAIN_MISMATCH: 200, UNKNOWN_EXECUTION: 200, ALREADY_TERMINAL: 200, NOT_PENDING: 200, ALREADY_SENT: 200,
+  AWAITING_FURTHER_APPROVAL: 200, ALREADY_APPROVED: 409,
 };
 
 // --- parseHitlId ---------------------------------------------------------------
@@ -504,4 +508,188 @@ test('the page text list holds every not-committed text and app.js renders by te
     assert.ok(Object.values(app.PAGE_TEXT).includes(t), t);
   }
   assert.ok(!/\binnerHTML\b/.test(src));
+});
+
+// --- Dual approval (DUAL-APPROVAL.md 8.3, 9.3) ---------------------------------------
+// fao_hitl_get full form gains approvals_received (counted) and
+// viewer_has_approved (raw); fao_hitl_decide returns AWAITING_FURTHER_APPROVAL
+// for an approval that does not decide the request, and ALREADY_APPROVED for a
+// repeat approval while the counted approvals are short.
+const AWAITING_TEXT = 'Approval recorded. This request needs more approvals before it is decided.';
+const APPROVED_AWAITING_TEXT =
+  'You have approved this request. It needs more approvals before it is decided. You can still reject it.';
+const REVIEW_TEXT = 'Review this request, then approve or reject it.';
+const VIEW_ONLY_TEXT = 'You can view this request but not decide it.';
+
+function dualGet(over = {}) {
+  const r = getResult();
+  r.request.enforced_approvals = 2;
+  r.request.approvals_received = 0;
+  r.request.viewer_has_approved = false;
+  Object.assign(r.request, over);
+  return r;
+}
+const labelsOf = (vm) => vm.fields.map((f) => f.label);
+const fieldValue = (vm, label) => (vm.fields.find((f) => f.label === label) || {}).value;
+
+test('the page text list and code texts carry the dual-approval texts', () => {
+  assert.equal(app.CODE_MESSAGES.AWAITING_FURTHER_APPROVAL, AWAITING_TEXT);
+  assert.equal(app.CODE_MESSAGES.ALREADY_APPROVED, 'You have already approved this request.');
+  assert.equal(app.PAGE_TEXT.approvedAwaiting, APPROVED_AWAITING_TEXT);
+  assert.equal(app.PAGE_TEXT.approvalsOf, ' of ');
+  assert.equal(app.statusMessage(200, 'AWAITING_FURTHER_APPROVAL'), AWAITING_TEXT);
+  assert.equal(app.statusMessage(409, 'ALREADY_APPROVED'), 'You have already approved this request.');
+});
+
+test('approvalsText gives "<n> of <e>" for valid counts and an empty string otherwise', () => {
+  assert.equal(app.approvalsText(1, 2), '1 of 2');
+  assert.equal(app.approvalsText(0, 2), '0 of 2');
+  assert.equal(app.approvalsText(3, 3), '3 of 3');
+  for (const [n, e] of [
+    [-1, 2], [1, -2], [1.5, 2], [1, 2.5], ['1', 2], [1, '2'], [undefined, 2], [1, undefined], [null, 2], [1, null],
+    [NaN, 2], [1, Infinity], [1, 0], [2 ** 53, 2], [true, 2],
+  ]) {
+    assert.equal(app.approvalsText(n, e), '', `approvalsText(${String(n)}, ${String(e)})`);
+  }
+  assert.equal(app.approvalsText(), '');
+});
+
+test('approvalsComplete is true only for valid counts with received at least enforced', () => {
+  assert.equal(app.approvalsComplete(2, 2), true);
+  assert.equal(app.approvalsComplete(3, 2), true);
+  assert.equal(app.approvalsComplete(1, 2), false);
+  assert.equal(app.approvalsComplete(0, 2), false);
+  for (const [n, e] of [
+    [2, 0], [0, 0], [-1, 2], [2, -1], [2.5, 2], [2, 1.5], ['2', 2], [2, '2'], [undefined, 2], [2, undefined],
+    [null, 1], [2, null], [NaN, 1], [Infinity, 1], [true, 1],
+  ]) {
+    assert.equal(app.approvalsComplete(n, e), false, `approvalsComplete(${String(n)}, ${String(e)})`);
+  }
+  assert.equal(app.approvalsComplete(), false);
+});
+
+test('full form, may decide, not yet approved: Approve and Reject, review text, Approvals received after Enforced approvals', () => {
+  const vm = app.buildViewModel(dualGet());
+  assert.equal(vm.kind, 'request');
+  assert.equal(vm.canDecide, true);
+  assert.equal(vm.canApprove, true);
+  assert.equal(vm.message, REVIEW_TEXT);
+  const labels = labelsOf(vm);
+  const i = labels.indexOf('Enforced approvals');
+  assert.ok(i >= 0, `Enforced approvals shown: ${JSON.stringify(labels)}`);
+  assert.equal(labels[i + 1], 'Approvals received', 'Approvals received right after Enforced approvals');
+  assert.equal(fieldValue(vm, 'Approvals received'), '0 of 2');
+  assert.equal(labels.filter((l) => l === 'Approvals received').length, 1);
+});
+
+test('full form, may decide, already approved and short of the count: Reject only, the approved-awaiting text', () => {
+  const vm = app.buildViewModel(dualGet({ viewer_has_approved: true, approvals_received: 1 }));
+  assert.equal(vm.kind, 'request');
+  assert.equal(vm.canDecide, true);
+  assert.equal(vm.canApprove, false);
+  assert.equal(vm.message, APPROVED_AWAITING_TEXT);
+  assert.equal(vm.message, app.PAGE_TEXT.approvedAwaiting);
+  assert.equal(fieldValue(vm, 'Approvals received'), '1 of 2');
+});
+
+test('restore case (W23): already approved and every approval needed counts: Approve shown again, review text', () => {
+  const vm = app.buildViewModel(dualGet({ viewer_has_approved: true, approvals_received: 2 }));
+  assert.equal(vm.canDecide, true);
+  assert.equal(vm.canApprove, true);
+  assert.equal(vm.message, REVIEW_TEXT);
+  assert.equal(fieldValue(vm, 'Approvals received'), '2 of 2');
+});
+
+test('invoker and view-only full forms: canApprove false and the core texts', () => {
+  const inv = app.buildViewModel(dualGet({ viewer_is_invoker: true, viewer_can_decide: false }));
+  assert.equal(inv.canDecide, false);
+  assert.equal(inv.canApprove, false);
+  assert.equal(inv.message, MESSAGES.SOD_SELF_APPROVAL);
+  const ro = app.buildViewModel(dualGet({ viewer_can_decide: false }));
+  assert.equal(ro.canDecide, false);
+  assert.equal(ro.canApprove, false);
+  assert.equal(ro.message, VIEW_ONLY_TEXT);
+  // A viewer who approved and then lost the right to decide (DA-4, W31) is view-only.
+  const lost = app.buildViewModel(dualGet({ viewer_can_decide: false, viewer_has_approved: true, approvals_received: 1 }));
+  assert.equal(lost.canApprove, false);
+  assert.equal(lost.message, VIEW_ONLY_TEXT);
+  // canDecide must be exactly true.
+  for (const v of ['true', 1, null, undefined]) {
+    const vm = app.buildViewModel(dualGet({ viewer_can_decide: v }));
+    assert.equal(vm.canDecide, false, `viewer_can_decide ${JSON.stringify(v)}`);
+    assert.equal(vm.canApprove, false, `viewer_can_decide ${JSON.stringify(v)}`);
+  }
+});
+
+test('every model that is not a decidable request carries canApprove false', () => {
+  for (const r of [null, { http_status: 0 }, { ok: false, code: 'NOT_FOUND', http_status: 404, message: 'x', ref: 1 }]) {
+    const vm = app.buildViewModel(r);
+    assert.equal(vm.canApprove, false, JSON.stringify(r));
+  }
+});
+
+function awaitingResult(over = {}) {
+  return {
+    ok: true, code: 'AWAITING_FURTHER_APPROVAL', http_status: 200, message: 'server text <b>x</b>', ref: null,
+    hitl_id: 12, decision: 'PENDING', decided_at: null, committed: false, committed_ledger_id: null,
+    approvals_received: 1, enforced_approvals: 2, approved_at: '2026-11-08T09:10:11.123456+00:00',
+    ...over,
+  };
+}
+
+test('an AWAITING_FURTHER_APPROVAL envelope: kind decided, its code text, the five fields', () => {
+  const vm = app.buildViewModel(awaitingResult());
+  assert.equal(vm.kind, 'decided');
+  assert.equal(vm.ok, true);
+  assert.equal(vm.code, 'AWAITING_FURTHER_APPROVAL');
+  assert.equal(vm.message, AWAITING_TEXT);
+  assert.equal(vm.title, 'Request 12');
+  assert.equal(vm.retry, false);
+  assert.equal(vm.needsSignIn, false);
+  assert.equal(vm.canDecide, false);
+  assert.equal(vm.canApprove, false);
+  assert.deepEqual(vm.fields, [
+    { label: 'Request id', value: '12' },
+    { label: 'Decision', value: 'PENDING' },
+    { label: 'Approvals received', value: '1 of 2' },
+    { label: 'Approved at', value: '2026-11-08T09:10:11.123456+00:00' },
+    { label: 'Committed', value: 'No' },
+  ]);
+  const strings = leaves(vm).filter((x) => typeof x === 'string');
+  assert.ok(!strings.some((s) => s.includes('server text')), 'server message text is never shown');
+});
+
+test('ALREADY_APPROVED: a plain message with its code text, no retry', () => {
+  const vm = app.buildViewModel({ ok: false, code: 'ALREADY_APPROVED', http_status: 409, message: 'server <b>x</b>', ref: 31 });
+  assert.equal(vm.kind, 'message');
+  assert.equal(vm.code, 'ALREADY_APPROVED');
+  assert.equal(vm.message, 'You have already approved this request.');
+  assert.equal(vm.retry, false);
+  assert.equal(vm.needsSignIn, false);
+  assert.equal(vm.reference, 'Reference id: 31');
+  assert.equal(vm.canApprove, false);
+});
+
+test('counts missing or not integers: no Approvals received field; markup in approved_at stays a plain string', () => {
+  for (const over of [
+    { approvals_received: undefined }, { approvals_received: '1' }, { approvals_received: 1.5 }, { approvals_received: -1 },
+    { enforced_approvals: undefined }, { enforced_approvals: '2' }, { enforced_approvals: 0 }, { approvals_received: null },
+  ]) {
+    const vm = app.buildViewModel(dualGet(over));
+    assert.ok(!labelsOf(vm).includes('Approvals received'), `full form ${JSON.stringify(over)}`);
+    const res = app.buildViewModel(awaitingResult(over));
+    assert.equal(res.kind, 'decided', JSON.stringify(over));
+    assert.ok(!labelsOf(res).includes('Approvals received'), `awaiting ${JSON.stringify(over)}`);
+  }
+  const marked = app.buildViewModel(awaitingResult({ approved_at: `t${M}` }));
+  assert.equal(fieldValue(marked, 'Approved at'), `t${M}`, 'markup copied unchanged');
+  for (const x of leaves(marked)) assert.ok(!(x && typeof x === 'object' && (x.fn || x.dom)), 'plain values only');
+  const noTime = app.buildViewModel(awaitingResult({ approved_at: null }));
+  assert.ok(!labelsOf(noTime).includes('Approved at'), 'no empty Approved at row');
+});
+
+test('the bootstrap shows Approve only when canApprove and Reject whenever the form is shown', () => {
+  const src = read('app.js');
+  assert.match(src, /ui\.show\(\s*['"]approve['"]\s*,\s*model\.canApprove\s*\)/);
+  assert.match(src, /ui\.show\(\s*['"]reject['"]\s*,\s*true\s*\)/);
 });

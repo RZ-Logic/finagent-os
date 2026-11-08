@@ -79,6 +79,88 @@ function record(t, scenario, data) {
   if (data.executions) t.diagnostic(`${scenario} executions ${data.executions}`);
 }
 
+// --- Dual approval (DUAL-APPROVAL.md 4.4, 5.1, 5.2, 8.2, 11.3) --------------
+// The sorted key sets of the fao_hitl_decide envelopes this layer reads, and
+// the fixed texts it compares.
+const DECIDE_KEYS = ['code', 'committed', 'committed_ledger_id', 'decided_at', 'decision', 'hitl_id', 'http_status', 'message', 'ok', 'ref'];
+const AWAITING_KEYS = ['approvals_received', 'approved_at', 'code', 'committed', 'committed_ledger_id', 'decided_at', 'decision',
+  'enforced_approvals', 'hitl_id', 'http_status', 'message', 'ok', 'ref'];
+const REFUSAL_KEYS = ['code', 'http_status', 'message', 'ok', 'ref'];
+const AWAITING_MESSAGE = 'Approval recorded. This request needs more approvals before it is decided.';
+const ALREADY_APPROVED_MESSAGE = 'You have already approved this request.';
+const SIGN_IN_CORE = '_Sign in on the approval page to approve or reject. The person who started the run cannot decide it._';
+const SIGN_IN_DUAL = '_Sign in on the approval page to approve or reject. The person who started the run cannot decide it. Each approver counts once; one rejection closes the request._';
+
+// The first approval of a 2-of-2 request: AWAITING_FURTHER_APPROVAL, one
+// approval row, the request still PENDING and the run still AWAITING_HITL.
+async function approveFirst(user, req, notes) {
+  const before = (await L.approvals(req.hitl_id)).length;
+  const typesBefore = await L.types(req.correlation_id);
+  const d = await L.decide(user, req.hitl_id, 'APPROVED', notes);
+  assert.equal(d.status, 200, JSON.stringify(d.body));
+  assert.deepEqual(Object.keys(d.body).sort(), AWAITING_KEYS, 'the AWAITING_FURTHER_APPROVAL key set');
+  assert.equal(d.body.ok, true);
+  assert.equal(d.body.code, 'AWAITING_FURTHER_APPROVAL');
+  assert.equal(d.body.http_status, 200);
+  assert.equal(d.body.message, AWAITING_MESSAGE);
+  assert.equal(d.body.ref, null);
+  assert.equal(Number(d.body.hitl_id), req.hitl_id);
+  assert.equal(d.body.decision, 'PENDING');
+  assert.equal(d.body.decided_at, null);
+  assert.equal(d.body.committed, false);
+  assert.equal(d.body.committed_ledger_id, null);
+  assert.equal(d.body.approvals_received, 1);
+  assert.equal(d.body.enforced_approvals, 2);
+  const rows = await L.approvals(req.hitl_id);
+  assert.equal(rows.length, before + 1, 'one approval row written');
+  const mine = rows.at(-1);
+  assert.equal(mine.approver_id, L.uid(user));
+  assert.equal(mine.decision_notes, notes === undefined ? null : notes);
+  assert.equal(new Date(d.body.approved_at).getTime(), new Date(mine.approved_at).getTime(), 'approved_at is the row time');
+  const now = (await L.requests(req.correlation_id))[0];
+  assert.equal(now.decision, 'PENDING');
+  assert.equal(now.approver_id, null);
+  assert.equal((await L.run(req.correlation_id)).state, 'AWAITING_HITL');
+  assert.deepEqual(await L.types(req.correlation_id), [...typesBefore, 'HITL_APPROVAL_RECORDED'], 'one ledger row, nothing committed');
+  return d;
+}
+
+// HITL_APPROVAL_RECORDED (5.1) for `user`, with `counted` the counted
+// approvers after this one (keys of cfg.users, in approval order).
+function assertApprovalRecorded(row, req, user, counted, notes) {
+  assert.equal(row.t, 'HITL_APPROVAL_RECORDED');
+  assert.deepEqual(Object.keys(row.inputs).sort(), ['agent_invoker_id', 'approver_id', 'approvers', 'configured_approvals', 'decision',
+    'decision_notes', 'enforced_approvals', 'event_type', 'hitl_id', 'sub_tier']);
+  assert.equal(Number(row.inputs.hitl_id), req.hitl_id);
+  assert.equal(row.inputs.decision, 'APPROVED');
+  assert.equal(row.inputs.approver_id, L.uid(user));
+  assert.deepEqual(row.inputs.approvers, counted.map((k) => L.uid(k)));
+  assert.equal(row.inputs.configured_approvals, req.configured_approvals);
+  assert.equal(row.inputs.enforced_approvals, req.enforced_approvals);
+  assert.equal(row.inputs.agent_invoker_id, req.agent_invoker_id);
+  assert.equal(row.inputs.sub_tier, req.sub_tier);
+  assert.equal(row.inputs.decision_notes, notes);
+  assert.equal(row.outcome, 'REQUIRE_HUMAN');
+  assert.equal(row.sub_tier, req.sub_tier);
+  assert.equal(row.status, 'SUCCESS');
+  assert.equal(row.hitl_status, 'PENDING');
+  assert.equal(row.policy_rationale, `FAO-GOV-004 hitl_id ${req.hitl_id} approval ${counted.length} of ${req.enforced_approvals} recorded by approver ${L.uid(user)}; invoker ${req.agent_invoker_id}; awaiting further approval`);
+}
+
+// HITL_RESOLVED (5.2) of an APPROVED request decided by `user`.
+function assertResolvedApproved(row, req, user, counted, notes) {
+  assert.equal(row.t, 'HITL_RESOLVED');
+  assert.equal(row.inputs.decision, 'APPROVED');
+  assert.equal(row.inputs.approver_id, L.uid(user));
+  assert.deepEqual(row.inputs.approvers, counted.map((k) => L.uid(k)), 'the counted approvers in approval order, the deciding one last');
+  assert.equal(row.inputs.enforced_approvals, req.enforced_approvals);
+  assert.equal(row.inputs.configured_approvals, req.configured_approvals);
+  assert.equal(row.inputs.decision_notes, notes);
+  const core = `FAO-GOV-004 hitl_id ${req.hitl_id} APPROVED by approver ${L.uid(user)}; invoker ${req.agent_invoker_id}; approvals enforced ${req.enforced_approvals} of configured ${req.configured_approvals}`;
+  const suffix = req.enforced_approvals > 1 ? `; approvers ${counted.map((k) => L.uid(k)).join(', ')}` : '';
+  assert.equal(row.policy_rationale, core + suffix);
+}
+
 // ---------------------------------------------------------------------------
 test('S01 all-in-band run commits SUCCESS with 7 asset rows and no request', T, async (t) => {
   await L.slack.reset();
@@ -125,7 +207,10 @@ test('S01 all-in-band run commits SUCCESS with 7 asset rows and no request', T, 
 });
 
 // ---------------------------------------------------------------------------
-test('S02 review run: one request, one Slack message, B approves, HITL_RESOLVED and COMMITTED', T, async (t) => {
+// Dual approval (DUAL-APPROVAL.md 9.5, S02 changed; FAO-GOV-004 DA-1): the
+// flagship review is CRITICAL, so it enforces two approvals from different
+// approvers. B's approval is recorded and decides nothing; C's decides.
+test('S02 review run: one request, one Slack message, B approves (1 of 2), C approves, HITL_RESOLVED and COMMITTED', T, async (t) => {
   await L.slack.reset();
   const { corr, run, ex } = await invoke('aisha', FLAGSHIP_PATH, { minExecutions: 4 });
   assert.equal(run.state, 'AWAITING_HITL');
@@ -133,6 +218,8 @@ test('S02 review run: one request, one Slack message, B approves, HITL_RESOLVED 
   assert.equal(req.decision, 'PENDING');
   assert.equal(req.sub_tier, 'CRITICAL');
   assert.equal(req.agent_invoker_id, L.uid('aisha'));
+  assert.equal(req.configured_approvals, 2);
+  assert.equal(req.enforced_approvals, 2, 'DA-1: a CRITICAL flagship review enforces the registry threshold');
   // Patch round 7 (O1): the flagship USDT is a $67,890.50 surplus inside the
   // stablecoin band, above its materiality; USD materiality applies to a
   // shortfall only, so it ALLOWs and only ADA and SOL are escalated.
@@ -157,7 +244,11 @@ test('S02 review run: one request, one Slack message, B approves, HITL_RESOLVED 
   assert.equal(m.json.mrkdwn, true);
   assert.equal(notes[0].external_ref, `1700000000.${String(m.seq).padStart(6, '0')}`);
   assert.match(m.json.text, new RegExp(`^\\*Approval required: request ${req.hitl_id} for Reserve Reconciliation Agent\\*`));
-  assert.match(m.json.text, /\*Eligible approvers:\* Marcus Patel, Sarah Chen\n/);
+  assert.match(m.json.text, /\*Eligible approvers:\* Marcus Patel, Sarah Chen\n\*Approvals needed:\* 2 from different approvers\n/,
+    'the approvals needed line comes right after the eligible approvers line');
+  assert.doesNotMatch(m.json.text, /\*Approvals received:\*/, 'no approval received before the notice');
+  assert.doesNotMatch(m.json.text, /\*Warning:\*/, 'two eligible approvers for two approvals');
+  assert.ok(m.json.text.endsWith(SIGN_IN_DUAL), 'the dual approval closing line');
   assert.doesNotMatch(m.json.text, /Aisha/, 'the invoker is never named');
   assert.ok(m.json.text.includes(`<${req.approval_url}|Open the approval page>`));
   assert.match(m.json.text, /ADA \(REQUIRE_HUMAN\/CRITICAL\), SOL \(REQUIRE_HUMAN\/CRITICAL\)/);
@@ -167,18 +258,32 @@ test('S02 review run: one request, one Slack message, B approves, HITL_RESOLVED 
   assert.equal(gw[0].status, 'success');
   assert.equal(gw[0].lastNodeExecuted, 'Record Notification');
 
-  const d = await L.decide('sarah', req.hitl_id, 'APPROVED', 'e2e approval by B');
+  // B approves first: recorded, 1 of 2, nothing decided or committed.
+  const d1 = await approveFirst('sarah', req, 'e2e approval by B');
+  const mid = await L.ledger(corr);
+  assert.deepEqual(mid.slice(-3).map((r) => r.t), ['HITL_REQUESTED', 'NOTIFICATION_SENT', 'HITL_APPROVAL_RECORDED']);
+  assertApprovalRecorded(mid.at(-1), req, 'sarah', ['sarah'], 'e2e approval by B');
+  assert.equal((await L.slack.forHitl(req.hitl_id)).length, 1, 'still one Slack message after the first approval');
+
+  // C approves: the second counted approval decides and commits.
+  const d = await L.decide('marcus', req.hitl_id, 'APPROVED', 'e2e approval by C');
   assert.equal(d.status, 200, JSON.stringify(d.body));
+  assert.equal(d.body.code, 'OK');
   assert.equal(d.body.committed, true);
+  assert.deepEqual(Object.keys(d.body).sort(), DECIDE_KEYS, 'the core decide key set');
   const rows = await L.ledger(corr);
-  assert.deepEqual(rows.slice(-2).map((r) => r.t), ['HITL_RESOLVED', 'COMMITTED']);
+  assert.deepEqual(rows.slice(-3).map((r) => r.t), ['HITL_APPROVAL_RECORDED', 'HITL_RESOLVED', 'COMMITTED']);
   assert.equal(rows.at(-1).status, 'SUCCESS');
+  assertResolvedApproved(rows.at(-2), req, 'marcus', ['sarah', 'marcus'], 'e2e approval by C');
   const after = await openRequest(corr);
   assert.equal(after.decision, 'APPROVED');
-  assert.equal(after.approver_id, L.uid('sarah'));
+  assert.equal(after.approver_id, L.uid('marcus'));
+  assert.deepEqual((await L.approvals(req.hitl_id)).map((a) => a.approver_id), [L.uid('sarah'), L.uid('marcus')], 'one approval row each, in order');
   assert.equal((await L.run(corr)).state, 'COMMITTED');
-  assert.equal((await L.slack.forHitl(req.hitl_id)).length, 1, 'no Slack message for the decision');
-  record(t, 'S02', { corr, hitl_id: req.hitl_id, ledger: rows.map((r) => r.t), slack_seq: m.seq, executions: L.brief(ex) });
+  assert.equal((await L.slack.forHitl(req.hitl_id)).length, 1, 'no Slack message for either approval');
+  record(t, 'S02', {
+    corr, hitl_id: req.hitl_id, first: d1.body.code, ledger: rows.map((r) => r.t), slack_seq: m.seq, executions: L.brief(ex),
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1261,4 +1366,216 @@ test('S23 the imported flagship has executionTimeout 600, below the agent SLA, a
   assert.ok(sla >= 900, `flagship sla_max_execution_seconds ${sla} is at least 900`);
   assert.ok(timeout(FLAGSHIP_WF) < sla, `executionTimeout ${timeout(FLAGSHIP_WF)} is below the SLA ${sla}`);
   record(t, 'S23', { flagship: timeout(FLAGSHIP_WF), notifier: timeout(GATEWAY_WF), sweeper: timeout('FaoSweeperV1x001'), timeout_max: Number(max), sla });
+});
+
+// ===========================================================================
+// Dual approval (DUAL-APPROVAL.md 9.5; FAO-GOV-004 DA-1, DA-2, DA-3). A is
+// Aisha (invoker), B is Sarah, C is Marcus. Every approver here holds a seed
+// approver grant (granted_by NULL, older than every request), so each is a
+// qualifying grant under DA-4 (13.1) and no scenario changes a grant.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// S24: one rejection closes a partially approved request (DA-2).
+test('S24 review run by A, B approves (1 of 2), C rejects: COMMITTED ROLLED_BACK, run COMMITTED, one Slack message', T, async (t) => {
+  await L.slack.reset();
+  const { corr, run, ex } = await invoke('aisha', FLAGSHIP_PATH, { minExecutions: 4 });
+  assert.equal(run.state, 'AWAITING_HITL');
+  const req = await openRequest(corr);
+  assert.equal(req.sub_tier, 'CRITICAL');
+  assert.equal(req.enforced_approvals, 2);
+  await approveFirst('sarah', req, 'e2e S24 approval by B');
+
+  const d = await L.decide('marcus', req.hitl_id, 'REJECTED', 'e2e S24 rejection by C');
+  assert.equal(d.status, 200, JSON.stringify(d.body));
+  assert.deepEqual(Object.keys(d.body).sort(), DECIDE_KEYS);
+  assert.equal(d.body.code, 'OK');
+  assert.equal(d.body.decision, 'REJECTED');
+  assert.equal(d.body.committed, true);
+  const rows = await L.ledger(corr);
+  assert.deepEqual(rows.slice(-3).map((r) => r.t), ['HITL_APPROVAL_RECORDED', 'HITL_RESOLVED', 'COMMITTED']);
+  const resolved = rows.at(-2);
+  assert.equal(resolved.inputs.decision, 'REJECTED');
+  assert.equal(resolved.inputs.approver_id, L.uid('marcus'));
+  assert.deepEqual(resolved.inputs.approvers, [L.uid('marcus')], 'REJECTED: [rejector]');
+  assert.equal(resolved.inputs.enforced_approvals, 2);
+  assert.equal(resolved.policy_rationale,
+    `FAO-GOV-004 hitl_id ${req.hitl_id} REJECTED by approver ${L.uid('marcus')}; invoker ${L.uid('aisha')}; approvals enforced 2 of configured 2; approvals received 1 of 2 before the rejection`);
+  assert.equal(rows.at(-1).status, 'ROLLED_BACK');
+  assert.equal(rows.at(-1).hitl_status, 'REJECTED');
+  const after = await openRequest(corr);
+  assert.equal(after.decision, 'REJECTED');
+  assert.equal(after.approver_id, L.uid('marcus'));
+  assert.equal(after.decision_notes, 'e2e S24 rejection by C');
+  assert.deepEqual((await L.approvals(req.hitl_id)).map((a) => a.approver_id), [L.uid('sarah')], 'the rejection writes no approval row; B\'s stays');
+  assert.equal((await L.run(corr)).state, 'COMMITTED');
+  assert.equal((await L.slack.forHitl(req.hitl_id)).length, 1, 'one Slack message');
+  record(t, 'S24', { corr, hitl_id: req.hitl_id, ledger: rows.map((r) => r.t), executions: L.brief(ex) });
+});
+
+// ---------------------------------------------------------------------------
+// S25: a request that expires with one of two approvals (7.2, 7.6). Same
+// test clock rules as S08 (lib.mjs withTestClock).
+test('S25 review run by A, B approves (1 of 2), the deadline passes: EXPIRED, one TIMEOUT escalation naming the approval received, C then gets EXPIRED', T, async (t) => {
+  await L.slack.reset();
+  const { corr, run, ex } = await invoke('aisha', FLAGSHIP_PATH, { minExecutions: 4 });
+  assert.equal(run.state, 'AWAITING_HITL');
+  const req = await openRequest(corr);
+  assert.equal(req.enforced_approvals, 2);
+  await approveFirst('sarah', req, 'e2e S25 approval by B');
+  const offset = Math.ceil((new Date(req.timeout_at).getTime() - Date.now()) / 1000) + 120;
+  assert.ok(offset > 0 && offset <= 2592000);
+
+  const before = L.lastExecutionId();
+  let sweepResponse;
+  await L.withTestClock(offset, async () => {
+    sweepResponse = L.sweep();
+    await L.waitUntil('request to expire', async () => (await openRequest(corr)).decision === 'EXPIRED', { timeoutMs: 60000, everyMs: 200 });
+  });
+  const s = await sweepResponse;
+  const ex2 = await L.waitExecutions(before, 2);
+  assert.equal((await L.q('SELECT count(*)::int AS n FROM fao_private.test_clock')).at(0).n, 0, 'test clock cleared');
+
+  const after = await openRequest(corr);
+  assert.equal(after.decision, 'EXPIRED');
+  assert.equal(after.approver_id, null, 'an approval row never makes an EXPIRED request carry an approver');
+  assert.equal((await L.run(corr)).state, 'EXPIRED');
+  const rows = await L.ledger(corr);
+  const tail = rows.map((r) => r.t).slice(rows.findIndex((r) => r.t === 'HITL_APPROVAL_RECORDED'));
+  assert.deepEqual(tail, ['HITL_APPROVAL_RECORDED', 'HITL_EXPIRED', 'HITL_ESCALATED', 'NOTIFICATION_SENT']);
+  const escalations = rows.filter((r) => r.t === 'HITL_ESCALATED');
+  assert.equal(escalations.length, 1, 'one escalation');
+  assert.equal(escalations[0].inputs.reason, 'TIMEOUT');
+  assert.equal(escalations[0].inputs.level, 1);
+  assert.equal(escalations[0].inputs.target_owner_id, L.uid('marcus'));
+  assert.ok(!rows.some((r) => r.t === 'COMMITTED'), 'no COMMITTED row for an expired request');
+  assert.deepEqual((await L.approvals(req.hitl_id)).map((a) => a.approver_id), [L.uid('sarah')], 'the approval row stays');
+
+  await L.waitNotifications(req.hitl_id, 2);
+  const all = await L.slack.forHitl(req.hitl_id);
+  assert.equal(all.length, 2, 'the REQUESTED notice and one escalation notice');
+  assert.match(all[0].json.text, /\*Approvals needed:\* 2 from different approvers\n/);
+  const escMsgs = all.filter((m) => m.json.text.startsWith('*Escalation:'));
+  assert.equal(escMsgs.length, 1, 'one escalation notice');
+  assert.match(escMsgs[0].json.text, /\*Escalation target:\* Marcus Patel\n\*Approvals received:\* 1 of 2 \(Sarah Chen\)\n/,
+    'the approvals received line comes right after the escalation target');
+  const notes = await L.notifications(req.hitl_id);
+  assert.deepEqual(notes.map((n) => `${n.kind}/${n.level}/${n.outcome}`), ['REQUESTED/0/SENT', 'ESCALATED/1/SENT']);
+
+  // C's approval after the deadline: refused, no approval row, nothing written.
+  const d = await L.decide('marcus', req.hitl_id, 'APPROVED', 'e2e S25 late approval by C');
+  assert.equal(d.status, 410, JSON.stringify(d.body));
+  assert.equal(d.body.code, 'EXPIRED');
+  assert.deepEqual(Object.keys(d.body).sort(), REFUSAL_KEYS);
+  assert.deepEqual((await L.approvals(req.hitl_id)).map((a) => a.approver_id), [L.uid('sarah')], 'no approval row for C');
+  const rows2 = await L.ledger(corr);
+  assert.equal(rows2.length, rows.length, 'nothing written by the refused approval');
+  assert.ok(!rows2.some((r) => r.t === 'COMMITTED'), 'still no COMMITTED row');
+  assert.equal((await L.slack.forHitl(req.hitl_id)).length, 2, 'no further notice');
+  record(t, 'S25', {
+    corr, hitl_id: req.hitl_id, offset_seconds: offset, sweep_http: s.status, ledger: rows.map((r) => r.t),
+    escalation_text: escMsgs[0].json.text, executions: `${L.brief(ex)} | ${L.brief(byWorkflow(ex2, SWEEP_WF))}`,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S26: a STANDARD review on the flagship (registry threshold 2) enforces one
+// approval (DA-1), so it reads as in the core: one approval decides.
+test('S26 a STANDARD-only review enforces one approval: no approvals line in Slack, B\'s one approval commits, HITL_RESOLVED approvers [B]', T, async (t) => {
+  await L.slack.reset();
+  const { corr, run, ex } = await invoke('aisha', P.standard, { minExecutions: 4 });
+  assert.equal(run.state, 'AWAITING_HITL');
+  const rows0 = await L.ledger(corr);
+  const by = Object.fromEntries(assets(rows0).map((a) => [a.inputs.asset, a]));
+  assert.deepEqual(Object.keys(by), ['ADA', 'BTC', 'ETH', 'SOL', 'USDC', 'USDT', 'XRP']);
+  assert.equal(by.ETH.outcome, 'REQUIRE_HUMAN');
+  assert.equal(by.ETH.sub_tier, 'STANDARD');
+  assert.equal(by.ETH.inputs.band_status, 'ABOVE_BAND_UPPER');
+  for (const a of ['ADA', 'BTC', 'SOL', 'USDC', 'USDT', 'XRP']) assert.equal(by[a].outcome, 'ALLOW', a);
+  const req = await openRequest(corr);
+  assert.deepEqual(req.escalated_assets.map((a) => a.asset), ['ETH']);
+  assert.equal(req.sub_tier, 'STANDARD');
+  assert.equal(req.configured_approvals, 2);
+  assert.equal(req.enforced_approvals, 1, 'DA-1: a STANDARD review enforces one approval');
+  const requested = rows0.find((r) => r.t === 'HITL_REQUESTED');
+  assert.equal(requested.inputs.enforced_approvals, 1);
+
+  const msgs = await L.slack.forHitl(req.hitl_id);
+  assert.equal(msgs.length, 1, 'one Slack message');
+  const text = msgs[0].json.text;
+  assert.match(text, /\*Eligible approvers:\* Marcus Patel, Sarah Chen\n\n/);
+  assert.doesNotMatch(text, /\*Approvals/, 'no approvals line with one enforced approval');
+  assert.doesNotMatch(text, /\*Warning:\*/);
+  assert.ok(text.endsWith(SIGN_IN_CORE), 'the core closing line');
+
+  const d = await L.decide('sarah', req.hitl_id, 'APPROVED', 'e2e S26 approval by B');
+  assert.equal(d.status, 200, JSON.stringify(d.body));
+  assert.deepEqual(Object.keys(d.body).sort(), DECIDE_KEYS);
+  assert.equal(d.body.code, 'OK');
+  assert.equal(d.body.decision, 'APPROVED');
+  assert.equal(d.body.committed, true);
+  const rows = await L.ledger(corr);
+  assert.deepEqual(rows.slice(-3).map((r) => r.t), ['NOTIFICATION_SENT', 'HITL_RESOLVED', 'COMMITTED']);
+  assert.ok(!rows.some((r) => r.t === 'HITL_APPROVAL_RECORDED'), 'a STANDARD request never gets HITL_APPROVAL_RECORDED');
+  assertResolvedApproved(rows.at(-2), req, 'sarah', ['sarah'], 'e2e S26 approval by B');
+  assert.equal(rows.at(-1).status, 'SUCCESS');
+  const after = await openRequest(corr);
+  assert.equal(after.decision, 'APPROVED');
+  assert.equal(after.approver_id, L.uid('sarah'));
+  assert.deepEqual((await L.approvals(req.hitl_id)).map((a) => a.approver_id), [L.uid('sarah')], 'one approval row');
+  assert.equal((await L.run(corr)).state, 'COMMITTED');
+  assert.equal((await L.slack.forHitl(req.hitl_id)).length, 1, 'no Slack message for the decision');
+  record(t, 'S26', { corr, hitl_id: req.hitl_id, sub_tier: req.sub_tier, ledger: rows.map((r) => r.t), slack_text: text, executions: L.brief(ex) });
+});
+
+// ---------------------------------------------------------------------------
+// S27: the invoker cannot approve, and each approver counts once.
+test('S27 review run by A: A\'s approval is SOD_SELF_APPROVAL, B\'s repeat approval is ALREADY_APPROVED (journaled), C\'s approval commits', T, async (t) => {
+  await L.slack.reset();
+  const { corr, run, ex } = await invoke('aisha', FLAGSHIP_PATH, { minExecutions: 4 });
+  assert.equal(run.state, 'AWAITING_HITL');
+  const req = await openRequest(corr);
+  assert.equal(req.enforced_approvals, 2);
+  const typesStart = await L.types(corr);
+
+  const self = await L.decide('aisha', req.hitl_id, 'APPROVED', 'e2e S27 self approval attempt');
+  assert.equal(self.status, 403, JSON.stringify(self.body));
+  assert.equal(self.body.code, 'SOD_SELF_APPROVAL');
+  assert.deepEqual(Object.keys(self.body).sort(), REFUSAL_KEYS);
+  assert.equal((await L.approvals(req.hitl_id)).length, 0, 'never an approval row for the invoker');
+  assert.deepEqual(await L.types(corr), typesStart, 'no ledger row for a refused decision');
+  assert.equal(await L.decideRefusals('aisha', req.hitl_id, 'SOD_SELF_APPROVAL'), 1, 'the self approval is journaled');
+
+  await approveFirst('sarah', req, 'e2e S27 approval by B');
+  const typesMid = await L.types(corr);
+  const again = await L.decide('sarah', req.hitl_id, 'APPROVED', 'e2e S27 repeat approval by B');
+  assert.equal(again.status, 409, JSON.stringify(again.body));
+  assert.deepEqual(Object.keys(again.body).sort(), REFUSAL_KEYS);
+  assert.equal(again.body.ok, false);
+  assert.equal(again.body.code, 'ALREADY_APPROVED');
+  assert.equal(again.body.message, ALREADY_APPROVED_MESSAGE);
+  assert.equal(await L.decideRefusals('sarah', req.hitl_id, 'ALREADY_APPROVED'), 1, 'the repeat approval is journaled');
+  if (again.body.ref !== null) {
+    const j = await L.one('SELECT code, actor_uid FROM public.fao_refusal_journal WHERE refusal_id = $1', [again.body.ref]);
+    assert.equal(j.code, 'ALREADY_APPROVED');
+    assert.equal(j.actor_uid, L.uid('sarah'));
+  }
+  assert.deepEqual((await L.approvals(req.hitl_id)).map((a) => a.approver_id), [L.uid('sarah')], 'a repeat approval writes no row');
+  assert.deepEqual(await L.types(corr), typesMid, 'and no ledger row');
+  assert.equal((await openRequest(corr)).decision, 'PENDING');
+
+  const d = await L.decide('marcus', req.hitl_id, 'APPROVED', 'e2e S27 approval by C');
+  assert.equal(d.status, 200, JSON.stringify(d.body));
+  assert.equal(d.body.code, 'OK');
+  assert.equal(d.body.committed, true);
+  const rows = await L.ledger(corr);
+  assert.deepEqual(rows.slice(-3).map((r) => r.t), ['HITL_APPROVAL_RECORDED', 'HITL_RESOLVED', 'COMMITTED']);
+  assert.equal(rows.filter((r) => r.t === 'HITL_APPROVAL_RECORDED').length, 1, 'one partial approval recorded');
+  assertResolvedApproved(rows.at(-2), req, 'marcus', ['sarah', 'marcus'], 'e2e S27 approval by C');
+  assert.equal(rows.at(-1).status, 'SUCCESS');
+  assert.equal((await openRequest(corr)).approver_id, L.uid('marcus'));
+  assert.deepEqual((await L.approvals(req.hitl_id)).map((a) => a.approver_id), [L.uid('sarah'), L.uid('marcus')]);
+  assert.equal((await L.run(corr)).state, 'COMMITTED');
+  assert.equal((await L.slack.forHitl(req.hitl_id)).length, 1, 'one Slack message');
+  record(t, 'S27', { corr, hitl_id: req.hitl_id, refused: ['SOD_SELF_APPROVAL', 'ALREADY_APPROVED'], ledger: rows.map((r) => r.t), executions: L.brief(ex) });
 });

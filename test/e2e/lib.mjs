@@ -88,6 +88,17 @@ export const ledger = (corr) => q(
 );
 export const types = async (corr) => (await ledger(corr)).map((r) => r.t);
 export const requests = (corr) => q('SELECT * FROM public.hitl_queue WHERE correlation_id = $1 ORDER BY hitl_id', [corr]);
+// Dual approval (S02, S24 to S27): the request's approval rows, in order.
+export const approvals = (hitlId) => q(
+  'SELECT approval_id, hitl_id, approver_id, approved_at, decision_notes FROM public.hitl_approvals WHERE hitl_id = $1 ORDER BY approval_id',
+  [hitlId],
+);
+// Refusals of fao_hitl_decide journaled for one user, request and code.
+export const decideRefusals = async (user, hitlId, code) => Number((await one(
+  `SELECT count(*)::int AS n FROM public.fao_refusal_journal
+    WHERE entry_point = 'rpc:fao_hitl_decide' AND actor_uid = $1 AND target_key = $2 AND code = $3`,
+  [uid(user), String(hitlId), code],
+)).n);
 export const notifications = (hitlId) => q('SELECT * FROM public.fao_notifications WHERE hitl_id = $1 ORDER BY notification_id', [hitlId]);
 
 export async function waitUntil(label, fn, { timeoutMs = 60000, everyMs = 500 } = {}) {

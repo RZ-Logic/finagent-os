@@ -80,15 +80,17 @@ def test_check_lists_equal_the_database_checks():
 
 def test_result_codes_equal_code_http():
     sql = _sql()
-    m = re.search(r"CREATE FUNCTION fao_private\.code_http\(.*?CASE p_code(.*?)END;", sql, re.S)
-    assert m
-    assert set(re.findall(r"WHEN '([A-Z_]+)'", m.group(1))) == set(server.RESULT_CODES)
+    # The last definition wins (0018 replaces the 0011 function).
+    found = re.findall(r"CREATE (?:OR REPLACE )?FUNCTION fao_private\.code_http\(.*?CASE p_code(.*?)END;", sql, re.S)
+    assert found
+    assert set(re.findall(r"WHEN '([A-Z_]+)'", found[-1])) == set(server.RESULT_CODES)
 
 
 def test_event_types_equal_append_event():
     sql = _sql()
-    m = re.search(r"CREATE FUNCTION fao_private\.append_event\(.*?NOT IN \((.*?)\) THEN", sql, re.S)
-    assert m and set(_literals(m.group(1))) == set(server.EVENT_TYPES)
+    # The last definition wins (0018 replaces the 0012 function).
+    found = re.findall(r"CREATE (?:OR REPLACE )?FUNCTION fao_private\.append_event\(.*?NOT IN \((.*?)\) THEN", sql, re.S)
+    assert found and set(_literals(found[-1])) == set(server.EVENT_TYPES)
 
 
 def _built(sql: str, key: str) -> list:

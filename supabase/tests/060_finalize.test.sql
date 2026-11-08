@@ -5,7 +5,7 @@
 -- drives review), FAO-GOV-008 (failed runs recorded once, state machine).
 -- ============================================================================
 BEGIN;
-SELECT plan(43);
+SELECT plan(44);
 
 CREATE TEMP TABLE v (k text PRIMARY KEY, j jsonb);
 CREATE FUNCTION pg_temp.g(p_k text) RETURNS jsonb LANGUAGE sql AS $$ SELECT j FROM v WHERE k = p_k $$;
@@ -48,7 +48,11 @@ SELECT is(pg_temp.g('review_fin')->>'review_sub_tier', 'CRITICAL', 'review run: 
 SELECT is((SELECT jsonb_agg(e->>'asset') FROM public.hitl_queue h CROSS JOIN LATERAL jsonb_array_elements(h.escalated_assets) e WHERE h.correlation_id = pg_temp.c('review')),
   '["SOL", "USDT"]'::jsonb, 'review run: escalated assets in scope order');
 SELECT is((SELECT configured_approvals FROM public.hitl_queue WHERE correlation_id = pg_temp.c('review')), 2, 'review run: configured_approvals from the registry (2)');
-SELECT is((SELECT enforced_approvals FROM public.hitl_queue WHERE correlation_id = pg_temp.c('review')), 1, 'review run: enforced_approvals is 1');
+SELECT is((SELECT enforced_approvals FROM public.hitl_queue WHERE correlation_id = pg_temp.c('review')), 2, 'review run: enforced_approvals equals configured for CRITICAL review');
+-- Dual approval (DA-1, 0018): a STANDARD review keeps one enforced approval.
+INSERT INTO v VALUES ('standard', to_jsonb(tests.make_request('aisha.okonkwo@finagent-os.demo')));
+SELECT is((SELECT configured_approvals::text || '/' || enforced_approvals::text || '/' || sub_tier::text FROM public.hitl_queue WHERE hitl_id = (pg_temp.g('standard')#>>'{}')::bigint),
+  '2/1/STANDARD', 'standard review run: configured_approvals 2 from the registry, enforced_approvals 1');
 SELECT is((SELECT agent_invoker_id FROM public.hitl_queue WHERE correlation_id = pg_temp.c('review')), tests.uid('aisha.okonkwo@finagent-os.demo'), 'review run: request names the invoker from the run');
 SELECT is((SELECT timeout_at FROM public.hitl_queue WHERE correlation_id = pg_temp.c('review')), (pg_temp.g('review_fin')->>'timeout_at')::timestamptz, 'review run: timeout_at returned and stored');
 SELECT is((SELECT timeout_at FROM public.hitl_queue WHERE correlation_id = pg_temp.c('review')), now() + interval '24 hours', 'review run: timeout from the agent SLA');

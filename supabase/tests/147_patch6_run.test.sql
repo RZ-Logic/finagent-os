@@ -10,8 +10,8 @@
 --   FAO-GOV-003 (P5): a replay of an expired idempotency key counts toward
 --     the same RATE_LIMITED rule as run starts: over max_runs_per_hour the
 --     replay is refused RATE_LIMITED (429) instead of EXPIRED, and EXPIRED
---     replays use up the budget for new starts. Outside the hour window the
---     replay is EXPIRED (410) again.
+--     replays use up the budget for new starts. The window is real time
+--     (patch round 7 L4): moving the test clock does not free it.
 --   FAO-GOV-004 (P6): the read policies run has_role / has_any_role once
 --     per statement (scalar subquery); members, the reader and outsiders
 --     still see what they saw; U12 still holds.
@@ -144,13 +144,15 @@ SELECT is(pg_temp.cs(tests.start_run('ratelimit@local.test', 'fao_ratelimit_test
 SELECT is((SELECT count(*) FROM public.run_invocations WHERE idempotency_key = pg_temp.k('kc')), 0::bigint, 'P5: the refused start created no run');
 SELECT is((SELECT count(*) FROM public.run_invocations WHERE invoker_id = tests.uid('ratelimit@local.test') AND agent_id = 'fao_ratelimit_test_v1'
              AND idempotency_key IN (pg_temp.k('ka'), pg_temp.k('kb'))), 2::bigint, 'P5: still one run per key');
--- Past the hour window the budget is free again.
+-- Patch round 7 (L4): the window is one hour of real time (now(), the clock
+-- requested_at and the journal use); moving the test clock past the hour
+-- does not free the budget. Window expiry in real time: 149_patch7.
 SELECT tests.set_clock(700 + 3601);
 INSERT INTO v VALUES ('a_r3', tests.start_run('ratelimit@local.test', 'fao_ratelimit_test_v1', pg_temp.k('ka')));
-SELECT is(pg_temp.cs(pg_temp.g('a_r3')) || '/' || ((pg_temp.g('a_r3')->>'correlation_id')::uuid = pg_temp.c('a'))::text,
-  'false/EXPIRED/410/true', 'P5: outside the hour window the replay is EXPIRED (410) again');
-SELECT is((tests.start_run('ratelimit@local.test', 'fao_ratelimit_test_v1', pg_temp.k('kc')))->>'ok', 'true',
-  'P5: outside the window a new start is accepted');
+SELECT is(pg_temp.cs(pg_temp.g('a_r3')), 'false/RATE_LIMITED/429',
+  'P5 (L4): with the test clock moved past the hour the replay is still RATE_LIMITED (real-time window)');
+SELECT is(pg_temp.cs(tests.start_run('ratelimit@local.test', 'fao_ratelimit_test_v1', pg_temp.k('kc'))), 'false/RATE_LIMITED/429',
+  'P5 (L4): and a new start is still refused');
 SELECT tests.set_clock(0);
 
 -- ============================================================================

@@ -3,7 +3,9 @@
     "description": "FAO-REC-001, FAO-REC-002, FAO-REC-004, FAO-REC-006, FAO-REC-007: one Per-Asset Reconcile input per policy branch and per bad-input class. Used by test/node/recon.test.mjs against the exported Code node. Thresholds mirror seeds/0006 (scope Spot) in the shape the Get Materiality Thresholds query returns.",
     "special_values": "A value written as {\"$special\": \"undefined\" | \"NaN\" | \"Infinity\" | \"-Infinity\"} stands for that JavaScript value, which JSON cannot carry. The key is kept present on that side.",
     "expect_ratio": "number: inputs.ratio must be a finite number; null: inputs.ratio must be null; any: not checked.",
-    "stablecoin_band": "IC-38 (owner decision 2026-11-07): the USDC and USDT ratio_band_upper is 1.05 because stablecoin reserves are held near 105%; floor and band lower stay 1.00. stablecoin_in_band_near_105 sits between the old 1.005 band and 1.05 and is ALLOW; stablecoin_above_band_upper is above 1.05."
+    "stablecoin_band": "IC-38 (owner decision 2026-11-07): the USDC and USDT ratio_band_upper is 1.05 because stablecoin reserves are held near 105%; floor and band lower stay 1.00. stablecoin_in_band_near_105 sits between the old 1.005 band and 1.05 and is ALLOW; stablecoin_above_band_upper is above 1.05.",
+    "thresholds_override": "Optional per case: {\"<asset>\": {<field>: <value>}} replaces those threshold fields for that asset in that case only. The shared thresholds stay equal to seed 0006. Used where a branch is unreachable under the seeded values: the seeded stablecoin floor and band lower are 1.00, so a stablecoin shortfall is BELOW_FLOOR (rule 3) before rule 5 is tested.",
+    "stablecoin_usd_materiality": "Owner decision 2026-11-08 (O1): stablecoin USD materiality (rule 5, IN_BAND_USD_MATERIAL) applies to a SHORTFALL only, ledger minus wallet above materiality_usd. A surplus inside the band is governed by the band upper (1.05) alone and ALLOWs. stablecoin_surplus_in_band_above_materiality is the old in_band_usd_material case (the flagship USDT, a 67,890.50 surplus), now ALLOW; stablecoin_kraken_scale_surplus is a 1.04 surplus on a 10,000,000 pool; stablecoin_shortfall_in_band_usd_material keeps rule 5 covered on a shortfall under a threshold override with floor 0.98 and band lower 0.99."
   },
   "thresholds": [
     {
@@ -137,8 +139,8 @@
       }
     },
     {
-      "id": "in_band_usd_material",
-      "branch": "IN_BAND_USD_MATERIAL",
+      "id": "stablecoin_surplus_in_band_above_materiality",
+      "branch": "IN_BAND",
       "wallet": {
         "USDT": 1234567890.5
       },
@@ -147,11 +149,95 @@
       },
       "expect": {
         "asset": "USDT",
+        "band_status": "IN_BAND",
+        "policy_outcome": "ALLOW",
+        "policy_sub_tier": null,
+        "hitl_status": "NOT_REQUIRED",
+        "ratio": "number"
+      }
+    },
+    {
+      "id": "stablecoin_kraken_scale_surplus",
+      "branch": "IN_BAND",
+      "wallet": {
+        "USDC": 10400000
+      },
+      "ledger": {
+        "USDC": 10000000
+      },
+      "expect": {
+        "asset": "USDC",
+        "band_status": "IN_BAND",
+        "policy_outcome": "ALLOW",
+        "policy_sub_tier": null,
+        "hitl_status": "NOT_REQUIRED",
+        "ratio": "number"
+      }
+    },
+    {
+      "id": "stablecoin_shortfall_in_band_usd_material",
+      "branch": "IN_BAND_USD_MATERIAL",
+      "thresholds_override": {
+        "USDT": {
+          "ratio_floor": 0.98,
+          "ratio_band_lower": 0.99
+        }
+      },
+      "wallet": {
+        "USDT": 9950000
+      },
+      "ledger": {
+        "USDT": 10000000
+      },
+      "expect": {
+        "asset": "USDT",
         "band_status": "IN_BAND_USD_MATERIAL",
         "policy_outcome": "REQUIRE_HUMAN",
         "policy_sub_tier": "STANDARD",
         "hitl_status": "PENDING",
-        "ratio": "any"
+        "ratio": "number"
+      }
+    },
+    {
+      "id": "stablecoin_shortfall_in_band_below_materiality",
+      "branch": "IN_BAND",
+      "thresholds_override": {
+        "USDT": {
+          "ratio_floor": 0.98,
+          "ratio_band_lower": 0.99
+        }
+      },
+      "wallet": {
+        "USDT": 9995000
+      },
+      "ledger": {
+        "USDT": 10000000
+      },
+      "expect": {
+        "asset": "USDT",
+        "band_status": "IN_BAND",
+        "policy_outcome": "ALLOW",
+        "policy_sub_tier": null,
+        "hitl_status": "NOT_REQUIRED",
+        "ratio": "number"
+      }
+    },
+    {
+      "id": "stablecoin_shortfall_seeded_floor",
+      "branch": "BELOW_FLOOR",
+      "wallet": {
+        "USDT": 9950000
+      },
+      "ledger": {
+        "USDT": 10000000
+      },
+      "expect": {
+        "asset": "USDT",
+        "band_status": "BELOW_FLOOR",
+        "policy_outcome": "REQUIRE_HUMAN",
+        "policy_sub_tier": "CRITICAL",
+        "hitl_status": "PENDING",
+        "ratio": "number"
       }
     },
     {

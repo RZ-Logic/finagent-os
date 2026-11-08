@@ -244,12 +244,14 @@ export function assetEvent(corr, asset, outcome = 'ALLOW', subTier = null, extra
 }
 
 // The seven flagship assets from fixtures/, with the documented outcomes.
+// Patch round 7 (O1): the USDT surplus of $67,890.50 inside the stablecoin
+// band ALLOWs (stablecoin USD materiality is a shortfall test only).
 export function flagshipEvents(corr) {
   const wallet = JSON.parse(readFileSync(join(REPO_ROOT, 'fixtures', 'wallet_data.json'), 'utf8')).wallets;
   const ledger = JSON.parse(readFileSync(join(REPO_ROOT, 'fixtures', 'ledger_data.json'), 'utf8')).ledger;
   const outcome = {
     ADA: ['REQUIRE_HUMAN', 'CRITICAL'], BTC: ['ALLOW_WITH_OBLIGATIONS', null], ETH: ['ALLOW', null], SOL: ['REQUIRE_HUMAN', 'CRITICAL'],
-    USDC: ['ALLOW', null], USDT: ['REQUIRE_HUMAN', 'STANDARD'], XRP: ['ALLOW', null],
+    USDC: ['ALLOW', null], USDT: ['ALLOW', null], XRP: ['ALLOW', null],
   };
   const assets = wallet.map((w) => w.asset).sort();
   const events = assets.map((a) => {

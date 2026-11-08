@@ -960,7 +960,8 @@ COMMENT ON FUNCTION public.fao_notification_record(bigint, text, int, text, text
 --   2. RUNNING runs past the agent execution SLA (900 s when unset): FAILED
 --      event from the sweep, run FAILED
 --   3. PENDING requests past their deadline: EXPIRED, HITL_EXPIRED (the
---      closing record: inputs run_state EXPIRED and committed false), one
+--      expiry record: inputs run_state EXPIRED and committed false; the
+--      escalation and COMMIT_BLOCKED rows below can follow it), one
 --      level-1 escalation (TIMEOUT) unless one exists, rollup, COMMIT_BLOCKED
 --      only when the audit chain is incomplete, run EXPIRED. No COMMITTED
 --      row: an expired request is never a commit of the batch (patch
@@ -1199,7 +1200,9 @@ BEGIN
          SET decision = 'EXPIRED', decided_at = v_now
        WHERE hitl_id = v_hid;
 
-      -- Patch round 6 (P3): HITL_EXPIRED is the run's closing record. An
+      -- Patch round 6 (P3): HITL_EXPIRED is the run's expiry record (not
+      -- always its last row: HITL_ESCALATED and, on an incomplete audit
+      -- chain, COMMIT_BLOCKED can follow it, patch round 7 L3). An
       -- expired request is never committed, so the sweep writes no
       -- COMMITTED row (before this patch it wrote COMMITTED with FAILURE,
       -- which the run summary view counted as a commit). The record says
@@ -1477,7 +1480,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.fao_maintenance_sweep() IS
-  'FAO-GOV-004, FAO-GOV-007, FAO-GOV-008, FAO-GOV-015: the five-minute sweep. Expires unclaimed run tokens and overdue requests (HITL_EXPIRED as the closing record, one escalation, COMMIT_BLOCKED when the audit chain is incomplete; never COMMITTED), fails stale runs, lists notifications that are due, and reports privilege drift and any test clock offset. One failing item never stops the others.';
+  'FAO-GOV-004, FAO-GOV-007, FAO-GOV-008, FAO-GOV-015: the five-minute sweep. Expires unclaimed run tokens and overdue requests (HITL_EXPIRED as the expiry record, followed by one escalation, COMMIT_BLOCKED when the audit chain is incomplete; never COMMITTED), fails stale runs, lists notifications that are due, and reports privilege drift and any test clock offset. One failing item never stops the others.';
 
 -- ----------------------------------------------------------------------------
 -- 7. Revoke every function in this file from every client role. 0017 grants:

@@ -149,10 +149,16 @@ test('Per-Asset Reconcile on Init Execution output gives the README outcomes, ba
     if (r.Ratio === 'undefined') assert.equal(item.inputs.ratio, null, `${r.Asset} ratio`);
     else assert.ok(Math.abs(item.inputs.ratio - Number(r.Ratio)) < 0.0005, `${r.Asset} ratio ${item.inputs.ratio} vs README ${r.Ratio}`);
   }
-  const bands = /the run reaches five band statuses: ([A-Z_, ]+) and ([A-Z_]+)\./.exec(README.replace(/\s+/g, ' '));
-  assert.ok(bands, 'README names the five band statuses');
-  const documented = [...bands[1].split(',').map((s) => s.trim()), bands[2]].sort();
+  // O1 (owner decision 2026-11-08): USDT, an in-band stablecoin surplus,
+  // now ALLOWs, so the run reaches four band statuses (IN_BAND_USD_MATERIAL
+  // left the snapshot; policy_branches.json covers it on a shortfall).
+  const bands = /the run reaches (\w+) band statuses: ([A-Z_, ]+) and ([A-Z_]+)\./.exec(README.replace(/\s+/g, ' '));
+  assert.ok(bands, 'README names the band statuses');
+  assert.equal(bands[1], 'four', 'README says four band statuses');
+  const documented = [...bands[2].split(',').map((s) => s.trim()), bands[3]].sort();
+  assert.equal(documented.length, 4);
   assert.deepEqual([...new Set(out.map((o) => o.inputs.band_status))].sort(), documented);
+  assert.ok(!documented.includes('IN_BAND_USD_MATERIAL'));
 });
 
 test('STARTED carries ALLOW and SUCCESS because migration 0014 requires it, as the README says', async () => {

@@ -1,10 +1,10 @@
 -- ============================================================================
--- FinAgent OS pgTAP 148: patch round 6, sweep expiry closing record, run
+-- FinAgent OS pgTAP 148: patch round 6, sweep expiry record, run
 -- summary view, stablecoin band and seed SLA
 -- Controls:
 --   FAO-GOV-004, FAO-GOV-001 (P3): an expired request never yields a row
 --     that reads as a commit of the batch. The sweep writes HITL_EXPIRED as
---     the closing record (inputs run_state EXPIRED, committed false; status
+--     the expiry record (inputs run_state EXPIRED, committed false; status
 --     FAILURE, hitl_status EXPIRED; rationale says the batch was not
 --     committed) and no COMMITTED row, also when the run's invoker has been
 --     deactivated (red team r5 item 3). An incomplete audit chain still
@@ -97,7 +97,7 @@ SELECT ok((SELECT sox_control_ids @> ARRAY['FAO-GOV-006', 'FAO-GOV-007'] FROM pu
   'P2: the flagship lists FAO-GOV-006 and FAO-GOV-007 (146 asserts the full set)');
 
 -- ============================================================================
--- P3: sweep expiry closing record and the run summary view
+-- P3: sweep expiry record and the run summary view
 -- ============================================================================
 -- xA: plain expiry (invoker Sarah, active). xB: the invoker (Aisha) is
 -- deactivated before the deadline. xC: owner-side tampered chain (a stray
@@ -125,10 +125,10 @@ SELECT is(tests.run_state(pg_temp.rc('xA')) || '/' || tests.run_state(pg_temp.rc
 SELECT is(tests.ledger_count(pg_temp.rc('xA'), 'COMMITTED') + tests.ledger_count(pg_temp.rc('xB'), 'COMMITTED') + tests.ledger_count(pg_temp.rc('xC'), 'COMMITTED'),
   0::bigint, 'P3: no expired request yields a COMMITTED row (deactivated invoker and broken chain included)');
 SELECT is((SELECT (r.inputs->>'run_state') || '/' || (r.inputs->>'committed') || '/' || r.status::text || '/' || r.hitl_status::text FROM pg_temp.expired_row('xA') r),
-  'EXPIRED/false/FAILURE/EXPIRED', 'P3: HITL_EXPIRED is the closing record: run_state EXPIRED, committed false, FAILURE, EXPIRED');
+  'EXPIRED/false/FAILURE/EXPIRED', 'P3: HITL_EXPIRED is the expiry record: run_state EXPIRED, committed false, FAILURE, EXPIRED');
 SELECT is((SELECT r.policy_rationale FROM pg_temp.expired_row('xA') r),
   format('FAO-GOV-004 hitl_id %s expired without a decision (sweep); run closed EXPIRED, batch not committed', pg_temp.id('xA')),
-  'P3: the closing record''s reason says expiry and that the batch was not committed');
+  'P3: the expiry record''s reason says expiry and that the batch was not committed');
 SELECT is((SELECT count(*) FROM public.shadow_ledger
             WHERE correlation_id = pg_temp.rc('xA') AND inputs->>'event_type' = 'HITL_EXPIRED'), 1::bigint,
   'P3: one HITL_EXPIRED row per expired request');

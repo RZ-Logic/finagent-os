@@ -4,7 +4,7 @@
 -- batches, DB-set timestamps and context, corrections by reference).
 -- ============================================================================
 BEGIN;
-SELECT plan(109);
+SELECT plan(110);
 
 CREATE TEMP TABLE v (k text PRIMARY KEY, j jsonb);
 INSERT INTO v VALUES ('run7', to_jsonb(tests.make_run('aisha.okonkwo@finagent-os.demo', ARRAY['ADA','BTC','ETH','SOL','USDC','USDT','XRP'])));
@@ -151,15 +151,22 @@ SELECT is(tests.ledger_count(pg_temp.c('run7'), 'ASSET_RECONCILED'), 7::bigint, 
 SELECT is((SELECT count(*) FROM public.shadow_ledger WHERE correlation_id = pg_temp.c('run7') AND event_timestamp = now()), 8::bigint, 'every row has the database timestamp');
 SELECT is((SELECT count(DISTINCT execution_id) FROM public.shadow_ledger WHERE correlation_id = pg_temp.c('run7')), 1::bigint, 'one execution id per run, from the database');
 
--- STARTED gets the invoker from the run regardless of supplied inputs
+-- STARTED gets the invoker from the run. Patch round 7 (O3): supplied
+-- invoker_id, invoked_via or n8n_execution_id values are refused (nothing is
+-- written), and the database sets the four run keys itself.
 INSERT INTO v VALUES ('start_s', tests.start_run('aisha.okonkwo@finagent-os.demo'));
 INSERT INTO v VALUES ('claim_s', tests.claim((SELECT j->>'run_token' FROM v WHERE k = 'start_s'), 'pgtap-040-started'));
-INSERT INTO v VALUES ('append_s', tests.append(jsonb_build_array(
+SELECT is(pg_temp.append_err(jsonb_build_array(
   jsonb_set(jsonb_set(jsonb_set(tests.started_event((SELECT (j->>'correlation_id')::uuid FROM v WHERE k = 'start_s'), ARRAY['BTC']),
     '{inputs,invoker_id}', to_jsonb(tests.uid('marcus.patel@finagent-os.demo'))),
-    '{inputs,invoked_via}', '"cli"'), '{inputs,n8n_execution_id}', '"forged"'))));
+    '{inputs,invoked_via}', '"cli"'), '{inputs,n8n_execution_id}', '"forged"')))
+  || '/' || tests.ledger_count((SELECT (j->>'correlation_id')::uuid FROM v WHERE k = 'start_s'), 'STARTED')::text,
+  '22023 FAO-GOV-001 ledger_append: item 0: inputs.invoker_id is set only by the database/0',
+  'STARTED with a supplied invoker_id is refused and stores nothing (O3)');
+INSERT INTO v VALUES ('append_s', tests.append(jsonb_build_array(
+  tests.started_event((SELECT (j->>'correlation_id')::uuid FROM v WHERE k = 'start_s'), ARRAY['BTC']))));
 SELECT is((SELECT inputs->>'invoker_id' FROM public.shadow_ledger WHERE correlation_id = (SELECT (j->>'correlation_id')::uuid FROM v WHERE k = 'start_s') AND inputs->>'event_type' = 'STARTED'),
-  tests.uid('aisha.okonkwo@finagent-os.demo')::text, 'STARTED records the invoker from the run, not the supplied value');
+  tests.uid('aisha.okonkwo@finagent-os.demo')::text, 'STARTED records the invoker from the run');
 SELECT is((SELECT inputs->>'invoked_via' FROM public.shadow_ledger WHERE correlation_id = (SELECT (j->>'correlation_id')::uuid FROM v WHERE k = 'start_s') AND inputs->>'event_type' = 'STARTED'),
   'test', 'STARTED records invoked_via from the run');
 SELECT is((SELECT inputs->>'n8n_execution_id' FROM public.shadow_ledger WHERE correlation_id = (SELECT (j->>'correlation_id')::uuid FROM v WHERE k = 'start_s') AND inputs->>'event_type' = 'STARTED'),

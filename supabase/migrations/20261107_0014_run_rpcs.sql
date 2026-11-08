@@ -123,8 +123,14 @@ COMMENT ON FUNCTION public.fao_whoami(json) IS
 -- Patch round 6 (P5): the count the fao_run_start rate limit compares with
 -- max_runs_per_hour: this invoker's runs of the agent requested in the last
 -- hour plus this invoker's EXPIRED replay refusals for the agent journaled
--- in the last hour (same clock). A refusal the journal flood cap dropped is
--- not counted; it also wrote nothing.
+-- in the last hour. A refusal the journal flood cap dropped is not counted;
+-- it also wrote nothing.
+-- Patch round 7 (L4): one clock. requested_at (now()) and the journal at
+-- (clock_timestamp()) are stored in real time, so the hour is measured in
+-- real time too: both are compared with now() - 1 hour, never with
+-- fao_private.clock(). The test clock moves deadlines only (token expiry,
+-- timeout_at, the stale-run SLA); moving it neither empties nor frees the
+-- rate limit window.
 CREATE FUNCTION fao_private.run_start_count(p_uid uuid, p_agent_id text, p_entry_point text)
 RETURNS int
 LANGUAGE sql
@@ -136,18 +142,18 @@ AS $$
             FROM public.run_invocations ri
            WHERE ri.invoker_id = p_uid
              AND ri.agent_id = p_agent_id
-             AND ri.requested_at > fao_private.clock() - interval '1 hour')::int
+             AND ri.requested_at > now() - interval '1 hour')::int
        + (SELECT count(*)
             FROM public.fao_refusal_journal j
            WHERE j.actor_uid = p_uid
              AND j.entry_point = p_entry_point
              AND j.code = 'EXPIRED'
              AND j.target_key = left(p_agent_id, 64)
-             AND j.at > fao_private.clock() - interval '1 hour')::int
+             AND j.at > now() - interval '1 hour')::int
 $$;
 
 COMMENT ON FUNCTION fao_private.run_start_count(uuid, text, text) IS
-  'FAO-GOV-003 (patch round 6, P5): runs of the agent this invoker requested in the last hour plus this invoker''s EXPIRED replay refusals for the agent journaled in the last hour. fao_run_start refuses RATE_LIMITED at max_runs_per_hour. Never granted to a client role.';
+  'FAO-GOV-003 (patch round 6, P5; patch round 7, L4): runs of the agent this invoker requested in the last hour plus this invoker''s EXPIRED replay refusals for the agent journaled in the last hour, both measured in real time (now(), the clock the stored timestamps use; the test clock does not move the window). fao_run_start refuses RATE_LIMITED at max_runs_per_hour. Never granted to a client role.';
 
 -- ----------------------------------------------------------------------------
 -- Body (IC-18): required p_agent_id, p_reason, p_idempotency_key; optional
@@ -339,7 +345,10 @@ BEGIN
   --    invoker has max_runs_per_hour RUN_REFUSED rows for the agent in the
   --    last hour, the call is refused RATE_LIMITED and no ledger row is
   --    written (the journal row stays under the journal flood cap). The
-  --    per-invoker advisory lock above makes the count exact.
+  --    per-invoker advisory lock above makes the count exact. Patch round 7
+  --    (L4): event_timestamp is stored with now(), so the hour is real time
+  --    (now()), the same clock as run_start_count; the test clock does not
+  --    move it.
   IF v_agent.status <> 'ACTIVE'::public.agent_status THEN
     SELECT count(*)
       INTO v_recent
@@ -347,7 +356,7 @@ BEGIN
      WHERE l.agent_id = v_agent.agent_id
        AND l.inputs ->> 'event_type' = 'RUN_REFUSED'
        AND l.inputs ->> 'invoker_id' = v_uid::text
-       AND l.event_timestamp > fao_private.clock() - interval '1 hour';
+       AND l.event_timestamp > now() - interval '1 hour';
     IF v_recent >= v_agent.max_runs_per_hour THEN
       RETURN fao_private.refuse(c_entry, 'agent_registry', v_key, v_attempt, 'RATE_LIMITED');
     END IF;
@@ -605,14 +614,18 @@ COMMENT ON FUNCTION public.fao_run_claim(text, text, text) IS
 -- n8n execution id from the database. inputs keys the database writes on any
 -- event type (identity, approval, request, notification, rollup, failure and
 -- refusal facts: c_reserved) are refused, except the keys the database
--- overwrites on STARTED (invoker_id, invoked_via, reason, n8n_execution_id)
--- and on a Writer FAILED (source, stage, n8n_execution_id), and failed_node,
--- which a Writer FAILED names itself (fix round 2 R07). Round 5 (U10): the
+-- overwrites on a Writer FAILED (source, stage, n8n_execution_id), and
+-- failed_node, which a Writer FAILED names itself (fix round 2 R07). Patch
+-- round 7 (O3, owner decision 2026-11-08): STARTED inputs carrying
+-- invoker_id, invoked_via, reason or n8n_execution_id are refused like
+-- every other reserved key (nothing is written); the database still sets
+-- those four values on STARTED from the run record. Round 5 (U10): the
 -- reserved names are refused at any depth of inputs (arrays included) and
 -- in any letter case (patch round 6, P7: compared as
--- normalize(lower(btrim(key)), NFKC), and any key holding whitespace or a
--- control character is refused); the overwrites are allowed only at the top level in
--- their exact spelling, and the one nested exception is STARTED
+-- normalize(lower(btrim(key)), NFKC), and any key holding whitespace, a
+-- control character or one of the listed invisible characters is refused,
+-- patch round 7 L1); the FAILED overwrites are allowed only at the top level
+-- in their exact spelling, and the one nested exception is STARTED
 -- inputs.fixture_provenance.<asset>.source (the flagship's documented
 -- fixture provenance). Round 5 (U16 (c)): an inputs.asset on STARTED or a
 -- Writer FAILED must be in the run asset scope (for STARTED, its own).
@@ -647,8 +660,8 @@ DECLARE
     'level', 'attempt', 'channel', 'external_ref', 'target_owner_id',
     'per_asset_summary', 'counts', 'problems', 'committed_ledger_id',
     'corrects_ledger_id', 'corrected_by', 'code', 'agent_status'];
-  -- reserved keys that STARTED may carry because the database overwrites them
-  c_started_set constant text[] := ARRAY['invoker_id', 'invoked_via', 'reason', 'n8n_execution_id'];
+  -- Patch round 7 (O3): STARTED may carry no reserved key; the database
+  -- sets invoker_id, invoked_via, reason and n8n_execution_id itself.
   -- reserved keys a Writer FAILED may carry: the database overwrites the
   -- first three; failed_node is the Writer's own fact on FAILED
   c_failed_set  constant text[] := ARRAY['source', 'stage', 'n8n_execution_id', 'failed_node'];
@@ -797,12 +810,13 @@ BEGIN
     END IF;
 
     -- Evidence keys only the database writes are refused in Writer inputs,
-    -- so a Writer row can never look as if the database set them. On
-    -- STARTED and on a Writer FAILED the overwritten keys are instead set
-    -- from the run record below (2.10).
+    -- so a Writer row can never look as if the database set them. On a
+    -- Writer FAILED the overwritten keys are instead set from the run
+    -- record below (2.10); on STARTED every reserved key is refused (patch
+    -- round 7, O3) and the database adds the four run keys below.
     -- Round 5 (U10): every object key at any depth (inside arrays too) is
-    -- checked, in any letter case. The STARTED and FAILED overwrites are
-    -- allowed only at the top level and only in their exact spelling. The
+    -- checked, in any letter case. The FAILED overwrites are allowed only
+    -- at the top level and only in their exact spelling. The
     -- one nested exception is the flagship's documented fixture provenance
     -- on STARTED (inputs.fixture_provenance.<asset>.source, fixtures/README).
     FOR v_key, v_path IN
@@ -825,19 +839,26 @@ BEGIN
         FROM walk w
        CROSS JOIN LATERAL jsonb_object_keys(CASE WHEN jsonb_typeof(w.v) = 'object' THEN w.v END) AS k(key)
     LOOP
-      -- Patch round 6 (P7): no inputs key at any depth may hold whitespace,
-      -- a control character or an invisible format character (zero-width
-      -- spaces and joiners, word joiner, byte order mark, soft hyphen), and
-      -- the reserved match folds case and Unicode compatibility forms
-      -- (NFKC, so full-width letters match), so no spelling variant can pass
-      -- for a database-set key.
-      IF v_key ~ '[[:space:][:cntrl:]\u0085\u00a0\u00ad\u1680\u180e\u2000-\u200f\u2028-\u202f\u205f-\u2064\u3000\ufeff]' THEN
+      -- Patch round 6 (P7), widened in patch round 7 (L1): no inputs key at
+      -- any depth may hold whitespace, a control character or one of these
+      -- invisible or blank characters: soft hyphen, Hangul fillers (U+115F,
+      -- U+1160, U+3164), Mongolian vowel separator and variation selectors
+      -- (U+180B to U+180F), zero-width spaces, joiners and marks (U+200B to
+      -- U+200F), bidi embeddings and isolates (U+202A to U+202E, U+2066 to
+      -- U+2069), word joiner and invisible operators (U+2060 to U+2064),
+      -- Braille blank (U+2800), variation selectors (U+FE00 to U+FE0F),
+      -- byte order mark, and tag characters (U+E0000 to U+E007F). The
+      -- reserved match then folds case and Unicode compatibility forms
+      -- (NFKC, so full-width letters match). Letters from other scripts that
+      -- look Latin (Cyrillic U+0435 for "e") are not folded: such a key is
+      -- kept as an ordinary Writer key and cannot replace a database-set
+      -- key (KNOWN-LIMITS U17).
+      IF v_key ~ '[[:space:][:cntrl:]\u0085\u00a0\u00ad\u115f\u1160\u1680\u180b-\u180f\u2000-\u200f\u2028-\u202f\u205f-\u2064\u2066-\u2069\u2800\u3000\u3164\ufe00-\ufe0f\ufeff\U000e0000-\U000e007f]' THEN
         RAISE EXCEPTION 'FAO-GOV-001 ledger_append: item %: an inputs key at % holds whitespace or a control character', v_i,
           coalesce(nullif(left(regexp_replace(array_to_string(v_path, '.'), '[[:cntrl:]]', ' ', 'g'), 200), ''), 'the top level')
           USING ERRCODE = '22023';
       END IF;
       IF lower(normalize(lower(btrim(v_key)), NFKC)) = ANY (c_reserved)
-         AND NOT (cardinality(v_path) = 0 AND v_et = 'STARTED' AND v_key = ANY (c_started_set))
          AND NOT (cardinality(v_path) = 0 AND v_et = 'FAILED' AND v_key = ANY (c_failed_set))
          AND NOT (v_et = 'STARTED' AND cardinality(v_path) = 2 AND v_path[1] = 'fixture_provenance'
                   AND v_key = 'source') THEN
@@ -1010,7 +1031,8 @@ BEGIN
           USING ERRCODE = '22023';
       END IF;
 
-      -- The database, not the workflow, names who started the run and how.
+      -- The database, not the workflow, names who started the run and how
+      -- (the Writer may not send these keys at all, patch round 7 O3).
       v_inputs := v_inputs || jsonb_build_object(
         'invoker_id',       v_run.invoker_id,
         'invoked_via',      v_run.invoked_via,
@@ -1105,7 +1127,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.fao_ledger_append_batch(jsonb) IS
-  'FAO-GOV-001: the Writer route into the Shadow Ledger. All or none; STARTED, ASSET_RECONCILED and FAILED only; database-set timestamps and context (Writer FAILED source, stage and execution id included); forbidden keys and every inputs key the database writes on any event type refused at any depth and in any letter case (except the top-level STARTED and FAILED overwrites and STARTED fixture_provenance.<asset>.source, round 5 U10); an inputs.asset on STARTED or FAILED must be in the run asset scope (round 5 U16 (c)); asset scope fixed by STARTED; one ASSET_RECONCILED per asset in scope, status SUCCESS or FAILURE and SUCCESS for ALLOW and ALLOW_WITH_OBLIGATIONS. Raises FAO-GOV-001 ledger_append: item <i>: <reason>.';
+  'FAO-GOV-001: the Writer route into the Shadow Ledger. All or none; STARTED, ASSET_RECONCILED and FAILED only; database-set timestamps and context (Writer FAILED source, stage and execution id included); forbidden keys and every inputs key the database writes on any event type refused at any depth and in any letter case (except the top-level Writer FAILED overwrites and STARTED fixture_provenance.<asset>.source, round 5 U10; STARTED may carry no invoker_id, invoked_via, reason or n8n_execution_id, the database sets them, patch round 7 O3); an inputs.asset on STARTED or FAILED must be in the run asset scope (round 5 U16 (c)); asset scope fixed by STARTED; one ASSET_RECONCILED per asset in scope, status SUCCESS or FAILURE and SUCCESS for ALLOW and ALLOW_WITH_OBLIGATIONS. Raises FAO-GOV-001 ledger_append: item <i>: <reason>.';
 
 -- ----------------------------------------------------------------------------
 -- fao_run_finalize (FAO-REC-001, FAO-GOV-004, FAO-GOV-001)

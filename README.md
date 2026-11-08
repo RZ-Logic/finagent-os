@@ -103,7 +103,7 @@ On this branch, one review run of the flagship writes 12 ledger rows (e2e scenar
 │       │                       ALLOW_WITH_OBLIGATIONS                     │
 │       ├─ ASSET_RECONCILED   ← ETH: ratio 1.013, IN_BAND, ALLOW           │
 │       ├─ ASSET_RECONCILED   ← USDC: clean baseline, ALLOW                │
-│       ├─ ASSET_RECONCILED   ← USDT: USD-material breach, REQUIRE_HUMAN   │
+│       ├─ ASSET_RECONCILED   ← USDT: surplus in band, IN_BAND, ALLOW      │
 │       ├─ ASSET_RECONCILED   ← SOL: under-reserved, REQUIRE_HUMAN/CRIT    │
 │       ├─ ASSET_RECONCILED   ← XRP: ratio 1.006, IN_BAND, ALLOW           │
 │       └─ ASSET_RECONCILED   ← ADA: negative ledger, REQUIRE_HUMAN/CRIT   │
@@ -149,7 +149,7 @@ Full control matrix lives in [`SOX-MAPPING.md`](./SOX-MAPPING.md).
 The agent reconciles wallet holdings (Fireblocks proxy) against ledger liabilities (NetSuite proxy) across **7 crypto assets**. Fixtures break down into three groups:
 
 - **3 calibrated to Kraken's published Dec 2025 Proof of Reserves.** BTC, ETH, and XRP wallet/ledger pairs reproduce the published ratios (BTC 100.3%, ETH 101.3%, XRP 100.6%), anchoring the agent against real exchange disclosures.
-- **1 synthetic clean baseline plus 3 synthetic anomalies, each anomaly tagged to the control it exercises.** USDC is the clean baseline. USDT triggers FAO-REC-002 (stablecoin USD-materiality breach). SOL triggers FAO-REC-004 (under-reservation floor). ADA triggers FAO-REC-007 (negative-liability anomaly per the [krakendb 2014 reference](https://github.com/krakenfx/krakendb)).
+- **1 synthetic clean baseline plus 3 synthetic scenarios, each tagged to the control it exercises.** USDC is the clean baseline. USDT exercises FAO-REC-002: a $67,890.50 surplus inside the stablecoin band, above the $10,000 materiality. It ALLOWs, because stablecoin USD materiality applies to a shortfall only (owner decision 2026-11-08); the escalating shortfall case is in `fixtures/policy_branches.json`. SOL triggers FAO-REC-004 (under-reservation floor). ADA triggers FAO-REC-007 (negative-liability anomaly per the [krakendb 2014 reference](https://github.com/krakenfx/krakendb)).
 - **Provenance recorded at the run level.** The STARTED row's `inputs.fixture_provenance` records which asset is calibrated, which is synthetic, and which control each anomaly was designed to exercise. Per-asset `ASSET_RECONCILED` rows do not carry it; the auditor query in [`fixtures/README.md`](fixtures/README.md) joins each asset row to its run's STARTED row (e2e S20 runs that query as printed).
 
 The decision matrix is deterministic: 7 rules evaluated top-down, first match wins. No LLM in the policy path. On this branch the inputs fail closed first: an asset with a missing, one-sided or non-finite balance, or with no usable threshold, is BLOCKED, and any REQUIRE_HUMAN, DENY or BLOCKED asset routes the run to human review.
@@ -207,11 +207,11 @@ npm test             # every layer; npm run test:offline runs the first three on
 | `api` | Real sign-ins against the local Supabase API: SoD, spoofed identity, direct writes, body checks, status codes |
 | `e2e` | A fresh n8n 2.46.6 in Docker with a mock Slack: the exports are imported, published and run for real (scenarios S01 to S23) |
 
-The last full run (2026-11-08 01:11 UTC, patch round 6 tree on top of commit `34ba173`, not yet committed, fresh reset) passed every layer, with nothing skipped:
+The last full run (2026-11-08 02:21 UTC, patch round 7 tree on top of commit `96c14eb`, not yet committed, fresh reset) passed every layer, with nothing skipped:
 
 | exports | node | pytest | pgtap | api | e2e | total |
 |---:|---:|---:|---:|---:|---:|---:|
-| 136 | 150 | 320 | 1236 | 45 | 23 | 1910 |
+| 143 | 157 | 320 | 1264 | 46 | 23 | 1953 |
 
 `python mcp/scripts/smoke_local.py` checks the six MCP read tools against the local stack; it is not part of `npm test`.
 
@@ -327,7 +327,7 @@ Rejected for `agent_registry.agent_id`. The agent_id appears in n8n workflow ref
 
 ## 📋 Known Limitations
 
-The gaps a reviewer would find are surfaced below. "Fixed" means built on this branch and covered by tests that pass in the patch round 6 run (1910 of 1910, see [Tests](#-tests)). None of it is live: the live stack runs v1, with every v1 gap, until the cutover.
+The gaps a reviewer would find are surfaced below. "Fixed" means built on this branch and covered by tests that pass in the patch round 7 run (1953 of 1953, see [Tests](#-tests)). None of it is live: the live stack runs v1, with every v1 gap, until the cutover.
 
 ### Control gaps: status after phases 2 to 5 (core)
 
@@ -336,7 +336,7 @@ The gaps a reviewer would find are surfaced below. "Fixed" means built on this b
 - **The approval endpoints were demo only: unauthenticated and not hardened. Fixed:** the n8n approval pages are retired. Approvers sign in on a static approval page and decide with their own session; the run-start webhook needs a header key and a single-use run token; response statuses match outcomes.
 - **HITL resolution and its ledger writes were not atomic. Fixed:** the decision and its ledger events commit in one transaction, and so do request creation and its ledger event.
 - **Not every failure was recorded to the ledger. Fixed in the database and the workflows:** an error workflow, a five-minute sweep and notification records. A failure that cannot attach to a run is kept in the append-only `workflow_failures` table. The workflows run end to end in the e2e layer against n8n 2.46.6 only, not yet on the live n8n. The Writer has no error workflow of its own; a failed Writer call fails the flagship, which is recorded.
-- **HITL timeout was not enforced. Fixed:** late decisions are refused; overdue requests expire and escalate once. An expired request closes with HITL_EXPIRED and is never recorded as a commit.
+- **HITL timeout was not enforced. Fixed:** late decisions are refused; overdue requests expire and escalate once. HITL_EXPIRED is the expiry record of an expired request (its escalation can follow it), and the request is never recorded as a commit.
 - **Append-only was not administrator-proof. Narrowed:** UPDATE, DELETE, TRUNCATE and direct INSERT are refused for every application role, and ledger rows are appended only through database functions with database-set timestamps. The database owner remains outside the control (the owner can disable or drop a trigger). There is no independent or write-once evidence store; trusting the owner is a design choice for now, and independent evidence storage is planned.
 - **The committed Writer export dropped batch items. Fixed:** the Writer stores a batch all or none and names every bad item.
 
@@ -358,7 +358,7 @@ The gaps a reviewer would find are surfaced below. "Fixed" means built on this b
 - The aggregate reserve ratio is planned (scope, valuation basis and floor first). There is no evidence package yet. FAO-REC-003, FAO-REC-004 and FAO-REC-008 in [`SOX-MAPPING.md`](./SOX-MAPPING.md) carry their status.
 - Requests that PostgREST refuses before a database function runs (an empty body, invalid JSON, GET or form-encoded calls) are not journaled. None of them changes anything; this was measured on the local PostgREST only.
 - A new n8n execution that reuses the execution id of a run still RUNNING inside its SLA window is refused at claim. If that execution then fails at any node before Respond 202 (the refused branch included), the error handler records it as pre-claim and never touches the older run; past the window, the claim fails the stale run first. A claim that committed and then errored inside Claim Run leaves its run RUNNING until the sweep fails it as stale. The stale-run rule relies on n8n stopping the flagship at its 600-second `executionTimeout` before the 900-second floor of `sla_max_execution_seconds`; that holds only where n8n's `EXECUTIONS_TIMEOUT_MAX` is at least 600. The database still cannot tell two executions with the same id apart.
-- **Stablecoin band (F-24, decided 2026-11-07).** The owner decided that stablecoin reserves are held near 105%, so the seeded USDC and USDT upper band is 1.05 (floor and lower band stay 1.0000); a ratio above 1.05 escalates as ABOVE_BAND_UPPER. The live table holds 1.0050 until the cutover runbook applies 1.05 through `fao_admin_set_threshold` with a change reason (IC-38); until then live escalates a stablecoin ratio above 1.005.
+- **Stablecoin band (F-24, decided 2026-11-07).** The owner decided that stablecoin reserves are held near 105%, so the seeded USDC and USDT upper band is 1.05 (floor and lower band stay 1.0000); a ratio above 1.05 escalates as ABOVE_BAND_UPPER. The live table holds 1.0050 until the cutover runbook applies 1.05 through `fao_admin_set_threshold` with a change reason (IC-38); until then live escalates a stablecoin ratio above 1.005. The owner decided on 2026-11-08 that stablecoin USD materiality (rule 5) applies to a shortfall only: a surplus inside the band ALLOWs however large it is, and a shortfall escalates as IN_BAND_USD_MATERIAL only when ledger minus wallet exceeds `materiality_usd`. With the seeded floor equal to the band lower (1.0000), any stablecoin shortfall is caught first as BELOW_FLOOR CRITICAL, so rule 5 fires only under a threshold whose floor is below 1.00 (tested offline with a threshold override, not end to end).
 - A database error inside the notifier, or an unpublished notifier, fails the sweeper run visibly but does not count toward the notification retry limit. A notice target deactivated between an escalation and its first send gets no operator alert unless the notice is listed again. The wording of an expired escalation uses the n8n host clock.
 - Every member can read every request, ledger row and run across agents; only the decision view is limited to approvers, the invoker and admins.
 - A role grant created at the same moment as a decision or finalize is not waited for; this can only turn a refusal into an allow on a later decision, never the reverse.
@@ -369,12 +369,13 @@ The gaps a reviewer would find are surfaced below. "Fixed" means built on this b
 - CI has not run on GitHub, and Node 22 and Python 3.12 have not been used locally (CI pins them). The approval page has not been run in a real browser against the stack.
 - Some api and e2e tests briefly change shared demo users, roles or the test clock and restore them afterwards; run those layers with nothing else on the stack.
 
-### Pending owner decisions
+### Owner decisions (2026-11-08)
 
-These are built as described and wait for the owner's sign-off. Every interface change made during the build is also accepted pending that sign-off.
+These were open in earlier rounds and are now decided. Every interface change made during the build is still accepted pending the owner's sign-off.
 
-- **Notice window (R12).** A request with no sent notice after 5 minutes x (`notify_max_attempts` + 1), 20 minutes at the default, is escalated once as NOTIFICATION_FAILED, even with no recorded attempt, and is no longer retried.
-- **Invoker keys on STARTED (IC-11).** A STARTED item that carries `invoker_id`, `invoked_via` or `reason` is stored with those values overwritten from the run record, not refused. The other reserved keys are refused.
+- **Notice window (R12), accepted as built.** A request with no sent notice after 5 minutes x (`notify_max_attempts` + 1), 20 minutes at the default, is escalated once as NOTIFICATION_FAILED, even with no recorded attempt, and is no longer retried.
+- **Invoker keys on STARTED (IC-11), refuse.** A STARTED item whose inputs carry `invoker_id`, `invoked_via`, `reason` or `n8n_execution_id` (at any depth, in any normalised spelling) is refused and nothing is written; the database sets those four values itself from the run record. The flagship sends none of them, and `check-exports` holds that (rule `started_db_keys`).
+- **Stablecoin USD materiality, shortfall only.** See the stablecoin band item above.
 
 ### Wired but not yet complete
 
@@ -400,7 +401,7 @@ These are properties of the scope, not gaps. The registry-precedes-the-build pat
 
 ### USD materiality enforcement scope
 
-The `materiality_usd` column in `materiality_thresholds` is populated for all seven seeded assets, but the policy engine enforces the USD materiality test only for stablecoin assets (`asset_class = 'Stablecoin'`), where raw units equal USD value (1 USDC = $1). For non-stablecoin assets (BTC, ETH, SOL, XRP, ADA), USD materiality enforcement requires a price oracle to convert unit discrepancies to USD and is deferred to v1.1. Ratio-based escalation (FAO-REC-004) provides primary coverage. Under-reservation is caught for every asset in the shipped fixtures, and on this branch missing, one-sided or non-finite inputs are BLOCKED (see `fixtures/README.md`). What's deferred is the in-band-but-large-USD-discrepancy case for non-stablecoin assets.
+The `materiality_usd` column in `materiality_thresholds` is populated for all seven seeded assets, but the policy engine enforces the USD materiality test only for stablecoin assets (`asset_class = 'Stablecoin'`), where raw units equal USD value (1 USDC = $1), and for those it tests a shortfall only (ledger minus wallet above `materiality_usd`; owner decision 2026-11-08): a surplus inside the band is governed by the band upper alone. For non-stablecoin assets (BTC, ETH, SOL, XRP, ADA), USD materiality enforcement requires a price oracle to convert unit discrepancies to USD and is deferred to v1.1. Ratio-based escalation (FAO-REC-004) provides primary coverage. Under-reservation is caught for every asset in the shipped fixtures, and on this branch missing, one-sided or non-finite inputs are BLOCKED (see `fixtures/README.md`). What's deferred is the in-band-but-large-USD-discrepancy case for non-stablecoin assets.
 
 Most items above have a roadmap entry below or are named in [`SOX-MAPPING.md`](./SOX-MAPPING.md).
 

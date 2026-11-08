@@ -9,7 +9,9 @@
 //   FAO-GOV-008  runs start only through the authenticated invoke webhook;
 //                every failure of the flagship, the notifier and the sweeper
 //                reaches the error handler, whose source map and pre-claim
-//                list match the exports (rule error_handler_map)
+//                list match the exports (rule error_handler_map); the
+//                flagship STARTED sends none of the database-set invoker
+//                keys (rule started_db_keys, patch round 7 O3)
 //
 // One check per rule per workflow, plus three global checks: the set of
 // exported files, the n8n version the node typeVersion pins were checked
@@ -439,6 +441,14 @@ export const RULES = [
     run: ({ file, wf }) => checkExecutionTimeout(file, wf),
   },
   {
+    // FAO-GOV-008 (patch round 7, O3, IC-11): the database sets invoker_id,
+    // invoked_via, reason and n8n_execution_id on STARTED and refuses a
+    // STARTED whose inputs carry any of them. The flagship sends none.
+    id: 'started_db_keys',
+    text: 'the flagship STARTED sends none of the database-set keys invoker_id, invoked_via, reason, n8n_execution_id',
+    run: ({ file, wf }) => (file === FLAGSHIP_FILE ? checkStartedDbKeys(wf) : []),
+  },
+  {
     // FAO-GOV-008 (round 5, F-20, K1; round 6, P1): the error handler maps
     // the failed workflow id to the fao_run_fail source with a fixed map, and
     // a flagship failure at any node that is not Respond 202 and not
@@ -823,6 +833,44 @@ export function downstreamOf(wf, source) {
     }
   }
   return [...seen].sort();
+}
+
+// FAO-GOV-008 (patch round 7, O3, IC-11; owner decision 2026-11-08). The
+// database sets these four keys on STARTED itself and refuses (INVALID_INPUT,
+// nothing written) a STARTED whose inputs carry one at any depth, compared
+// trimmed, lower case and NFKC. The flagship's STARTED is built only by Init
+// Execution and reaches the Writer through Writer: STARTED's fixed field
+// mapping, so: no identifier and no string literal in Init Execution's code
+// (comments aside) may equal one of the four after that normalisation, and
+// Writer: STARTED may map no field of that name. A key assembled at run time
+// is not visible here; test/node/recon.test.mjs walks the STARTED Init
+// Execution actually emits.
+export const STARTED_DB_KEYS = ['invoker_id', 'invoked_via', 'reason', 'n8n_execution_id'];
+const normKey = (s) => String(s).trim().toLowerCase().normalize('NFKC').toLowerCase();
+export function checkStartedDbKeys(wf) {
+  const v = [];
+  const byName = new Map(nodesOf(wf).map((n) => [n.name, n]));
+  const init = byName.get('Init Execution');
+  if (!init) return ['missing node "Init Execution"'];
+  const code = String(params(init).jsCode || '')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|\s)\/\/.*$/gm, '$1');
+  const tokens = new Set();
+  for (const m of code.matchAll(/[\p{L}\p{N}_$]+/gu)) tokens.add(normKey(m[0]));
+  for (const m of code.matchAll(/(['"`])((?:\\.|(?!\1)[^\\\n])*)\1/g)) tokens.add(normKey(m[2]));
+  for (const k of STARTED_DB_KEYS) {
+    if (tokens.has(k)) v.push(`node "Init Execution": names the database-set STARTED key ${k}`);
+  }
+  const writer = byName.get('Writer: STARTED');
+  if (!writer) {
+    v.push('missing node "Writer: STARTED"');
+  } else {
+    const mapped = Object.keys(((params(writer).workflowInputs || {}).value) || {});
+    for (const f of mapped) {
+      if (STARTED_DB_KEYS.includes(normKey(f))) v.push(`node "Writer: STARTED": maps the database-set key ${f}`);
+    }
+  }
+  return v;
 }
 
 // FAO-GOV-008 (round 6, P1). The flagship nodes an execution can fail at

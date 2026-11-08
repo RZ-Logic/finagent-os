@@ -23,8 +23,9 @@ statuses named below. `policy_branches.json` drives every other branch
 ## Design principle
 
 Fixtures aren't a snapshot of Kraken's actual reserves. They are test data
-designed to exercise five of the seven rules in the Policy Outcome Decision
-Matrix in a single execution. Three assets are calibrated to Kraken's published
+designed to exercise four of the seven rules in the Policy Outcome Decision
+Matrix in a single execution (five before the owner decision of 2026-11-08
+on stablecoin USD materiality, below). Three assets are calibrated to Kraken's published
 December 2025 Proof of Reserves so the agent has real-world anchors; four
 are synthetic scenarios constructed to demonstrate specific controls.
 
@@ -33,20 +34,31 @@ are synthetic scenarios constructed to demonstrate specific controls.
 | BTC   | Kraken Dec 2025 PoR anchor        | 167,690.25     | 167,188.68     | 1.003    | ALLOW_WITH_OBLIGATIONS        | FAO-REC-006   |
 | ETH   | Kraken Dec 2025 PoR anchor        | 2,884,112      | 2,847,100      | 1.013    | ALLOW                         | FAO-REC-006   |
 | USDC  | Synthetic clean baseline          | 891,723,456    | 891,723,456    | 1.000    | ALLOW                         | FAO-REC-006   |
-| USDT  | Synthetic anomaly                 | 1,234,567,890.50 | 1,234,500,000 | 1.0000549| REQUIRE_HUMAN (STANDARD)      | FAO-REC-002   |
+| USDT  | Synthetic anomaly                 | 1,234,567,890.50 | 1,234,500,000 | 1.0000549| ALLOW                         | FAO-REC-002   |
 | SOL   | Synthetic anomaly                 | 8,740,000      | 9,200,000      | 0.950    | REQUIRE_HUMAN (CRITICAL)      | FAO-REC-004   |
 | XRP   | Kraken Dec 2025 PoR anchor        | 128,265,000    | 127,500,000    | 1.006    | ALLOW                         | FAO-REC-006   |
 | ADA   | Synthetic anomaly                 | 47,293,847     | -150,000       | undefined| REQUIRE_HUMAN (CRITICAL)      | FAO-REC-007   |
 
-A single execution exercises four distinct outcome categories: ALLOW,
-ALLOW_WITH_OBLIGATIONS, REQUIRE_HUMAN STANDARD, and REQUIRE_HUMAN CRITICAL
-(twice, for two different control violations). These are three
-`policy_outcome` values plus two sub-tiers. In decision-matrix terms the run
-reaches five band statuses: IN_BAND, BELOW_BAND_LOWER, IN_BAND_USD_MATERIAL,
-BELOW_FLOOR and NEGATIVE_LEDGER. It does not exercise ZERO_LEDGER (rule 2),
-ABOVE_BAND_UPPER (rule 4), or the NO_THRESHOLD pre-check that marks an asset
-BLOCKED. No rule produces DENY. Execution rollup is REQUIRE_HUMAN CRITICAL
-(worst-asset rule).
+A single execution exercises three distinct outcome categories: ALLOW,
+ALLOW_WITH_OBLIGATIONS and REQUIRE_HUMAN CRITICAL (twice, for two different
+control violations). These are three `policy_outcome` values and one
+sub-tier. In decision-matrix terms the run reaches four band statuses:
+IN_BAND, BELOW_BAND_LOWER, BELOW_FLOOR and NEGATIVE_LEDGER. It does not
+exercise ZERO_LEDGER (rule 2), ABOVE_BAND_UPPER (rule 4),
+IN_BAND_USD_MATERIAL (rule 5), REQUIRE_HUMAN STANDARD, or the NO_THRESHOLD
+pre-check that marks an asset BLOCKED; `policy_branches.json` covers each of
+them offline. No rule produces DENY. Execution rollup is REQUIRE_HUMAN
+CRITICAL (worst-asset rule).
+
+USDT is a $67,890.50 surplus at ratio 1.0000549, inside the stablecoin band
+and above the $10,000 materiality. Until the owner decision of 2026-11-08 it
+escalated as IN_BAND_USD_MATERIAL (REQUIRE_HUMAN STANDARD). Since then the
+stablecoin USD materiality rule (rule 5, FAO-REC-002) tests a shortfall
+only, ledger minus wallet above `materiality_usd`; a surplus inside the band
+is governed by the band upper (1.05) alone, so USDT now ALLOWs. Its
+rationale still names FAO-REC-002 and records that the surplus exceeded
+materiality. The provenance label stays `synthetic_anomaly` (the e2e S20
+provenance check reads it).
 
 ## Why the STARTED row says ALLOW
 
@@ -84,12 +96,25 @@ the owner's decision of 2026-11-07 that stablecoin reserves are held near
 105%. The floor and band lower stay at 1.00. A stablecoin ratio up to and
 including 1.05 is in band; above 1.05 it hits rule 4, ABOVE_BAND_UPPER, and
 escalates to REQUIRE_HUMAN STANDARD. Inside the band the USD materiality
-rule (rule 5) still applies. The v1 seed held 1.0050; the live table keeps
+rule (rule 5) applies to a shortfall only (owner decision 2026-11-08): a
+surplus up to 1.05 ALLOWs whatever its USD size. With the seeded floor and
+band lower of 1.00, a stablecoin shortfall is BELOW_FLOOR (rule 3, CRITICAL)
+before rule 5 is tested, so rule 5 fires only for a stablecoin threshold
+whose floor is below 1.00; `policy_branches.json` covers it with a
+per-case `thresholds_override` (floor 0.98, band lower 0.99). The v1 seed held 1.0050; the live table keeps
 that value until the cutover runbook step applies 1.05 through
 `fao_admin_set_threshold`. `policy_branches.json` carries the 1.05 band and
-two stablecoin cases: `stablecoin_in_band_near_105` (ratio 1.04, ALLOW,
-which the old 1.005 band escalated) and `stablecoin_above_band_upper`
-(ratio 1.051). Kraken's snapshot also covers more than Spot, so its ratios
+these stablecoin cases: `stablecoin_in_band_near_105` (ratio 1.04, ALLOW,
+which the old 1.005 band escalated), `stablecoin_above_band_upper` (ratio
+1.051), `stablecoin_surplus_in_band_above_materiality` (the flagship USDT,
+renamed from `in_band_usd_material`, now ALLOW),
+`stablecoin_kraken_scale_surplus` (USDC ledger 10,000,000 at ratio 1.04, a
+$400,000 surplus, ALLOW), `stablecoin_shortfall_seeded_floor` (a $50,000
+shortfall under the seeds, BELOW_FLOOR), and, under the override,
+`stablecoin_shortfall_in_band_usd_material` (a $50,000 shortfall at ratio
+0.995, IN_BAND_USD_MATERIAL) and
+`stablecoin_shortfall_in_band_below_materiality` (a $5,000 shortfall,
+ALLOW). Kraken's snapshot also covers more than Spot, so its ratios
 are not directly comparable with the Spot-only seeds.
 
 ## Real-world anchor: krakendb (2014)
@@ -104,15 +129,15 @@ reserve ratio is mathematically undefined when liability is negative.
 ## Why fixtures are intentionally mixed
 
 A naive "all real Dec 2025 numbers" fixture, under the seeded thresholds,
-would produce four ALLOWs (ETH, SOL, XRP, ADA), one ALLOW_WITH_OBLIGATIONS
-(BTC), and two REQUIRE_HUMAN STANDARD escalations for USDC and USDT at
-105%+: ABOVE_BAND_UPPER for a ratio above the 1.05 band upper, or
-IN_BAND_USD_MATERIAL at 1.05, since a 5% surplus on any real stablecoin pool
-is far above the $10,000 materiality. The under-reservation and
-negative-liability paths would never fire and would have zero evidence of
-working. The mixed fixture design exercises those two paths and the
-small-ratio USD-materiality breach (USDT, ratio 1.0000549) in evidence; it
-does not exercise every rule (see the gaps listed above).
+would produce four ALLOWs (ETH, SOL, XRP, ADA) and one ALLOW_WITH_OBLIGATIONS
+(BTC). USDC and USDT at 105%+ would be ALLOW at exactly 1.05 (a surplus
+inside the band does not escalate on USD materiality, owner decision
+2026-11-08) and REQUIRE_HUMAN STANDARD (ABOVE_BAND_UPPER) above it. The
+under-reservation and negative-liability paths would never fire and would
+have zero evidence of working. The mixed fixture design exercises those two
+paths and a stablecoin surplus above materiality that ALLOWs (USDT, ratio
+1.0000549) in evidence; it does not exercise every rule (see the gaps listed
+above).
 
 ## Provenance threading
 

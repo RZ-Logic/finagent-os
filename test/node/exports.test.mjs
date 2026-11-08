@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, writeFileSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { checkExports, checkPublishDocs, checkExecutionTimeout, RULES, WORKFLOWS_DIR, PUBLISH_ORDER, NODE_VERSIONS_N8N, EXECUTION_TIMEOUTS, SLA_MAX_EXECUTION_FLOOR } from '../../scripts/check-exports.mjs';
+import { checkExports, checkPublishDocs, checkExecutionTimeout, RULES, WORKFLOWS_DIR, PUBLISH_ORDER, NODE_VERSIONS_N8N, EXECUTION_TIMEOUTS, SLA_MAX_EXECUTION_FLOOR, STARTED_DB_KEYS } from '../../scripts/check-exports.mjs';
 
 test('check-exports reports zero violations', () => {
   const report = checkExports();
@@ -324,4 +324,44 @@ test('execution_timeout: the flagship, notifier and sweeper set their limits and
   assert.ok(checkExecutionTimeout('fao_reserve_recon_v1.json', { settings: {} }).some((v) => /\(unset\)/.test(v)));
   assert.deepEqual(rule.run({ file: 'writer.json', wf: read('writer.json') }), [], 'the Writer is not checked');
   assert.deepEqual(rule.run({ file: 'fao_error_handler_v1.json', wf: read('fao_error_handler_v1.json') }), [], 'the error handler is not checked');
+});
+
+test('started_db_keys (O3, IC-11): the flagship STARTED names none of the four database-set keys', () => {
+  const rule = RULES.find((r) => r.id === 'started_db_keys');
+  assert.ok(rule, 'rule exists');
+  assert.deepEqual(STARTED_DB_KEYS, ['invoker_id', 'invoked_via', 'reason', 'n8n_execution_id']);
+  const F = 'fao_reserve_recon_v1.json';
+  const flag = JSON.parse(readFileSync(join(WORKFLOWS_DIR, F), 'utf8'));
+  assert.deepEqual(rule.run({ file: F, wf: flag }), [], 'the shipped flagship passes');
+  const withInit = (patch) => {
+    const copy = structuredClone(flag);
+    const n = copy.nodes.find((x) => x.name === 'Init Execution');
+    n.parameters.jsCode = patch(n.parameters.jsCode);
+    return rule.run({ file: F, wf: copy });
+  };
+  const anchor = '      fixture_provenance: fixture_metadata\n';
+  assert.ok(flag.nodes.find((x) => x.name === 'Init Execution').parameters.jsCode.includes(anchor), 'anchor present');
+  const cases = [
+    ['invoker_id', '      invoker_id: claim.invoker_id,\n'],
+    ['invoked_via', "      'invoked_via': 'n8n',\n"],
+    ['reason', '      Reason: "scheduled",\n'],
+    ['n8n_execution_id', '      n8n_execution_id: $execution.id,\n'],
+    ['reason', '      "ｒｅａｓｏｎ": 1,\n'],
+    ['invoker_id', "      [' INVOKER_ID ']: 1,\n"],
+  ];
+  for (const [key, line] of cases) {
+    const v = withInit((c) => c.replace(anchor, line + anchor));
+    assert.ok(v.some((x) => x.includes(`names the database-set STARTED key ${key}`)), `${JSON.stringify(line)} -> ${JSON.stringify(v)}`);
+  }
+  // Comments may name the keys (the code comments explain that the database sets them).
+  assert.deepEqual(withInit((c) => `// the database adds invoker_id and reason\n/* n8n_execution_id */\n${c}`), []);
+  // Writer: STARTED may not map a field of that name.
+  const copy = structuredClone(flag);
+  copy.nodes.find((x) => x.name === 'Writer: STARTED').parameters.workflowInputs.value.n8n_execution_id = '={{ $json.n8n_execution_id }}';
+  assert.ok(rule.run({ file: F, wf: copy }).some((x) => /Writer: STARTED.*maps the database-set key n8n_execution_id/.test(x)));
+  const gone = structuredClone(flag);
+  gone.nodes = gone.nodes.filter((x) => x.name !== 'Init Execution');
+  assert.deepEqual(rule.run({ file: F, wf: gone }), ['missing node "Init Execution"']);
+  // Only the flagship is checked.
+  assert.deepEqual(rule.run({ file: 'writer.json', wf: JSON.parse(readFileSync(join(WORKFLOWS_DIR, 'writer.json'), 'utf8')) }), []);
 });

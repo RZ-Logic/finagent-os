@@ -12,7 +12,7 @@
 --     do not count toward it; every other refusal stays capped.
 -- ============================================================================
 BEGIN;
-SELECT plan(50);
+SELECT plan(52);
 
 CREATE TEMP TABLE v (k text PRIMARY KEY, j jsonb);
 CREATE FUNCTION pg_temp.g(p_k text) RETURNS jsonb LANGUAGE sql AS $$ SELECT j FROM v WHERE k = p_k $$;
@@ -101,12 +101,13 @@ SELECT ok(pg_temp.g('bad')->>'ref' IS NOT NULL
           AND NOT (tests.journal_row((pg_temp.g('bad')->>'ref')::bigint)->'attempted' ? 'invalid_body'),
   'A1 (IC-18): the bad key is refused by its field rule, not by the body check');
 
--- The window is one hour on the FinAgent clock
+-- Patch round 7 (L4): the window is one hour of real time (now(), the clock
+-- event_timestamp is stored with); moving the test clock does not free it
 SELECT tests.set_clock(3601);
 INSERT INTO v VALUES ('later', tests.start_raw('aisha.okonkwo@finagent-os.demo', 'fao_close_orchestrator_v1', 'pgtap 140', tests.new_key()));
-SELECT is(pg_temp.g('later')->>'code', 'AGENT_NOT_ACTIVE', 'A1: an hour later the refusal is recorded again');
-SELECT is(pg_temp.refused_all('fao_close_orchestrator_v1') - pg_temp.n('all_before'), pg_temp.n('lim') - pg_temp.n('a_base') + 2,
-  'A1: with one new RUN_REFUSED row (plus Sarah''s)');
+SELECT is(pg_temp.g('later')->>'code', 'RATE_LIMITED', 'A1 (L4): with the test clock moved an hour the bound still holds (real-time window)');
+SELECT is(pg_temp.refused_all('fao_close_orchestrator_v1') - pg_temp.n('all_before'), pg_temp.n('lim') - pg_temp.n('a_base') + 1,
+  'A1 (L4): and no new RUN_REFUSED row is written (only Sarah''s)');
 SELECT tests.set_clock(0);
 
 -- ============================================================================
@@ -161,10 +162,17 @@ INSERT INTO a2_st SELECT k, pg_temp.append_err(jsonb_build_array(
 SELECT is((SELECT count(*) FROM a2_st WHERE e = '22023 FAO-GOV-001 ledger_append: item 0: inputs.' || k || ' is set only by the database'), 6::bigint,
   'A2: STARTED refuses the 6 request and approval keys');
 SELECT is(tests.ledger_count((pg_temp.g('st')->>'correlation_id')::uuid, 'STARTED'), 0::bigint, 'A2: no STARTED row is stored');
--- STARTED may carry invoker_id, invoked_via and reason; the database overwrites them
-INSERT INTO v VALUES ('st_ok', tests.append(jsonb_build_array(jsonb_set(jsonb_set(
-    tests.started_event((pg_temp.g('st')->>'correlation_id')::uuid, ARRAY['BTC']),
-    '{inputs,reason}', '"forged reason"'), '{inputs,invoker_id}', to_jsonb(tests.uid('sarah.chen@finagent-os.demo'))))));
+-- Patch round 7 (O3): STARTED may not carry invoker_id, invoked_via, reason or
+-- n8n_execution_id either; the batch is refused and the database sets them
+CREATE TEMP TABLE a2_own (k text, e text);
+INSERT INTO a2_own SELECT k, pg_temp.append_err(jsonb_build_array(
+    jsonb_set(tests.started_event((pg_temp.g('st')->>'correlation_id')::uuid, ARRAY['BTC']), ARRAY['inputs', k], to_jsonb('forged'::text))))
+  FROM unnest(ARRAY['invoker_id', 'invoked_via', 'reason', 'n8n_execution_id']) k;
+SELECT is((SELECT count(*) FROM a2_own WHERE e = '22023 FAO-GOV-001 ledger_append: item 0: inputs.' || k || ' is set only by the database'), 4::bigint,
+  'A2 (O3): STARTED refuses invoker_id, invoked_via, reason and n8n_execution_id');
+SELECT is(tests.ledger_count((pg_temp.g('st')->>'correlation_id')::uuid, 'STARTED'), 0::bigint, 'A2 (O3): no STARTED row is stored');
+INSERT INTO v VALUES ('st_ok', tests.append(jsonb_build_array(
+    tests.started_event((pg_temp.g('st')->>'correlation_id')::uuid, ARRAY['BTC']))));
 SELECT is((SELECT inputs->>'reason' || '/' || (inputs->>'invoker_id') FROM public.shadow_ledger
             WHERE correlation_id = (pg_temp.g('st')->>'correlation_id')::uuid AND inputs->>'event_type' = 'STARTED'),
   'pgtap run/' || tests.uid('aisha.okonkwo@finagent-os.demo')::text, 'A2: STARTED reason and invoker_id come from the run');

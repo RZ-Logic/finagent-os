@@ -101,6 +101,14 @@ test('S01 all-in-band run commits SUCCESS with 7 asset rows and no request', T, 
   }
   assert.equal(Number(byAsset.USDC.inputs.ratio), 1.006);
   assert.equal(Number(byAsset.USDC.inputs.discrepancy), 6000);
+  // Patch round 7 (O1): a Kraken-scale stablecoin surplus inside the band
+  // (USDT ledger 10,000,000 at 1.04, $400,000 over a $10,000 materiality)
+  // ALLOWs; USD materiality is a shortfall test only.
+  assert.equal(Number(byAsset.USDT.inputs.ledger), 10000000);
+  assert.equal(Number(byAsset.USDT.inputs.ratio), 1.04);
+  assert.equal(Number(byAsset.USDT.inputs.discrepancy), 400000);
+  assert.ok(Number(byAsset.USDT.inputs.discrepancy) > Number(byAsset.USDT.inputs.threshold.materiality_usd), 'the surplus is above materiality');
+  assert.equal(byAsset.USDT.sub_tier, null);
   const committed = rows.at(-1);
   assert.equal(committed.status, 'SUCCESS');
   assert.equal(committed.outcome, 'ALLOW');
@@ -125,8 +133,18 @@ test('S02 review run: one request, one Slack message, B approves, HITL_RESOLVED 
   assert.equal(req.decision, 'PENDING');
   assert.equal(req.sub_tier, 'CRITICAL');
   assert.equal(req.agent_invoker_id, L.uid('aisha'));
-  assert.deepEqual(req.escalated_assets.map((a) => a.asset), ['ADA', 'SOL', 'USDT']);
+  // Patch round 7 (O1): the flagship USDT is a $67,890.50 surplus inside the
+  // stablecoin band, above its materiality; USD materiality applies to a
+  // shortfall only, so it ALLOWs and only ADA and SOL are escalated.
+  assert.deepEqual(req.escalated_assets.map((a) => a.asset), ['ADA', 'SOL']);
   assert.deepEqual(await L.types(corr), ['STARTED', ...Array(7).fill('ASSET_RECONCILED'), 'HITL_REQUESTED', 'NOTIFICATION_SENT']);
+  const usdt = assets(await L.ledger(corr)).find((a) => a.inputs.asset === 'USDT');
+  assert.equal(usdt.outcome, 'ALLOW');
+  assert.equal(usdt.inputs.band_status, 'IN_BAND');
+  assert.equal(usdt.hitl_status, 'NOT_REQUIRED');
+  assert.equal(Number(usdt.inputs.discrepancy), 67890.5);
+  assert.ok(Number(usdt.inputs.ratio) > 1 && Number(usdt.inputs.ratio) <= 1.05, `USDT ratio ${usdt.inputs.ratio}`);
+  assert.ok(Number(usdt.inputs.discrepancy) > Number(usdt.inputs.threshold.materiality_usd), 'the surplus is above materiality');
 
   const notes = await L.notifications(req.hitl_id);
   assert.equal(notes.length, 1);
@@ -142,7 +160,8 @@ test('S02 review run: one request, one Slack message, B approves, HITL_RESOLVED 
   assert.match(m.json.text, /\*Eligible approvers:\* Marcus Patel, Sarah Chen\n/);
   assert.doesNotMatch(m.json.text, /Aisha/, 'the invoker is never named');
   assert.ok(m.json.text.includes(`<${req.approval_url}|Open the approval page>`));
-  assert.match(m.json.text, /ADA \(REQUIRE_HUMAN\/CRITICAL\), SOL \(REQUIRE_HUMAN\/CRITICAL\), USDT \(REQUIRE_HUMAN\/STANDARD\)/);
+  assert.match(m.json.text, /ADA \(REQUIRE_HUMAN\/CRITICAL\), SOL \(REQUIRE_HUMAN\/CRITICAL\)/);
+  assert.doesNotMatch(m.json.text, /USDT/, 'the in-band USDT surplus is not escalated');
   const gw = byWorkflow(ex, GATEWAY_WF);
   assert.equal(gw.length, 1);
   assert.equal(gw[0].status, 'success');
@@ -368,7 +387,16 @@ test('S10 markup and injection-shaped values are stored verbatim and escaped in 
   assert.equal(started.inputs.fixture_provenance.BTC.notes, MARKUP_NOTE, 'note stored verbatim');
   assert.equal(started.inputs.fixture_provenance.USDT.notes, MARKUP_NOTE_2);
   assert.equal(started.inputs.fixture_provenance.USDT.control, '<b>FAO-REC-002</b>');
+  // Patch round 7 (O1): the markup USDT is a $67,890.50 stablecoin shortfall
+  // (below the 1.0000 floor), so it escalates CRITICAL; BTC is in band.
+  const by10 = Object.fromEntries(assets(rows).map((a) => [a.inputs.asset, a]));
+  assert.equal(by10.BTC.outcome, 'ALLOW');
+  assert.equal(by10.USDT.outcome, 'REQUIRE_HUMAN');
+  assert.equal(by10.USDT.sub_tier, 'CRITICAL');
+  assert.equal(by10.USDT.inputs.band_status, 'BELOW_FLOOR');
+  assert.equal(Number(by10.USDT.inputs.discrepancy), -67890.5);
   const req = await openRequest(corr);
+  assert.deepEqual(req.escalated_assets.map((a) => a.asset), ['USDT']);
 
   const msgs = await L.slack.forHitl(req.hitl_id);
   assert.equal(msgs.length, 1);
@@ -525,11 +553,11 @@ test('S08 expiry and one escalation through the sweeper with the owner-only test
   assert.equal(esc1.inputs.level, 1);
   assert.equal(esc1.inputs.reason, 'TIMEOUT');
   assert.equal(esc1.inputs.target_owner_id, L.uid('marcus'));
-  // Patch round 6 (P3): HITL_EXPIRED is the closing record; no COMMITTED row.
-  const closing = rows.find((r) => r.t === 'HITL_EXPIRED');
-  assert.equal(closing.status, 'FAILURE');
-  assert.equal(closing.inputs.committed, false);
-  assert.equal(closing.inputs.run_state, 'EXPIRED');
+  // Patch round 6 (P3): HITL_EXPIRED is the expiry record; no COMMITTED row.
+  const expiryRow = rows.find((r) => r.t === 'HITL_EXPIRED');
+  assert.equal(expiryRow.status, 'FAILURE');
+  assert.equal(expiryRow.inputs.committed, false);
+  assert.equal(expiryRow.inputs.run_state, 'EXPIRED');
   assert.ok(!rows.some((r) => r.t === 'COMMITTED'), 'no COMMITTED row for an expired request');
   assert.equal((await L.run(corr)).state, 'EXPIRED');
   await L.waitNotifications(req.hitl_id, 2);
@@ -608,7 +636,7 @@ test('S13 a notifier failure and a sweep item error in the same sweep both fail 
   assert.equal((await L.q('SELECT count(*)::int AS n FROM fao_private.test_clock')).at(0).n, 0, 'test clock cleared');
   assert.equal((await L.one('SELECT escalation_to FROM public.process_owners WHERE id = $1', [L.uid('sarah')])).escalation_to, L.uid('marcus'), 'escalation_to restored');
 
-  // The database side: expired (closing record, no COMMITTED), escalated with no target.
+  // The database side: expired (the expiry record, no COMMITTED), escalated with no target.
   const rows = await L.ledger(corr);
   const tail = rows.map((r) => r.t).slice(rows.findIndex((r) => r.t === 'HITL_EXPIRED'));
   assert.deepEqual(tail, ['HITL_EXPIRED', 'HITL_ESCALATED']);

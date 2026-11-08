@@ -60,6 +60,13 @@ function upstreamFor(wallet, ledger, thresholds) {
   };
 }
 
+// A case may replace threshold fields for one asset (policy_branches.json
+// _meta.thresholds_override); the shared thresholds stay equal to seed 0006.
+function thresholdsFor(c) {
+  const o = c.thresholds_override || {};
+  return FIX.thresholds.map((t) => (o[t.asset_symbol] ? { ...t, ...o[t.asset_symbol] } : t));
+}
+
 async function reconcile(wallet, ledger, thresholds = FIX.thresholds) {
   return runCodeNode(WF, 'Per-Asset Reconcile', { items: thresholds, upstream: upstreamFor(wallet, ledger, thresholds) });
 }
@@ -159,7 +166,7 @@ for (const c of FIX.cases) {
   test(`Per-Asset Reconcile branch ${c.branch} (${c.id})`, async () => {
     const wallet = decodeBalances(c.wallet);
     const ledger = decodeBalances(c.ledger);
-    const out = await reconcile(wallet, ledger);
+    const out = await reconcile(wallet, ledger, thresholdsFor(c));
     const union = new Set([...Object.keys(wallet), ...Object.keys(ledger)]);
     assert.equal(out.length, union.size, 'output count equals the key union');
     const item = out.find((o) => o.inputs && o.inputs.asset === c.expect.asset);
@@ -235,9 +242,16 @@ test('Per-Asset Reconcile on the flagship fixtures gives the documented outcomes
     ETH: ['ALLOW', null],
     SOL: ['REQUIRE_HUMAN', 'CRITICAL'],
     USDC: ['ALLOW', null],
-    USDT: ['REQUIRE_HUMAN', 'STANDARD'],
+    // O1 (owner decision 2026-11-08): the USDT surplus of $67,890.50 inside
+    // the band is above materiality but ALLOWs; USD materiality is a
+    // shortfall test.
+    USDT: ['ALLOW', null],
     XRP: ['ALLOW', null],
   });
+  const usdt = out.find((o) => o.inputs.asset === 'USDT');
+  assert.equal(usdt.inputs.band_status, 'IN_BAND');
+  assert.equal(usdt.inputs.discrepancy, 67890.5);
+  assert.match(usdt.policy_rationale, /FAO-REC-002 USDT stablecoin: surplus \(wallet minus ledger\) \$67890\.50 exceeds materiality threshold \$10000\.00, but USD materiality applies to a shortfall only/);
 });
 
 test('IC-38: the stablecoin band upper is 1.05 and a ratio between 1.005 and 1.05 is now in band', async () => {
@@ -259,12 +273,102 @@ test('IC-38: the stablecoin band upper is 1.05 and a ratio between 1.005 and 1.0
   assert.deepEqual(await at('USDC', 105000, 100000), ['IN_BAND', 'ALLOW', null]);
   // Above 1.05 is unexpected surplus.
   assert.deepEqual(await at('USDT', 105100, 100000), ['ABOVE_BAND_UPPER', 'REQUIRE_HUMAN', 'STANDARD']);
-  // Inside the band, USD materiality still applies.
-  assert.deepEqual(await at('USDT', 1040000, 1000000), ['IN_BAND_USD_MATERIAL', 'REQUIRE_HUMAN', 'STANDARD']);
+  // O1 (owner decision 2026-11-08): a $40,000 surplus inside the band is
+  // above the $10,000 materiality but no longer escalates on USD; the band
+  // upper alone governs a surplus. (Before O1 this case was
+  // IN_BAND_USD_MATERIAL.)
+  assert.deepEqual(await at('USDT', 1040000, 1000000), ['IN_BAND', 'ALLOW', null]);
   // Under the old 1.005 upper the same 1.04 case escalated: the band change
   // is what moves it.
   const old = FIX.thresholds.map((t) => (t.asset_class === 'Stablecoin' ? { ...t, ratio_band_upper: 1.005 } : t));
   assert.deepEqual(await at('USDC', 104000, 100000, old), ['ABOVE_BAND_UPPER', 'REQUIRE_HUMAN', 'STANDARD']);
+});
+
+test('O1: stablecoin USD materiality escalates a shortfall only; a surplus inside the band is governed by the band upper', async () => {
+  // Owner decision 2026-11-08. Rule 5 (IN_BAND_USD_MATERIAL) tests ledger
+  // minus wallet against materiality_usd; non-stablecoins are unchanged.
+  const at = async (asset, wallet, ledger, thresholds = FIX.thresholds) => {
+    const out = await reconcile({ [asset]: wallet }, { [asset]: ledger }, thresholds);
+    const o = out.find((x) => x.inputs.asset === asset);
+    return [o.inputs.band_status, o.policy_outcome, o.policy_sub_tier ?? null, o.policy_rationale];
+  };
+  // Kraken-scale surplus: USDC ledger 10,000,000 at ratio 1.04, $400,000
+  // over a $10,000 materiality, ALLOWs and says why.
+  const k = await at('USDC', 10400000, 10000000);
+  assert.deepEqual(k.slice(0, 3), ['IN_BAND', 'ALLOW', null]);
+  assert.match(k[3], /surplus \(wallet minus ledger\) \$400000\.00 exceeds materiality threshold \$10000\.00/);
+  // A surplus at exactly the band upper on a large pool ALLOWs; above it is
+  // ABOVE_BAND_UPPER (the band upper still governs a surplus).
+  assert.deepEqual((await at('USDT', 10500000, 10000000)).slice(0, 3), ['IN_BAND', 'ALLOW', null]);
+  assert.deepEqual((await at('USDT', 10510000, 10000000)).slice(0, 3), ['ABOVE_BAND_UPPER', 'REQUIRE_HUMAN', 'STANDARD']);
+  // A surplus at or below materiality carries no surplus note.
+  assert.doesNotMatch((await at('USDC', 10010000, 10000000))[3], /surplus/);
+  // Under the seeded stablecoin floor of 1.00 any shortfall is BELOW_FLOOR
+  // (rule 3) before rule 5 is reached.
+  assert.deepEqual((await at('USDT', 9950000, 10000000)).slice(0, 3), ['BELOW_FLOOR', 'REQUIRE_HUMAN', 'CRITICAL']);
+  // With a floor below 1.00 (override: floor 0.98, band 0.99 to 1.05), a
+  // shortfall inside the band above materiality escalates
+  // IN_BAND_USD_MATERIAL, and one at materiality ALLOWs.
+  const low = FIX.thresholds.map((t) => (t.asset_class === 'Stablecoin' ? { ...t, ratio_floor: 0.98, ratio_band_lower: 0.99 } : t));
+  const s = await at('USDT', 9950000, 10000000, low);
+  assert.deepEqual(s.slice(0, 3), ['IN_BAND_USD_MATERIAL', 'REQUIRE_HUMAN', 'STANDARD']);
+  assert.match(s[3], /shortfall \(ledger minus wallet\) \$50000\.00 exceeds materiality threshold \$10000\.00/);
+  assert.deepEqual((await at('USDT', 9990000, 10000000, low)).slice(0, 3), ['IN_BAND', 'ALLOW', null]);
+  assert.deepEqual((await at('USDT', 9989999, 10000000, low)).slice(0, 3), ['IN_BAND_USD_MATERIAL', 'REQUIRE_HUMAN', 'STANDARD']);
+  // Below the band lower but above the floor, a material shortfall still
+  // escalates (rule 5 is tested before rule 6), and a small one is drift.
+  assert.deepEqual((await at('USDT', 9850000, 10000000, low)).slice(0, 3), ['IN_BAND_USD_MATERIAL', 'REQUIRE_HUMAN', 'STANDARD']);
+  assert.deepEqual((await at('USDT', 98500, 100000, low)).slice(0, 3), ['BELOW_BAND_LOWER', 'ALLOW_WITH_OBLIGATIONS', null]);
+  // Non-stablecoins are unchanged: no USD test in either direction.
+  const eth = await at('ETH', 1050000000, 1000000000);
+  assert.deepEqual(eth.slice(0, 3), ['IN_BAND', 'ALLOW', null]);
+  assert.doesNotMatch(eth[3], /FAO-REC-002/);
+  // The policy_branches cases cover both directions.
+  const ids = FIX.cases.map((c) => c.id);
+  for (const id of ['stablecoin_surplus_in_band_above_materiality', 'stablecoin_kraken_scale_surplus', 'stablecoin_shortfall_in_band_usd_material', 'stablecoin_shortfall_in_band_below_materiality', 'stablecoin_shortfall_seeded_floor']) {
+    assert.ok(ids.includes(id), id);
+  }
+  assert.ok(!ids.includes('in_band_usd_material'), 'the old surplus case is renamed');
+});
+
+test('O3 (IC-11): the STARTED event carries none of the four database-set invoker keys, at any depth or spelling', async () => {
+  // invoker_id, invoked_via, reason and n8n_execution_id are set by the
+  // database; a STARTED whose inputs carry any of them is refused
+  // INVALID_INPUT (owner decision 2026-11-08). Keys are compared the way the
+  // database compares reserved keys: trimmed, lower case, NFKC. The claim
+  // result here carries invoker_id, reason and invoked_via, so the test
+  // also shows Init Execution does not copy them.
+  const RESERVED = new Set(['invoker_id', 'invoked_via', 'reason', 'n8n_execution_id']);
+  const norm = (k) => String(k).trim().toLowerCase().normalize('NFKC').toLowerCase();
+  const out = await runCodeNode(WF, 'Init Execution', {
+    items: [{ r: CLAIM }],
+    upstream: {
+      'Claim Run': [{ r: CLAIM }],
+      'Claim OK?': [{ r: CLAIM }],
+      'Respond 202': [{ r: CLAIM }],
+      'Validate Invoke Body': [{ valid: true, run_token: TOKEN, n8n_execution_id: 'test-exec-1' }],
+      'Webhook: Invoke': [{ body: { run_token: TOKEN } }],
+    },
+  });
+  assert.equal(out.length, 1);
+  const ev = JSON.parse(JSON.stringify(out[0]));
+  assert.equal(ev.event_type, 'STARTED');
+  // What reaches the Writer: every field except the underscore context that
+  // Validate Batch strips.
+  const sent = Object.fromEntries(Object.entries(ev).filter(([key]) => !key.startsWith('_')));
+  const keys = [];
+  const walk = (v, path) => {
+    if (Array.isArray(v)) v.forEach((x, i) => walk(x, [...path, `[${i}]`]));
+    else if (v && typeof v === 'object') {
+      for (const [key, x] of Object.entries(v)) { keys.push([...path, key]); walk(x, [...path, key]); }
+    }
+  };
+  walk(sent, []);
+  assert.ok(keys.some((p) => p.join('.') === 'inputs.fixture_provenance.USDT.source'), 'the walk reaches nested keys');
+  const hits = keys.filter((p) => RESERVED.has(norm(p.at(-1)))).map((p) => p.join('.'));
+  assert.deepEqual(hits, [], `STARTED carries database-set keys: ${hits.join(', ')}`);
+  assert.ok(!JSON.stringify(sent).includes('test-exec-1'), 'the n8n execution id is not sent');
+  assert.ok(!JSON.stringify(sent).includes(CLAIM.invoker_id), 'the invoker id is not sent');
 });
 
 // --- Check Thresholds ----------------------------------------------------------

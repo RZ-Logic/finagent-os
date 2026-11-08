@@ -6,7 +6,7 @@
     "production_target": "Fireblocks REST API",
     "scenario_count": 7,
     "anchor_reference": "https://blog.kraken.com/news/december-2025-proof-of-reserves",
-    "fixture_design_principle": "3 PoR-anchored assets (real-world data shape) + 1 clean baseline + 3 synthetic anomalies (one per critical control path: FAO-REC-002, FAO-REC-004, FAO-REC-007). Single execution exercises ALLOW, ALLOW_WITH_OBLIGATIONS, REQUIRE_HUMAN STANDARD, and REQUIRE_HUMAN CRITICAL outcomes."
+    "fixture_design_principle": "3 PoR-anchored assets (real-world data shape) + 1 clean baseline + 3 synthetic scenarios (FAO-REC-004 under-reservation, FAO-REC-007 negative liability, and an FAO-REC-002 in-band stablecoin surplus above materiality that ALLOWs since the owner decision of 2026-11-08). Single execution exercises ALLOW, ALLOW_WITH_OBLIGATIONS and REQUIRE_HUMAN CRITICAL outcomes; REQUIRE_HUMAN STANDARD is covered by fixtures/policy_branches.json."
   },
   "wallets": [
     {
@@ -40,7 +40,7 @@
       "last_block": 19284739,
       "_provenance": "synthetic_anomaly",
       "_anomaly_control": "FAO-REC-002",
-      "_scenario": "Synthetic anomaly: ratio 1.0000549 sits within the stablecoin band [1.0000, 1.0500], BUT absolute USD discrepancy of $67,890.50 exceeds the USDT materiality threshold of $10,000. Stablecoin units are 1:1 USD; small ratio deviations on large pools are still material. Expected policy outcome: REQUIRE_HUMAN (STANDARD) per FAO-REC-002 USD-materiality breach."
+      "_scenario": "Synthetic in-band stablecoin surplus: ratio 1.0000549 sits within the stablecoin band [1.0000, 1.0500] and the wallet exceeds the ledger by $67,890.50, above the USDT materiality threshold of $10,000. Owner decision 2026-11-08: FAO-REC-002 stablecoin USD materiality applies to a shortfall (ledger above wallet) only, so a surplus inside the band is governed by the band upper alone. Expected policy outcome: ALLOW (IN_BAND); the rationale records that the surplus exceeded materiality."
     },
     {
       "asset": "SOL",

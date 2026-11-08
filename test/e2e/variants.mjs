@@ -119,6 +119,11 @@ export const MARKUP_NOTE_2 = '<script>alert(1)</script> </b> &amp; |pipe| *bold*
 // stablecoin band [1.0000, 1.0500] the owner set (reserves held near 105%)
 // and above the old 1.0050 upper, so S01 fails if the old band is still
 // stored. Its $6,000 discrepancy stays under the $10,000 USDC materiality.
+// Patch round 7 (O1, owner decision 2026-11-08): stablecoin USD materiality
+// applies to a shortfall only, so a surplus inside the band is governed by the
+// band upper alone. The in-band USDT is a Kraken-scale surplus: ledger
+// 10,000,000 at ratio 1.04, $400,000 above ledger and far over the $10,000
+// USDT materiality, and it must ALLOW (S01 fails if a surplus still escalates).
 export const VARIANTS = {
   inband: {
     id: 'FaoE2eReconInbd1',
@@ -129,7 +134,7 @@ export const VARIANTS = {
   ETH:  1050,
   SOL:  1050,
   USDC: 1006000,
-  USDT: 500000,
+  USDT: 10400000,
   XRP:  1020
 }`,
     ledger: `{
@@ -138,7 +143,7 @@ export const VARIANTS = {
   ETH:  1000,
   SOL:  1000,
   USDC: 1000000,
-  USDT: 500000,
+  USDT: 10000000,
   XRP:  1000
 }`,
     meta: `{
@@ -147,7 +152,7 @@ export const VARIANTS = {
   ETH:  { source: 'e2e_inband', notes: 'ratio 1.05 in band [1.00, 1.10]' },
   SOL:  { source: 'e2e_inband', notes: 'ratio 1.05 in band [1.00, 1.15]' },
   USDC: { source: 'e2e_inband', notes: 'ratio 1.006 in band [1.00, 1.05], above the old 1.005 upper (IC-38); $6,000 under the $10,000 materiality' },
-  USDT: { source: 'e2e_inband', notes: 'exact match' },
+  USDT: { source: 'e2e_inband', notes: 'ratio 1.04 in band [1.00, 1.05]; $400,000 surplus over the $10,000 materiality, ALLOW (O1: USD materiality is a shortfall test)' },
   XRP:  { source: 'e2e_inband', notes: 'ratio 1.02 in band [1.00, 1.10]' }
 }`,
   },
@@ -196,9 +201,13 @@ export const VARIANTS = {
     // Fix round 2 R08: a claim names the agent its workflow serves, so this
     // copy's Claim Run names the markup agent its runs are started for.
     agent: MARKUP_AGENT,
+    // Patch round 7 (O1): a stablecoin surplus inside the band now ALLOWs, so
+    // the USDT here is a shortfall of $67,890.50 (ratio 0.999945, below the
+    // 1.0000 floor): REQUIRE_HUMAN CRITICAL, which keeps S10 and S13 on the
+    // review path. Before O1 it was the in-band surplus 1234567890.50.
     wallet: `{
   BTC:  1100,
-  USDT: 1234567890.50
+  USDT: 1234432109.50
 }`,
     ledger: `{
   BTC:  1000,

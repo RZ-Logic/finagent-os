@@ -12,8 +12,8 @@
 --   FAO-GOV-008 (R06): claim locks the run row before the token row and
 --     checks the hash again; a token rotated by a replay is INVALID_TOKEN.
 --   FAO-GOV-001 (R07): every inputs key the database writes on some event
---     type is refused in Writer inputs, except the STARTED and FAILED
---     overwrites.
+--     type is refused in Writer inputs, except the Writer FAILED
+--     overwrites (patch round 7 O3: STARTED carries none of them).
 --   FAO-GOV-008 (R08): a token is claimed only by its own agent's workflow.
 --   FAO-GOV-008 (R09): n8n execution ids are unique only among RUNNING runs;
 --     fao_run_fail resolves an id to the unfinished run.
@@ -25,7 +25,7 @@
 -- user triggers disabled) come last so earlier cases do not depend on them.
 -- ============================================================================
 BEGIN;
-SELECT plan(74);
+SELECT plan(75);
 
 CREATE TEMP TABLE v (k text PRIMARY KEY, j jsonb);
 CREATE FUNCTION pg_temp.g(p_k text) RETURNS jsonb LANGUAGE sql AS $$ SELECT j FROM v WHERE k = p_k $$;
@@ -173,15 +173,18 @@ SELECT is((SELECT count(*) FROM r7 WHERE err LIKE '%item 0: inputs.' || k || ' i
 SELECT is(tests.ledger_count(pg_temp.c('r5'), 'ASSET_RECONCILED'), 3::bigint, 'R07: nothing was stored by the refused batches');
 SELECT is(tests.append(jsonb_build_array(pg_temp.asset_kv(pg_temp.c('r5'), 'XRP', '{"wallet_source": "x", "note": "free"}'::jsonb)))->>'ok', 'true',
   'R07: Writer keys outside the reserved list are still accepted');
--- STARTED: source refused; n8n_execution_id overwritten from the run record
+-- STARTED: source refused; n8n_execution_id refused too (patch round 7 O3)
+-- and set from the run record
 INSERT INTO v VALUES ('r7s', tests.start_run('aisha.okonkwo@finagent-os.demo'));
 SELECT is(tests.claim_raw(pg_temp.tok('r7s'), 'pgtap-142-r7s')->>'code', 'OK', 'R07: a run for the STARTED cases');
 SELECT matches(pg_temp.append_err(jsonb_build_array(jsonb_set(tests.started_event(pg_temp.c('r7s'), ARRAY['BTC']), '{inputs,source}', '"sweep"'))),
   'inputs\.source is set only by the database', 'R07: STARTED with inputs.source is refused');
-SELECT is(tests.append(jsonb_build_array(jsonb_set(tests.started_event(pg_temp.c('r7s'), ARRAY['BTC']), '{inputs,n8n_execution_id}', '"forged"'))) ->>'ok', 'true',
-  'R07: STARTED may carry n8n_execution_id');
+SELECT matches(pg_temp.append_err(jsonb_build_array(jsonb_set(tests.started_event(pg_temp.c('r7s'), ARRAY['BTC']), '{inputs,n8n_execution_id}', '"forged"'))),
+  'inputs\.n8n_execution_id is set only by the database', 'R07 (O3): STARTED with inputs.n8n_execution_id is refused');
+SELECT is(tests.append(jsonb_build_array(tests.started_event(pg_temp.c('r7s'), ARRAY['BTC']))) ->>'ok', 'true',
+  'R07: a STARTED without it is accepted');
 SELECT is((SELECT inputs->>'n8n_execution_id' FROM public.shadow_ledger WHERE correlation_id = pg_temp.c('r7s') AND inputs->>'event_type' = 'STARTED'),
-  'pgtap-142-r7s', 'R07: the STARTED n8n_execution_id is overwritten from the run record');
+  'pgtap-142-r7s', 'R07: the STARTED n8n_execution_id is set from the run record');
 -- A Writer FAILED keeps its overwrites; other reserved keys are refused
 SELECT matches(pg_temp.append_err(jsonb_build_array(jsonb_build_object('correlation_id', pg_temp.c('r7s'), 'event_type', 'FAILED',
                  'inputs', jsonb_build_object('failed_node', 'Writer', 'approval_url', 'https://evil.example/'),

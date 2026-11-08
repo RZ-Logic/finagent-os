@@ -35,7 +35,7 @@
       "account_count": 521038,
       "_provenance": "synthetic_anomaly",
       "_anomaly_control": "FAO-REC-002",
-      "_scenario": "Wallet exceeds ledger by $67,890.50. Ratio 1.0000549 within stablecoin band [1.0000, 1.0500], but absolute USD discrepancy exceeds USDT materiality threshold of $10,000. Triggers FAO-REC-002 stablecoin USD-materiality breach."
+      "_scenario": "Wallet exceeds ledger by $67,890.50. Ratio 1.0000549 within stablecoin band [1.0000, 1.0500]; the surplus is above the USDT materiality threshold of $10,000, but FAO-REC-002 stablecoin USD materiality applies to a shortfall only (owner decision 2026-11-08), so the outcome is ALLOW."
     },
     {
       "asset": "SOL",

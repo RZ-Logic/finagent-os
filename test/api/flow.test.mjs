@@ -43,6 +43,8 @@ test('start, claim, append, finalize, review and approve, in one correlation', a
   assert.equal(g.body.request.enforced_approvals, 1);
 
   const rowBefore = await one('SELECT to_jsonb(h) AS h FROM public.hitl_queue h WHERE hitl_id = $1', [hitlId]);
+  // Patch round 7 (O1): the in-band USDT surplus ALLOWs; ADA and SOL route the run to review.
+  assert.deepEqual(rowBefore.h.escalated_assets.map((a) => (a && typeof a === 'object' ? a.asset : a)).sort(), ['ADA', 'SOL']);
   const ledgerBefore = await ledgerTypes(corr);
   const g2 = await rpc('fao_hitl_get', { p_hitl_id: hitlId }, { token: sarah });
   const g3 = await rpc('fao_hitl_get', { p_hitl_id: hitlId }, { token: sarah });

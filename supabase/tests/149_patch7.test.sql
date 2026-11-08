@@ -18,7 +18,7 @@
 -- Characters are built with chr() so the file holds no escapes.
 -- ============================================================================
 BEGIN;
-SELECT plan(24);
+SELECT plan(26);
 
 CREATE TEMP TABLE v (k text PRIMARY KEY, j jsonb);
 CREATE FUNCTION pg_temp.g(p_k text) RETURNS jsonb LANGUAGE sql AS $$ SELECT j FROM v WHERE k = p_k $$;
@@ -115,14 +115,28 @@ INSERT INTO l1_started SELECT cp, pg_temp.append_err(jsonb_build_array(
 SELECT is((SELECT count(*) FROM l1_started WHERE e LIKE '%an inputs key at fixture_provenance.BTC holds whitespace or a control character'),
   18::bigint, 'L1: each character after the fixture provenance source key is refused');
 SELECT is(tests.ledger_count(pg_temp.c('l1'), 'ASSET_RECONCILED'), 0::bigint, 'L1: nothing was stored by the refused batches');
--- Residual (KNOWN-LIMITS U17): a Cyrillic look-alike is kept as its own key
-SELECT is(tests.append(jsonb_build_array(pg_temp.asset_with(pg_temp.c('l1'), 'ETH', ARRAY[chr(1077) || 'vent_type'], '"FAILED"')))->>'ok', 'true',
-  'L1 residual: a Cyrillic look-alike of event_type is accepted as an ordinary Writer key');
-SELECT is((SELECT (inputs->>'event_type') || '/' || (inputs->>(chr(1077) || 'vent_type'))
-             FROM public.shadow_ledger WHERE correlation_id = pg_temp.c('l1') AND inputs->>'asset' = 'ETH'),
-  'ASSET_RECONCILED/FAILED', 'L1 residual: the real event_type is unchanged; the look-alike sits beside it');
-SELECT is(tests.append(jsonb_build_array(pg_temp.asset_with(pg_temp.c('l1'), 'SOL', ARRAY['note_' || chr(233)], '"ok"')))->>'ok', 'true',
-  'L1: an ordinary non-ASCII letter in a key is still accepted');
+-- Patch round 8: every inputs key is plain ASCII, so a look-alike from
+-- another script is refused instead of stored beside the real key.
+SELECT is(pg_temp.append_err(jsonb_build_array(pg_temp.asset_with(pg_temp.c('l1'), 'ETH', ARRAY[chr(1077) || 'vent_type'], '"FAILED"'))),
+  '22023 FAO-GOV-001 ledger_append: item 0: an inputs key at the top level may hold only ASCII letters, digits, underscore or hyphen',
+  'R8: a Cyrillic look-alike of event_type is refused');
+SELECT is(pg_temp.append_err(jsonb_build_array(pg_temp.asset_with(pg_temp.c('l1'), 'ETH', ARRAY['threshold'], jsonb_build_object(chr(1072) || 'pprover_id', 'x')))),
+  '22023 FAO-GOV-001 ledger_append: item 0: an inputs key at threshold may hold only ASCII letters, digits, underscore or hyphen',
+  'R8: a nested Cyrillic look-alike of approver_id is refused');
+SELECT is(pg_temp.append_err(jsonb_build_array(pg_temp.asset_with(pg_temp.c('l1'), 'SOL', ARRAY['note_' || chr(233)], '"ok"'))),
+  '22023 FAO-GOV-001 ledger_append: item 0: an inputs key at the top level may hold only ASCII letters, digits, underscore or hyphen',
+  'R8: a non-ASCII letter in a key is refused');
+-- Patch round 8: the rest of the Default_Ignorable_Code_Point set and the
+-- interlinear annotation marks are refused with the whitespace message.
+CREATE TEMP TABLE r8_cp (cp int);
+INSERT INTO r8_cp VALUES (847), (1564), (6068), (6069), (8293), (8298), (8303), (65440), (65520), (65528),
+                         (65529), (65531), (113824), (113827), (119155), (119162), (917632), (917760), (917999), (921599);
+CREATE TEMP TABLE r8_top (cp int, e text);
+INSERT INTO r8_top SELECT cp, pg_temp.append_err(jsonb_build_array(pg_temp.asset_with(pg_temp.c('l1'), 'BTC', ARRAY['rea' || chr(cp) || 'son'], '"x"')))
+  FROM r8_cp;
+SELECT is((SELECT count(*) FROM r8_top WHERE e = '22023 FAO-GOV-001 ledger_append: item 0: an inputs key at the top level holds whitespace or a control character'),
+  20::bigint, 'R8: each of the 20 further default-ignorable or annotation characters is refused');
+SELECT is(tests.ledger_count(pg_temp.c('l1'), 'ASSET_RECONCILED'), 0::bigint, 'R8: nothing was stored by the refused batches');
 
 -- ============================================================================
 -- L4: the rate limit window is real time

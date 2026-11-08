@@ -1480,7 +1480,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.fao_maintenance_sweep() IS
-  'FAO-GOV-004, FAO-GOV-007, FAO-GOV-008, FAO-GOV-015: the five-minute sweep. Expires unclaimed run tokens and overdue requests (HITL_EXPIRED as the expiry record, followed by one escalation, COMMIT_BLOCKED when the audit chain is incomplete; never COMMITTED), fails stale runs, lists notifications that are due, and reports privilege drift and any test clock offset. One failing item never stops the others.';
+  'FAO-GOV-004, FAO-GOV-007, FAO-GOV-008, FAO-GOV-015: the five-minute sweep. Expires unclaimed run tokens and overdue requests (HITL_EXPIRED as the expiry record, which can be followed by one escalation, COMMIT_BLOCKED when the audit chain is incomplete; never COMMITTED), fails stale runs, lists notifications that are due, and reports privilege drift and any test clock offset. One failing item never stops the others.';
 
 -- ----------------------------------------------------------------------------
 -- 7. Revoke every function in this file from every client role. 0017 grants:

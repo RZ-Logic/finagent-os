@@ -847,13 +847,12 @@ BEGIN
       -- U+200F), bidi embeddings and isolates (U+202A to U+202E, U+2066 to
       -- U+2069), word joiner and invisible operators (U+2060 to U+2064),
       -- Braille blank (U+2800), variation selectors (U+FE00 to U+FE0F),
-      -- byte order mark, and tag characters (U+E0000 to U+E007F). The
-      -- reserved match then folds case and Unicode compatibility forms
-      -- (NFKC, so full-width letters match). Letters from other scripts that
-      -- look Latin (Cyrillic U+0435 for "e") are not folded: such a key is
-      -- kept as an ordinary Writer key and cannot replace a database-set
-      -- key (KNOWN-LIMITS U17).
-      IF v_key ~ '[[:space:][:cntrl:]\u0085\u00a0\u00ad\u115f\u1160\u1680\u180b-\u180f\u2000-\u200f\u2028-\u202f\u205f-\u2064\u2066-\u2069\u2800\u3000\u3164\ufe00-\ufe0f\ufeff\U000e0000-\U000e007f]' THEN
+      -- byte order mark, and tag characters (U+E0000 to U+E007F). Patch
+      -- round 8 widens the list to every Unicode Default_Ignorable_Code_Point
+      -- (U+034F, U+061C, U+17B4, U+17B5, U+2060 to U+206F, U+FFA0, U+FFF0 to
+      -- U+FFF8, U+1BCA0 to U+1BCA3, U+1D173 to U+1D17A, U+E0000 to U+E0FFF)
+      -- plus the interlinear annotation marks U+FFF9 to U+FFFB.
+      IF v_key ~ '[[:space:][:cntrl:]\u0085\u00a0\u00ad\u034f\u061c\u115f\u1160\u1680\u17b4\u17b5\u180b-\u180f\u2000-\u200f\u2028-\u202f\u205f-\u206f\u2800\u3000\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff0-\ufffb\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0000-\U000e0fff]' THEN
         RAISE EXCEPTION 'FAO-GOV-001 ledger_append: item %: an inputs key at % holds whitespace or a control character', v_i,
           coalesce(nullif(left(regexp_replace(array_to_string(v_path, '.'), '[[:cntrl:]]', ' ', 'g'), 200), ''), 'the top level')
           USING ERRCODE = '22023';
@@ -864,6 +863,18 @@ BEGIN
                   AND v_key = 'source') THEN
         RAISE EXCEPTION 'FAO-GOV-001 ledger_append: item %: inputs.% is set only by the database', v_i,
           left(regexp_replace(array_to_string(v_path || v_key, '.'), '[[:cntrl:]]', ' ', 'g'), 200)
+          USING ERRCODE = '22023';
+      END IF;
+      -- Patch round 8: every inputs key at any depth is plain ASCII (letters,
+      -- digits, underscore, hyphen). This closes look-alike keys from other
+      -- scripts (Cyrillic U+0430 in "approver_id", for example), which NFKC
+      -- does not fold and which could read as a database-set fact in a raw
+      -- evidence export. The reserved match below still folds case and
+      -- compatibility forms (NFKC, so full-width letters match) and runs first,
+      -- so a full-width reserved name keeps the reserved-key message.
+      IF v_key !~ '^[A-Za-z0-9_-]+$' THEN
+        RAISE EXCEPTION 'FAO-GOV-001 ledger_append: item %: an inputs key at % may hold only ASCII letters, digits, underscore or hyphen', v_i,
+          coalesce(nullif(left(regexp_replace(array_to_string(v_path, '.'), '[[:cntrl:]]', ' ', 'g'), 200), ''), 'the top level')
           USING ERRCODE = '22023';
       END IF;
     END LOOP;

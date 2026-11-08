@@ -205,8 +205,10 @@ COMMENT ON FUNCTION fao_private.grants_drift() IS
 -- ----------------------------------------------------------------------------
 -- 4. The one new grant (dual approval 2.6)
 -- ----------------------------------------------------------------------------
--- Approvals: members read under RLS (has_any_role); written only by
--- fao_hitl_decide.
+-- Approvals: members read under RLS (has_any_role); client roles can write
+-- hitl_approvals only through fao_hitl_decide; an owner-class session that
+-- sets its own JWT claims can act as any eligible approver, which is outside
+-- the control (FAO-GOV-001).
 GRANT SELECT ON TABLE public.hitl_approvals TO authenticated;
 
 -- ----------------------------------------------------------------------------

@@ -9,7 +9,7 @@ Each client function takes that one JSON body and validates it in the database (
 
 The page holds no authority of its own. The database takes the approver's identity from the session, refuses a decision on a run the person started (`SOD_SELF_APPROVAL`), refuses decisions after the deadline, decides which approvals count (dual approval, ADR-0004), and journals every refusal. There is no n8n step and no service key in the decision path.
 
-**Status:** built and unit-tested on the branch `phase2-5-core-2026-11-07`; not deployed. Live still uses the v1 n8n approval endpoints until the cutover. The whole manual check below (steps 1 to 15) was done for this build on 2026-11-08 against the local stack, in the built-in Chromium browser of the Claude desktop app, driven by Claude Code (an AI agent) rather than by a person with seed test users (`phase2-5/RUNS.md`, dual approval fix rounds 1 and 2); there is no automated browser test.
+**Status:** built and unit-tested on the branch `phase2-5-core-2026-11-07`; not deployed. Live still uses the v1 n8n approval endpoints until the cutover. The whole manual check below (steps 1 to 15; step 5 by Marcus on a STANDARD request made with `tests.make_request`, `phase2-5/RUNS.md` dual approval fix round 2) was done for this build on 2026-11-08 against the local stack, in the built-in Chromium browser of the Claude desktop app, driven by Claude Code (an AI agent) rather than by a person with seed test users (`phase2-5/RUNS.md`, dual approval fix rounds 1 and 2); there is no automated browser test.
 
 ## Files
 

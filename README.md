@@ -207,7 +207,7 @@ npm test             # every layer; npm run test:offline runs the first three on
 | `api` | Real sign-ins against the local Supabase API: SoD, spoofed identity, direct writes, body checks, status codes |
 | `e2e` | A fresh n8n 2.46.6 in Docker with a mock Slack: the exports are imported, published and run for real (scenarios S01 to S27) |
 
-The last full run (2026-11-08 06:04 UTC, dual approval fix round 2, the dual approval tree on top of commit `e12f7d1`, not yet committed, fresh reset) passed every layer, with nothing skipped:
+The last full run (2026-11-08 17:29 UTC, after the dual approval doc fixes, on top of commit `41e11cc`, fresh reset; the same totals as the 06:04 UTC fix round 2 run) passed every layer, with nothing skipped:
 
 | exports | node | pytest | pgtap | api | e2e | total |
 |---:|---:|---:|---:|---:|---:|---:|
@@ -217,7 +217,7 @@ The last full run (2026-11-08 06:04 UTC, dual approval fix round 2, the dual app
 
 **CI.** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs the same command in four jobs (static, mcp, db, e2e) on pinned versions. It has not yet run on GitHub, so there is no status badge yet.
 
-**Manual page check.** There is no automated browser test of the approval page, in CI or locally. Its sign-in and decision flow is checked by hand once per release: no session, invoker view (no buttons), approver decision, reload, an invalid link, and no CSP report in the console; on a two-approval request, a first approval that is recorded but not committed, then a second approver's decision. For this branch the whole check (steps 1 to 15 of [`approval-app/README.md`](approval-app/README.md)) was done on 2026-11-08 against the local stack, in the built-in Chromium browser of the Claude desktop app, driven by Claude Code (an AI agent) rather than by a person with seed test users (phase 2-5 RUNS.md, dual approval fix rounds 1 and 2).
+**Manual page check.** There is no automated browser test of the approval page, in CI or locally. Its sign-in and decision flow is checked by hand once per release: no session, invoker view (no buttons), approver decision, reload, an invalid link, and no CSP report in the console; on a two-approval request, a first approval that is recorded but not committed, then a second approver's decision. For this branch the whole check (steps 1 to 15 of [`approval-app/README.md`](approval-app/README.md); step 5 by Marcus on a STANDARD request made with `tests.make_request`, phase 2-5 RUNS.md dual approval fix round 2) was done on 2026-11-08 against the local stack, in the built-in Chromium browser of the Claude desktop app, driven by Claude Code (an AI agent) rather than by a person with seed test users (phase 2-5 RUNS.md, dual approval fix rounds 1 and 2).
 
 These are local results. Nothing here has run against the live stack.
 

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Accepted pending owner sign-off. Built and tested locally on branch `phase2-5-core-2026-11-07` (dual approval run 0, 2026-11-08; run again after fix rounds 1 and 2, the last at 2026-11-08T06:04:54Z with 2313 of 2313 passing); not deployed. Live runs v1 until a landing path has run and its smoke passed. |
+| **Status** | Accepted pending owner sign-off. Built and tested locally on branch `phase2-5-core-2026-11-07` (dual approval run 0, 2026-11-08; run again after fix rounds 1 and 2, fix round 2 at 2026-11-08T06:04:54Z with 2313 of 2313 passing, and again after the doc fixes at 2026-11-08T17:29:49Z, 2313 of 2313); not deployed. Live runs v1 until a landing path has run and its smoke passed. |
 | **Date** | 2026-11-08 |
 | **Author** | Rizwan Ahmed, ACCA · Velocyt Consulting |
 | **Supersedes** | [ADR-0001](0001-dual-approval-not-yet-enforced.md) |

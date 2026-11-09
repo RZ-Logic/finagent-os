@@ -14,8 +14,8 @@
   <a href="https://n8n.io"><img src="https://img.shields.io/badge/Built_with-n8n-EA4B71?style=for-the-badge&logo=n8n&logoColor=white" alt="n8n"/></a>
   <a href="https://supabase.com"><img src="https://img.shields.io/badge/Database-Supabase-3FCF8E?style=for-the-badge&logo=supabase&logoColor=white" alt="Supabase"/></a>
   <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-Self_Audited-blueviolet?style=for-the-badge" alt="MCP Self-Audited"/></a>
-  <img src="https://img.shields.io/badge/AI_Authority-None_(v1)-2A9D4A?style=for-the-badge" alt="AI Authority: None"/>
-  <img src="https://img.shields.io/badge/Status-v1.0-orange?style=for-the-badge" alt="Status v1.0"/>
+  <img src="https://img.shields.io/badge/AI_Authority-None-2A9D4A?style=for-the-badge" alt="AI Authority: None"/>
+  <img src="https://img.shields.io/badge/Status-v2.0_live-2A9D4A?style=for-the-badge" alt="Status v1.0"/>
 </p>
 
 <p align="center">
@@ -47,7 +47,7 @@ The flagship workflow is a Reserve Reconciliation Agent calibrated to crypto-exc
 >
 > - **Approval page:** live at [approve.velocyt.ca](https://approve.velocyt.ca) (Cloudflare Pages, CSP enforced). The v1 n8n approval handler is archived; its webhooks return 404.
 > - **Database and workflows:** migrations `0009` to `0020` applied; the five production workflows run on n8n 2.46.6 as the `fao_workflow` role, and a re-export after the cutover equals the repo exports.
-> - **Two-approval CRITICAL review, proven by the live smoke run:** a run started through the MCP as Aisha opened a CRITICAL request with 2 enforced approvals; her own approval was refused with `SOD_SELF_APPROVAL` and journaled; Sarah and then Marcus approved on the approval page; the ledger chain ended in COMMITTED and the MCP shows 2 of 2 approvals. A second request, started by mistake, was closed by one rejection. The owner entered both approvals and the rejection, signed in as each demo identity in turn, so the smoke proves two distinct identities on live, not two people (DL-8).
+> - **Two-approval CRITICAL review, proven by the live smoke run:** a run started through the MCP as Aisha opened a CRITICAL request with 2 enforced approvals; her own approval was refused with `SOD_SELF_APPROVAL` and journaled; Sarah and then Marcus approved on the approval page; the ledger chain ended in COMMITTED and the MCP shows 2 of 2 approvals. A second request, started by mistake, was closed by one rejection. The owner entered both approvals and the rejection, signed in as each demo identity in turn, so the smoke proves two distinct identities on live, not two people.
 > - **Credentials:** the legacy `anon` and `service_role` keys are disabled, the legacy JWT secret is revoked, the `postgres` password was rotated, and the project has no secret API key (the FinAgent runtime needs none; the cutover used one to provision users and then deleted it). A security smoke confirmed that the old keys and the old password are refused.
 > - **Still open:** wallet and ledger data are fixtures, there is no second factor yet, and the other items under [Known Limitations](#-known-limitations) stand.
 
@@ -57,11 +57,11 @@ The flagship workflow is a Reserve Reconciliation Agent calibrated to crypto-exc
 
 > **AI is optional and non-authoritative. Policy decisions are deterministic.**
 
-Every material financial decision in FinAgent OS is enforced by deterministic rules: Postgres triggers, n8n IF nodes, JS decision matrices that an auditor can read top-to-bottom. From v1.1, AI assists human judgment at narrative boundaries (summarizing decisions for human approvers, surfacing drift signals in retrospective audits). AI never produces a control outcome.
+Every material financial decision in FinAgent OS is enforced by deterministic rules: Postgres triggers, n8n IF nodes, JS decision matrices that an auditor can read top-to-bottom. Once the AI advisory layer ships, AI assists human judgment at narrative boundaries (summarizing decisions for human approvers, surfacing drift signals in retrospective audits). AI never produces a control outcome.
 
 The complete enumeration, with every decision point in the system classified deterministic vs. advisory, lives in **[`SOX-MAPPING.md`](./SOX-MAPPING.md)** under the *"Where is the AI?"* table.
 
-**What v1 shows:** no AI call exists anywhere in the v1 policy path, and `agent_registry.ai_advisory_enabled` defaults to FALSE. The `FAO_AI_ASSIST_ENABLED` flag that will gate the v1.1 advisory layer is not yet wired. Every v1 decision is reproducible by reading the migration files, seeds and the flagship workflow. The same holds for the November 2026 release, live since 2026-11-09, where the run rollup and the request moved into SQL (`fao_run_finalize`).
+**What v1 shows:** no AI call exists anywhere in the v1 policy path, and `agent_registry.ai_advisory_enabled` defaults to FALSE. The `FAO_AI_ASSIST_ENABLED` flag that will gate the planned advisory layer is not yet wired. Every v1 decision is reproducible by reading the migration files, seeds and the flagship workflow. The same holds for the November 2026 release, live since 2026-11-09, where the run rollup and the request moved into SQL (`fao_run_finalize`).
 
 ---
 
@@ -149,8 +149,8 @@ Counts are from the tree at commit `c9c2fc0`, the commit deployed at the 2026-11
 | **Three stub agents** | Close Orchestrator (AMBER), Variance Analyzer (AMBER), Treasury Monitor (RED). Registered before built. | None |
 | **MCP server** | Python FastMCP. 6 read tools + 1 bounded invoke. Reads as a dedicated reader user; invoke calls `fao_run_start` with a human invoker's own session. **No mutation tools by design.** | Read access only |
 | **Demo identities** | Sarah Chen (Controller) ← Aisha Okonkwo (FP&A); Sarah → Marcus Patel (CFO). Linear escalation chain. Application roles (invoker, approver, admin, reader) are granted in `fao_user_roles`. | None |
-| **AI advisory layer** | Roadmap (v1.1). Gated by `FAO_AI_ASSIST_ENABLED`. Populates `ai_human_brief`. | Advisory only (when shipped) |
-| **Weekly Rubric Audit** (FAO-GOV-012) | Roadmap (v1.1). Cron job aggregating 7-day drift signals. | Advisory only (when shipped) |
+| **AI advisory layer** | Planned. Gated by `FAO_AI_ASSIST_ENABLED`. Populates `ai_human_brief`. | Advisory only (when shipped) |
+| **Weekly Rubric Audit** (FAO-GOV-012) | Planned. Cron job aggregating 7-day drift signals. | Advisory only (when shipped) |
 
 Full control matrix lives in [`SOX-MAPPING.md`](./SOX-MAPPING.md).
 
@@ -172,7 +172,7 @@ The decision matrix is deterministic: 7 rules evaluated top-down, first match wi
 |-------|------|-----|
 | Database + Auth + RLS | Supabase (Postgres; local tests run on 17) | Triggers, RLS and SECURITY DEFINER functions at the database layer; identity from Supabase Auth sessions (`auth.uid()`) |
 | Workflow orchestration | n8n (self-hosted, DigitalOcean) | Visual policy logic auditors can read; sub-workflows for governance enforcement boundaries. Connects as the `fao_workflow` role, which can only run the workflow functions and read thresholds. The live n8n and the e2e layer both run 2.46.6 (live was upgraded from 2.44.5 at the cutover) |
-| AI advisory (gated, v1.1) | Claude API | Plain-English narrative summaries for human approvers; never on the authority path |
+| AI advisory (gated, planned) | Claude API | Plain-English narrative summaries for human approvers; never on the authority path |
 | MCP server | Python 3.12 + FastMCP + httpx | Read + bounded-invoke surface for AI consumers; stdio transport |
 | HITL approval channel | Slack notice with a link to the static approval page (`approval-app/`) | The approver signs in and decides with their own session through `fao_hitl_decide`. Separate from the MCP surface, which has no tool that calls it. The v1 n8n approval handler was archived at the 2026-11-09 cutover; its webhooks return 404 |
 | Approval enforcement | `fao_hitl_decide` plus the `hitl_queue_guard_stmt` and `hitl_queue_guard_row` triggers (migration 0013) | Self-approval is refused with `SOD_SELF_APPROVAL` and journaled; decided rows cannot change; any direct write to `hitl_queue` by a non-owner role is refused. Replaces the v1 `hitl_queue_sod_guard` trigger, which 0013 drops |
@@ -261,7 +261,7 @@ A change without a reason is refused, and every changed row is audited with the 
 | Principle | How it works |
 |-----------|--------------|
 | **Append-only is a database constraint, not a convention** | Since the cutover UPDATE, DELETE, TRUNCATE and direct INSERT on `shadow_ledger` are refused for every application role, and rows are appended only through database functions with database-set timestamps. RLS lets members read and gives no client a write policy. The database owner can still disable or drop a trigger, so it is not administrator-proof. |
-| **AI never on the authority path** | Policy outcomes are computed by deterministic rules. No AI call exists in the code; from v1.1, AI produces narrative *after* the decision is made and recorded, so policy outcomes do not depend on it. |
+| **AI never on the authority path** | Policy outcomes are computed by deterministic rules. No AI call exists in the code; once the advisory layer ships, AI produces narrative *after* the decision is made and recorded, so policy outcomes do not depend on it. |
 | **The Agent Registry gates every run** | Since the cutover `fao_run_start` refuses a run unless the agent is ACTIVE and under its hourly run limit, and copies the risk tier from the registry onto the run. The registry also supplies the SLA for requests and stale runs. Each registry row specifies risk tier, named process owner, SOX control IDs, rollback procedure, and data sources. Stubs exist in the registry to show the framework precedes the code. |
 | **Loud rejection > silent rejection** | Refusals are named and recorded: the database functions return a fixed result code and journal the refusal in the same transaction (a few read answers, such as NOT_FOUND, are not journaled), and the guard triggers raise `FAO-GOV-...` exceptions. Migration 0005c set this course in v1 by removing an RLS policy that returned zero rows. |
 | **Channel separation defends in depth** | The MCP surface and the approval page share no transport, and no MCP tool calls `fao_hitl_decide`. The MCP reads as a dedicated reader user, and the database refuses a decision from anyone but an approver for the agent who is not the run's invoker. |
@@ -341,7 +341,7 @@ FinAgent OS has run on the live stack since 9 November 2026. This section lists 
 
 ### What the live system runs on
 
-- **Sample balances, not real data.** Wallet balances (standing in for Fireblocks) and ledger balances (standing in for NetSuite) are fixed sample data inside the flagship workflow. No live connector exists, so live runs show the controls working, not real reserves. Live connectors are a v2 item.
+- **Sample balances, not real data.** Wallet balances (standing in for Fireblocks) and ledger balances (standing in for NetSuite) are fixed sample data inside the flagship workflow. No live connector exists, so live runs show the controls working, not real reserves. Live connectors are planned.
 - **One agent is built.** Only the Reserve Reconciliation agent has a workflow. Close Orchestrator, Variance Analyzer and Treasury Monitor are registered with their governance metadata, but they are placeholders: the database refuses to start them and records the refusal.
 - **Not every control is complete.** Of the 24 controls in `SOX-MAPPING.md`, 11 are live, 7 are partial and 6 are planned. The planned ones are the AI-advisory controls and the rollback engine. A rejected request is recorded as rolled back, but nothing is staged or reversed.
 - **Reserves are checked asset by asset.** No total reserve ratio is computed across assets, and no single audit evidence package is assembled. The records of a run are retrieved by its correlation id.
@@ -382,16 +382,16 @@ Planned work for these items is in the [Roadmap](#%EF%B8%8F-roadmap).
 
 ## 🗺️ Roadmap
 
-- [ ] **v1.1: AI advisory wiring (`FAO_AI_ASSIST_ENABLED=true`).** Claude API integration in the flagship producing `ai_human_brief` for HITL approvers. Gated, read-only on the policy path, with input sanitization for fixture-provenance fields. Ships with its own ADR documenting the threat model.
+- [ ] **Next: AI advisory wiring (`FAO_AI_ASSIST_ENABLED=true`).** Claude API integration in the flagship producing `ai_human_brief` for HITL approvers. Gated, read-only on the policy path, with input sanitization for fixture-provenance fields. Ships with its own ADR documenting the threat model.
 - [x] **Go-live of the November 2026 release.** Done 2026-11-09 (UTC): migrations, workflows, approval page and MCP reader user deployed to the live stack at commit `c9c2fc0`, with the live-only checks done step by step and a functional and a security smoke run on live.
 - [x] **Later: Dual approval.** Live since 2026-11-09 ([ADR-0004](docs/adr/0004-dual-approval-enforced.md), closes ADR-0001): CRITICAL review needs the registry count of approvals (two for RED), each through a qualifying approver grant; it landed with the cutover, and the live smoke run's CRITICAL request was committed only after two approvals. Named approver roles are not modelled (DL-1).
 - [ ] **Later: TOTP second factor, journal for refused direct writes, automated browser test of the approval page, command-line tools.** Deferred to a later release (see [Known Limitations](#-known-limitations)).
-- [ ] **v1.1: Weekly Rubric Audit (FAO-GOV-012).** Cron-scheduled n8n job. Aggregates HITL count by asset, ratio variance, approval-time distribution. AI advisory narrative section gated by feature flag.
+- [ ] **Next: Weekly Rubric Audit (FAO-GOV-012).** Cron-scheduled n8n job. Aggregates HITL count by asset, ratio variance, approval-time distribution. AI advisory narrative section gated by feature flag.
 - [ ] **v1.2: HTTP transport for MCP server.** Streamable HTTP per MCP spec, behind Caddy at `mcp.velocyt.ca`, with OAuth 2.1 per-user identity (not demo emails).
-- [ ] **v1.2: Comparator landscape.** Direct comparison against Microsoft Agent Governance Toolkit, SOXAgent.com, Zenity, ChatFin, OPA. Ships once the three stubs are real (v2 milestone).
-- [ ] **v2: Three stubs → real implementations.** Close Orchestrator, Variance Analyzer, Treasury Monitor. Each lands as its own workflow with module-specific control IDs (FAO-CLS, FAO-VAR, FAO-TRE).
-- [ ] **v2: Fireblocks + NetSuite live connectors.** Move from fixture-backed to telemetry-backed. Brings real data integrity concerns into scope (rate limits, schema drift, partial reads).
-- [ ] **v2+: Multi-agent coordination layer.** Cross-agent handoffs, shared correlation IDs across executions, dependency graphs. Treasury Monitor → Variance Analyzer → Close Orchestrator as a worked example.
+- [ ] **v1.2: Comparator landscape.** Direct comparison against Microsoft Agent Governance Toolkit, SOXAgent.com, Zenity, ChatFin, OPA. Ships once the three stubs are real (a later milestone).
+- [ ] **Later: Three stubs → real implementations.** Close Orchestrator, Variance Analyzer, Treasury Monitor. Each lands as its own workflow with module-specific control IDs (FAO-CLS, FAO-VAR, FAO-TRE).
+- [ ] **Later: Fireblocks + NetSuite live connectors.** Move from fixture-backed to telemetry-backed. Brings real data integrity concerns into scope (rate limits, schema drift, partial reads).
+- [ ] **Later: Multi-agent coordination layer.** Cross-agent handoffs, shared correlation IDs across executions, dependency graphs. Treasury Monitor → Variance Analyzer → Close Orchestrator as a worked example.
 
 ---
 

@@ -1,15 +1,15 @@
-# Fixtures — Reserve Reconciliation Agent
+# Fixtures: Reserve Reconciliation Agent
 
 Test fixtures for `fao_reserve_recon_v1`. Two paired files form a single
 reconciliation snapshot:
 
-- `wallet_data.json` — simulated on-chain wallet holdings (Fireblocks proxy)
-- `ledger_data.json` — simulated internal client-liability ledger (NetSuite proxy)
+- `wallet_data.json`: simulated on-chain wallet holdings (Fireblocks proxy)
+- `ledger_data.json`: simulated internal client-liability ledger (NetSuite proxy)
 
 In production these come from Fireblocks REST API and NetSuite General
 Ledger saved searches respectively. Inline JSON for the smoke test isolates
 the policy logic from data-source plumbing. The workflow does not read these
-files: `Init Execution` uses inline constants equal to them. Since round 5
+files: `Init Execution` uses inline constants equal to them. Since a fix during the build,
 ADA's wallet balance is 47,293,847 in both (`wallet_data.json` used to say
 47,293,847.92; the inline value, which the recorded runs used, was kept).
 `test/node/fixtures.test.mjs` runs `Init Execution` and fails unless its
@@ -87,11 +87,11 @@ Source: https://blog.kraken.com/news/december-2025-proof-of-reserves
 | ADA   | 102.2%                     |
 
 Notable: Kraken's BTC ratio shifted materially from 114.9% (March 2025) to
-100.3% (December 2025) — a documented buffer-reserve tightening. The
+100.3% (December 2025), a documented buffer-reserve tightening. The
 agent's BTC fixture reflects this current state.
 
 Stablecoins: the seeded USDC and USDT `ratio_band_upper` is 1.05
-(`supabase/seeds/0006_materiality_thresholds_seed.sql`, IC-38), following
+(`supabase/seeds/0006_materiality_thresholds_seed.sql`), following
 the owner's decision of 2026-11-07 that stablecoin reserves are held near
 105%. The floor and band lower stay at 1.00. A stablecoin ratio up to and
 including 1.05 is in band; above 1.05 it hits rule 4, ABOVE_BAND_UPPER, and

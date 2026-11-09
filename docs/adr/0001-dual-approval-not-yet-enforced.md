@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Superseded by ADR-0004 (2026-11-08): dual approval was built and tested on branch `phase2-5-core-2026-11-07` and deployed 2026-11-09. Kept as the record. |
+| **Status** | Superseded by ADR-0004 (2026-11-08): dual approval was built and tested locally and deployed 2026-11-09. Kept as the record. |
 | **Date** | 2026-04-25 (decision); 2026-11 (update) |
 | **Discovered by** | Claude Opus, via MCP self-audit ([transcript](https://claude.ai/share/5f0eb294-e658-42b5-a876-8164a0049960)) |
 | **Author** | Rizwan Ahmed, ACCA · Velocyt Consulting |
@@ -17,9 +17,9 @@
 ## Where things stand (2026-11)
 
 - **Live** ran v1 until the cutover finished on 2026-11-09. Everything in v1's description below is what the live system did until then.
-- **The phases 2 to 5 core** was built and tested on the branch `phase2-5-core-2026-11-07` (local Supabase and a local n8n) and deployed to live on 2026-11-09. It binds the invoker and the approver to their own Supabase Auth sessions. At the time of the core build (2026-11-07) it did not enforce dual approval.
-- **At the time of the core build, dual approval was excluded from the core.** It was the last planned edit. The core left the hooks for it (see "How dual approval plugs in later"); no part of it was built then.
-- **Dual approval was built on the branch (2026-11-08, [ADR-0004](0004-dual-approval-enforced.md)) and deployed with the core on 2026-11-09.** CRITICAL review needs the configured count (two for the RED flagship) from different approvers, never the invoker, each through an approver grant made before the request, not by the invoker and not by another approver of it; one rejection closes the request.
+- **The November 2026 release** was built and tested locally (local Supabase and a local n8n) and deployed to live on 2026-11-09. It binds the invoker and the approver to their own Supabase Auth sessions. When its identity work was built (2026-11-07), it did not enforce dual approval.
+- **At that point, dual approval was not yet part of the release.** It was the last planned edit. The identity work left the hooks for it (see "How dual approval plugs in later"); no part of it was built then.
+- **Dual approval was built and tested locally (2026-11-08, [ADR-0004](0004-dual-approval-enforced.md)) and deployed with the rest of the release on 2026-11-09.** CRITICAL review needs the configured count (two for the RED flagship) from different approvers, never the invoker, each through an approver grant made before the request, not by the invoker and not by another approver of it; one rejection closes the request.
 
 The 2026-04-25 context and decision are kept below as the record. The v1.1 implementation sketch that used to follow them has been removed, because its design no longer fits the schema (see the addendum). The earlier text is in git history.
 
@@ -121,27 +121,27 @@ Dual approval is not a one-line fix. It needs a record of each approval, a count
 
 ---
 
-## Identity and segregation of duties in the phases 2 to 5 core
+## Identity and segregation of duties in the November 2026 release
 
-This is what the core does. It was tested locally (pgTAP, API, MCP, unit and n8n end-to-end layers) and deployed on 2026-11-09 together with dual approval, which changes the approval counts below ([ADR-0004](0004-dual-approval-enforced.md)).
+This is what the release does. It was tested locally (pgTAP, API, MCP, unit and n8n end-to-end layers) and deployed on 2026-11-09 together with dual approval, which changes the approval counts below ([ADR-0004](0004-dual-approval-enforced.md)).
 
 ### Invoker
 
 - A run starts through `fao_run_start`. The invoker is the signed-in Supabase Auth user (`auth.uid()`); no identity is taken from a payload. The caller must be an active process owner holding the `invoker` role for the agent.
-- The risk tier is copied from the registry; the registry status, tier and per-hour rate limit are checked at run start. A replay of an idempotency key whose run expired is refused EXPIRED and counts toward the same per-hour limit; over the limit it is refused RATE_LIMITED (patch round 6, P5).
+- The risk tier is copied from the registry; the registry status, tier and per-hour rate limit are checked at run start. A replay of an idempotency key whose run expired is refused EXPIRED and counts toward the same per-hour limit; over the limit it is refused RATE_LIMITED.
 - The start returns a single-use run token, stored only as its hash. The n8n flagship claims the run with that token (`fao_run_claim`), so a run cannot start in n8n without a database run record.
-- The invoker fields on the STARTED ledger row are set by the database from the run record. A STARTED event whose inputs carry `invoker_id`, `invoked_via`, `reason` or `n8n_execution_id` (at any depth, under any normalised spelling) is refused `INVALID_INPUT` and nothing is written; the flagship sends none of them (owner decision 2026-11-08, patch round 7, O3).
+- The invoker fields on the STARTED ledger row are set by the database from the run record. A STARTED event whose inputs carry `invoker_id`, `invoked_via`, `reason` or `n8n_execution_id` (at any depth, under any normalised spelling) is refused `INVALID_INPUT` and nothing is written; the flagship sends none of them (owner decision 2026-11-08).
 
 ### Approver
 
 - A decision is recorded only through `fao_hitl_decide`. The approver is the signed-in user (`auth.uid()`), who must hold the `approver` role for the agent.
 - The invoker is refused (`SOD_SELF_APPROVAL`, 403). The row guard on `hitl_queue` re-checks this for every role, the database owner included, and the CHECK `hitl_no_self_approval` keeps `approver_id <> agent_invoker_id` on new rows (it is `NOT VALID`, so v1 history rows are not rechecked).
-- A decision at or after the deadline is refused. A decided request cannot be changed by any role. A request left undecided past its deadline is expired by the sweep: HITL_EXPIRED is its expiry record (a HITL_ESCALATED row, or COMMIT_BLOCKED on a broken chain, can follow it) and no COMMITTED row is written (patch round 6, P3).
+- A decision at or after the deadline is refused. A decided request cannot be changed by any role. A request left undecided past its deadline is expired by the sweep: HITL_EXPIRED is its expiry record (a HITL_ESCALATED row, or COMMIT_BLOCKED on a broken chain, can follow it) and no COMMITTED row is written.
 - The decision, its HITL_RESOLVED ledger row and the COMMITTED (or COMMIT_BLOCKED) row are written in one transaction. Refusals the function returns are recorded in the refusal journal (above a per-minute cap, one marker row per minute).
 - An APPROVED decision is not committed when the agent is no longer ACTIVE (`AGENT_NOT_ACTIVE`) or the run's invoker is no longer an active owner holding the invoker grant (`INVOKER_NOT_ACTIVE`). The decision stands, COMMIT_BLOCKED is written and the run is FAILED. The same invoker check runs at finalize.
 - The v1 path is retired: `fao_hitl_resolve` now raises `FAO-GOV-004 fao_hitl_resolve is superseded by fao_hitl_decide`, and the v1 trigger `hitl_queue_sod_guard` is dropped in favour of the guards above.
 
-### Approval counts at the core build (2026-11-07, before ADR-0004)
+### Approval counts before dual approval (2026-11-07)
 
 - Each request freezes `configured_approvals` (the registry's `approval_threshold` at request time: 2 for the flagship) and `enforced_approvals` (always 1 at the time).
 - HITL_RESOLVED carries `approvers[]` (one element at the time) and both counts, and its rationale reads `approvals enforced 1 of configured 2` for the flagship. The gap was visible on every request decided before ADR-0004.
@@ -158,7 +158,7 @@ This is what the core does. It was tested locally (pgTAP, API, MCP, unit and n8n
 
 ## How dual approval plugs in later
 
-Not built in the core (2026-11-07); [ADR-0004](0004-dual-approval-enforced.md) records how it was built on these hooks. The core leaves these hooks so dual approval adds code without reworking it:
+Not built with the identity work (2026-11-07); [ADR-0004](0004-dual-approval-enforced.md) records how it was built on these hooks. That work left these hooks so dual approval adds code without reworking it:
 
 - **Identity:** every decision is keyed by the approver's own session, so two approvals are two distinct user ids.
 - **Counts:** `configured_approvals` and `sub_tier` are already frozen on every request. The dual-approval migration sets `enforced_approvals` from its rule for new requests; requests still PENDING when it lands keep 1.
@@ -190,7 +190,7 @@ Two external reviews of v1 (November 2026) found that several statements in this
 
 ### Statements that are not accurate as of v1
 
-The root cause is the same for each: in v1, approver identity comes from the approval request, and the invoker is a fixed demo identity set by the flagship workflow. Neither is bound to an authenticated session, so the v1 control compares recorded identities; it does not bind identities to people. The v1 approval endpoints were demo only: unauthenticated and not hardened for production. The phases 2 to 5 core binds both identities to sessions (section above); live kept the v1 behaviour until the cutover on 2026-11-09, when the v1 approval handler was archived (its webhooks return 404).
+The root cause is the same for each: in v1, approver identity comes from the approval request, and the invoker is a fixed demo identity set by the flagship workflow. Neither is bound to an authenticated session, so the v1 control compares recorded identities; it does not bind identities to people. The v1 approval endpoints were demo only: unauthenticated and not hardened for production. The November 2026 release binds both identities to sessions (section above); live kept the v1 behaviour until the cutover on 2026-11-09, when the v1 approval handler was archived (its webhooks return 404).
 
 1. **Reviewed by**, the former text *"FAO-GOV-013 separation activates when a second authenticated identity is added to `process_owners`"*. The seed already contains three demo identities. Adding identities does not activate separation; what is missing in v1 is binding the approver and invoker to authenticated sessions, and change review by someone other than the author.
 2. **"The audit trail is honest"** (and *"accurately record what happened"*). The v1 ledger accurately records the approver identity named in the approval request. It does not show that the named person made the approval.
@@ -202,10 +202,10 @@ The root cause is the same for each: in v1, approver identity comes from the app
 
 The removed sketch proposed `required_approvals` and `approvals_received` columns, a `hitl_approvals` table, a replacement for `fao_hitl_resolve`, and a new `IN_PROGRESS` value. The reviews found two problems, which is why it was removed:
 
-- A `hitl_approvals` table with `UNIQUE (hitl_id, approver_id)` alone would not stop one person supplying two approvals while approver identity is not authenticated. Dual approval depends on identity binding landing first. The core does that (deployed 2026-11-09).
+- A `hitl_approvals` table with `UNIQUE (hitl_id, approver_id)` alone would not stop one person supplying two approvals while approver identity is not authenticated. Dual approval depends on identity binding landing first. The November 2026 release does that (deployed 2026-11-09).
 - The `IN_PROGRESS` state does not fit the schema. The `hitl_queue` column is `decision`, of enum `hitl_decision`, not `hitl_status`; `hitl_status` is the Shadow Ledger enum. The coherence CHECK allows only defined pairs of decision, approver and decided time. The plan above keeps the request PENDING until the count is met, so no new value is needed.
 
-The core also does not add `required_approvals` or `approvals_received` columns; requests record `configured_approvals` and `enforced_approvals` instead.
+The release also does not add `required_approvals` or `approvals_received` columns; requests record `configured_approvals` and `enforced_approvals` instead.
 
 ### Link correction
 

@@ -39,11 +39,11 @@
 
 I'm an ACCA with audit roots who pivoted into AI automation architecture. Working in audit, you learn quickly that *"the policy says X"* and *"the code does X"* are different sentences, and the second one is the only one that matters when the regulator shows up.
 
-When I started designing AI agents for finance operations, the same gap kept appearing. *"The LLM is in the loop but the human is the final decision-maker"* is documentation, not architecture. So I built FinAgent OS: a platform where the SOX-defensible properties (append-only audit, segregation of duties, AI non-authority) are enforced in code, by Postgres triggers and an AI tool surface with no mutation tools, rather than by policy text. That enforcement had known gaps in v1. Phases 2 to 5 close most of them in code; what each fix covers and what stays open is listed under [Known Limitations](#-known-limitations).
+When I started designing AI agents for finance operations, the same gap kept appearing. *"The LLM is in the loop but the human is the final decision-maker"* is documentation, not architecture. So I built FinAgent OS: a platform where the SOX-defensible properties (append-only audit, segregation of duties, AI non-authority) are enforced in code, by Postgres triggers and an AI tool surface with no mutation tools, rather than by policy text. That enforcement had known gaps in v1. The November 2026 release closes most of them in code; what each fix covers and what stays open is listed under [Known Limitations](#-known-limitations).
 
 The flagship workflow is a Reserve Reconciliation Agent calibrated to crypto-exchange Proof-of-Reserves work, with Kraken's published Dec 2025 PoR as the reference implementation. The platform beneath it supplies the flagship's audit, approval and registry controls.
 
-> **Live since 2026-11-09.** The phases 2 to 5 core (session identity, run tokens, database-only decisions, atomic resolution, timeouts and failure records) and dual approval were built on branch `phase2-5-core-2026-11-07` and deployed to the live stack at commit `c9c2fc0` in a cutover finished 2026-11-09 (UTC). Where this README describes v1, it is history.
+> **Live since 2026-11-09.** The November 2026 release (session identity, run tokens, database-only decisions, atomic resolution, timeouts, failure records and dual approval) was deployed to the live stack at commit `c9c2fc0` in a cutover finished 2026-11-09 (UTC). Where this README describes v1, it is history.
 >
 > - **Approval page:** live at [approve.velocyt.ca](https://approve.velocyt.ca) (Cloudflare Pages, CSP enforced). The v1 n8n approval handler is archived; its webhooks return 404.
 > - **Database and workflows:** migrations `0009` to `0020` applied; the five production workflows run on n8n 2.46.6 as the `fao_workflow` role, and a re-export after the cutover equals the repo exports.
@@ -61,7 +61,7 @@ Every material financial decision in FinAgent OS is enforced by deterministic ru
 
 The complete enumeration, with every decision point in the system classified deterministic vs. advisory, lives in **[`SOX-MAPPING.md`](./SOX-MAPPING.md)** under the *"Where is the AI?"* table.
 
-**What v1 shows:** no AI call exists anywhere in the v1 policy path, and `agent_registry.ai_advisory_enabled` defaults to FALSE. The `FAO_AI_ASSIST_ENABLED` flag that will gate the v1.1 advisory layer is not yet wired. Every v1 decision is reproducible by reading the migration files, seeds and the flagship workflow. The same holds for the phases 2 to 5 core, live since 2026-11-09, where the run rollup and the request moved into SQL (`fao_run_finalize`).
+**What v1 shows:** no AI call exists anywhere in the v1 policy path, and `agent_registry.ai_advisory_enabled` defaults to FALSE. The `FAO_AI_ASSIST_ENABLED` flag that will gate the v1.1 advisory layer is not yet wired. Every v1 decision is reproducible by reading the migration files, seeds and the flagship workflow. The same holds for the November 2026 release, live since 2026-11-09, where the run rollup and the request moved into SQL (`fao_run_finalize`).
 
 ---
 
@@ -78,7 +78,7 @@ Two outcomes worth highlighting.
 
 Three semantic searches across `approve / resolve / decision`, `write / commit / override / bypass`, and `resolve / set status / sign` all returned the same five tools, **none of which mutate HITL state**. This is a self-audit of the MCP tool surface: an AI on the MCP channel has no tool that approves, resolves or overrides a HITL request. The probe did not test the approval endpoints or the database directly, so it is evidence about the MCP tool surface only.
 
-In the transcript Claude also credits three further layers (a bounded write tool, channel separation and a database trigger) and says there are four. That count was its own inference about v1, not something the probe tested. The v1 approval endpoints were unauthenticated, and the trigger it names (`hitl_queue_sod_guard`) checked only the identities it was given. Phases 2 to 5 drop that trigger and the endpoints; since the cutover (2026-11-09) decisions go only through `fao_hitl_decide` with the approver's own session (see [Control gaps](#control-gaps-status-after-phases-2-to-5-core)).
+In the transcript Claude also credits three further layers (a bounded write tool, channel separation and a database trigger) and says there are four. That count was its own inference about v1, not something the probe tested. The v1 approval endpoints were unauthenticated, and the trigger it names (`hitl_queue_sod_guard`) checked only the identities it was given. The November 2026 release dropped that trigger and the endpoints; since go-live (2026-11-09) decisions go only through `fao_hitl_decide` with the approver's own session (closed gaps are listed in [`CHANGELOG.md`](CHANGELOG.md)).
 
 ### The audit surfaced a real control gap, on first contact
 
@@ -140,7 +140,7 @@ Counts are from the tree at commit `c9c2fc0`, the commit deployed at the 2026-11
 
 | Component | What it is | Role of AI |
 |-----------|-----------|:-:|
-| **Platform governance layer** | 22 Postgres migrations (10 from v1, `0009` to `0017` from phases 2 to 5, `0018` to `0020` for dual approval) + 5 seed files, plus one local-only settings seed. 15 `FAO-GOV-*` controls. | None |
+| **Platform governance layer** | 22 Postgres migrations (10 from v1, `0009` to `0020` from the November 2026 release, including `0018` to `0020` for dual approval) + 5 seed files, plus one local-only settings seed. 15 `FAO-GOV-*` controls. | None |
 | **Run and decision functions** | `fao_run_start`, `fao_run_claim`, `fao_ledger_append_batch`, `fao_run_finalize`, `fao_run_fail`, `fao_hitl_get`, `fao_hitl_decide`, `fao_maintenance_sweep`, the notification functions and five admin functions. The v1 `fao_hitl_create` is dropped; `fao_hitl_resolve` is kept only as a stub that always raises. | None |
 | **Reserve Reconciliation Agent** (flagship) | n8n workflow. RED-tier. FAO-REC-001 → 009. Owner: Sarah Chen. Starts only through its invoke webhook, with a header key and a single-use run token. | None |
 | **Writer** | n8n sub-workflow. Validates a batch and appends it through `fao_ledger_append_batch`, all or none. | None |
@@ -162,7 +162,7 @@ The agent reconciles wallet holdings (Fireblocks proxy) against ledger liabiliti
 - **1 synthetic clean baseline plus 3 synthetic scenarios, each tagged to the control it exercises.** USDC is the clean baseline. USDT exercises FAO-REC-002: a $67,890.50 surplus inside the stablecoin band, above the $10,000 materiality. It ALLOWs, because stablecoin USD materiality applies to a shortfall only (owner decision 2026-11-08); the escalating shortfall case is in `fixtures/policy_branches.json`. SOL triggers FAO-REC-004 (under-reservation floor). ADA triggers FAO-REC-007 (negative-liability anomaly per the [krakendb 2014 reference](https://github.com/krakenfx/krakendb)).
 - **Provenance recorded at the run level.** The STARTED row's `inputs.fixture_provenance` records which asset is calibrated, which is synthetic, and which control each anomaly was designed to exercise. Per-asset `ASSET_RECONCILED` rows do not carry it; the auditor query in [`fixtures/README.md`](fixtures/README.md) joins each asset row to its run's STARTED row (e2e S20 runs that query as printed).
 
-The decision matrix is deterministic: 7 rules evaluated top-down, first match wins. No LLM in the policy path. Since phases 2 to 5 the inputs fail closed first: an asset with a missing, one-sided or non-finite balance, or with no usable threshold, is BLOCKED, and any REQUIRE_HUMAN, DENY or BLOCKED asset routes the run to human review.
+The decision matrix is deterministic: 7 rules evaluated top-down, first match wins. No LLM in the policy path. Since the November 2026 release the inputs fail closed first: an asset with a missing, one-sided or non-finite balance, or with no usable threshold, is BLOCKED, and any REQUIRE_HUMAN, DENY or BLOCKED asset routes the run to human review.
 
 ---
 
@@ -227,7 +227,7 @@ The last full run (2026-11-08 17:55 UTC, at commit `c9c2fc0`, the commit deploye
 
 **CI.** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs the same command in four jobs (static, mcp, db, e2e) on pinned versions. It first ran on GitHub on 2026-11-09: run `42559222998` at commit `744ca3a` passed all four jobs, 2313 of 2313 (exports 143, node 176, pytest 344, pgTAP 1563, API 60, e2e 27), on Node 22.23.4 and Python 3.12.16. The run before it (`42558681123`) failed only the e2e job, before any test, on a Linux file-permission problem in the test harness that `744ca3a` fixed.
 
-**Manual page check.** There is no automated browser test of the approval page, in CI or locally. Its sign-in and decision flow is checked by hand once per release: no session, invoker view (no buttons), approver decision, reload, an invalid link, and no CSP report in the console; on a two-approval request, a first approval that is recorded but not committed, then a second approver's decision. For this branch the whole check (steps 1 to 15 of [`approval-app/README.md`](approval-app/README.md); step 5 by Marcus on a STANDARD request made with `tests.make_request`, phase 2-5 RUNS.md dual approval fix round 2) was done on 2026-11-08 against the local stack, in the built-in Chromium browser of the Claude desktop app, driven by Claude Code (an AI agent) rather than by a person with seed test users (phase 2-5 RUNS.md, dual approval fix rounds 1 and 2). On live, the cutover repeated the no-session, invalid-link and expired-request checks on approve.velocyt.ca with a clean console (Claude Code, same browser), and the owner used the page for the smoke run's two approvals and its rejection.
+**Manual page check.** There is no automated browser test of the approval page, in CI or locally. Its sign-in and decision flow is checked by hand once per release: no session, invoker view (no buttons), approver decision, reload, an invalid link, and no CSP report in the console; on a two-approval request, a first approval that is recorded but not committed, then a second approver's decision. For this release the whole check (steps 1 to 15 of [`approval-app/README.md`](approval-app/README.md)) was done on 2026-11-08 against the local stack, in the built-in Chromium browser of the Claude desktop app, driven by Claude Code (an AI agent) rather than by a person, with seed test users. On live, go-live repeated the no-session, invalid-link and expired-request checks on approve.velocyt.ca with a clean console (Claude Code, same browser); the owner used the page for the smoke run's two approvals and its rejection, and checked it in Chrome, Brave and Firefox.
 
 The table above is a local result. The live stack was checked by the cutover's functional and security smoke runs instead (see [Live since 2026-11-09](#-why-i-built-this)).
 
@@ -283,7 +283,7 @@ The first time I posted an HITL request to `#fao-approvals`, every queued item w
 
 **Slack's link-unfurling bot was walking every URL in the message to generate previews.** A GET request that mutates state is functionally an open invitation to any well-meaning crawler. Fixed by splitting HTTP semantics: GET to that endpoint now renders a confirmation form; POST is the mutation. The Slack expander hits the GET, sees a form, leaves the row alone. The split stops link previewers from changing state; it is not an authorization control, and the v1 endpoints were demo only: unauthenticated and not hardened for production.
 
-Phases 2 to 5 retired those n8n endpoints: the v1 handler was archived at the 2026-11-09 cutover, and its webhooks return 404. The Slack link now opens a static page that changes nothing on load; the approver signs in and the decision is a POST to `fao_hitl_decide` made with their own session token. The page keeps that token in `sessionStorage` and sends no cookie, so the cross-site request forgery risk of a cookie session does not arise.
+The November 2026 release retired those n8n endpoints: the v1 handler was archived at the 2026-11-09 cutover, and its webhooks return 404. The Slack link now opens a static page that changes nothing on load; the approver signs in and the decision is a POST to `fao_hitl_decide` made with their own session token. The page keeps that token in `sessionStorage` and sends no cookie, so the cross-site request forgery risk of a cookie session does not arise.
 
 > **The principle:** HTTP verbs aren't aesthetic. GET is for reads: link previewers, search engines, and accidental retries depend on that. The moment a GET mutates state, your security model includes every entity that ever follows a link.
 
@@ -295,7 +295,7 @@ That's the problem. **Silent rejection is weaker SOX posture than loud rejection
 
 The RLS policy and the trigger were two layers on the same vector in the same direction. Layered enforcement is good; redundant enforcement at the same boundary creates interaction problems (the RLS layer silently filtered the violating row before the trigger could raise its loud exception). The trigger was the sole enforcer in v1. The git history of `0005 → 0005b → 0005c` ships in the repo as honest evidence of the evolution.
 
-Phases 2 to 5 note: decisions moved to one database function, `fao_hitl_decide`, backed by a row guard and a statement guard on `hitl_queue` that hold for every role (migration 0013, which drops the v1 trigger).
+Since the November 2026 release, decisions moved to one database function, `fao_hitl_decide`, backed by a row guard and a statement guard on `hitl_queue` that hold for every role (migration 0013, which drops the v1 trigger).
 
 > **The principle:** Layer defenses at *different* boundaries (application + database, identity + integrity), not at the same boundary on the same vector. And when forced to choose between silent filtering and loud exception, choose loud. Auditors read logs.
 
@@ -305,7 +305,7 @@ Earlier draft of the flagship had two events per asset: `COMPARED` (the observat
 
 Schema constraint forced the collapse. `shadow_ledger.policy_outcome` is `NOT NULL`. A `COMPARED` row would need a placeholder policy outcome before the decision was actually made, which is misleading at best and audit-poor at worst. Filling it with a sentinel value to satisfy the constraint just hides the issue.
 
-Collapsed into a single `ASSET_RECONCILED` event per asset that captures wallet, ledger, ratio, and policy decision atomically. One row per asset, complete story per asset, cleaner audit grain. The total HITL-gated chain dropped from 16 rows to 11 (13 since phases 2 to 5 for a two-approval CRITICAL review, which adds NOTIFICATION_SENT and HITL_APPROVAL_RECORDED rows).
+Collapsed into a single `ASSET_RECONCILED` event per asset that captures wallet, ledger, ratio, and policy decision atomically. One row per asset, complete story per asset, cleaner audit grain. The total HITL-gated chain dropped from 16 rows to 11 (13 since the November 2026 release for a two-approval CRITICAL review, which adds NOTIFICATION_SENT and HITL_APPROVAL_RECORDED rows).
 
 > **The principle:** When observation and decision happen atomically with no time gap an auditor cares about, one row tells the cleaner story than two. Schema constraints often surface design questions that prose specs hide.
 
@@ -313,7 +313,7 @@ Collapsed into a single `ASSET_RECONCILED` event per asset that captures wallet,
 
 Considered: every n8n agent writes directly to `shadow_ledger` via the Postgres node. Simple, fewer moving parts.
 
-Decided: centralized "Writer" sub-workflow that every caller routes through. Since phases 2 to 5 the Writer checks every item of a batch, names every bad item in one error, and appends the batch through `fao_ledger_append_batch`, all or none. The database then checks run state, asset scope and duplicates, and sets the timestamps and run context itself.
+Decided: centralized "Writer" sub-workflow that every caller routes through. Since the November 2026 release the Writer checks every item of a batch, names every bad item in one error, and appends the batch through `fao_ledger_append_batch`, all or none. The database then checks run state, asset scope and duplicates, and sets the timestamps and run context itself.
 
 Why: the Writer is the single n8n path into `shadow_ledger`, so structural checks live in one place. In v1 it did not stop other database clients from inserting rows directly; since the cutover no client role can insert, update, delete or truncate ledger rows, whichever path they arrive by. That's the database-layer enforcement of FAO-GOV-001. Putting structural validation at the application boundary (above the DB) means the trigger doesn't need to do double duty as a schema validator. Defense in depth at *different* layers: the Writer checks structure for n8n callers, the DB trigger blocks row changes.
 
@@ -337,97 +337,55 @@ Rejected for `agent_registry.agent_id`. The agent_id appears in n8n workflow ref
 
 ## 📋 Known Limitations
 
-The gaps a reviewer would find are surfaced below. "Fixed" means built at commit `c9c2fc0`, covered by tests that pass at that commit (2313 of 2313, see [Tests](#-tests)), and live since the 2026-11-09 cutover. The v1 gaps below describe the live stack before that date.
+FinAgent OS has run on the live stack since 9 November 2026. This section lists what it does not do yet and what trust it still depends on. Gaps closed at go-live are recorded in [`CHANGELOG.md`](./CHANGELOG.md), the status of each control is in [`SOX-MAPPING.md`](./SOX-MAPPING.md), and engineering edge cases are in [`docs/known-limits.md`](docs/known-limits.md).
 
-### Control gaps: status after phases 2 to 5 (core)
+### What the live system runs on
 
-- **Identity binding of approver and invoker. Fixed:** the invoker and the approver are taken from their own Supabase Auth sessions (`auth.uid()`); no identity is taken from a payload. A second factor is not yet required (see Remaining limits).
-- **Decided HITL requests were not locked; SoD was not a boundary against privileged credentials. Fixed for application roles:** decisions are recorded only through `fao_hitl_decide`, self-approval is refused, and decided requests cannot be changed. The service-role key has no access to FinAgent objects and no FinAgent component holds it. The database owner and holders of platform admin keys remain outside the control.
-- **The approval endpoints were demo only: unauthenticated and not hardened. Fixed:** the n8n approval pages are retired. Approvers sign in on a static approval page and decide with their own session; the run-start webhook needs a header key and a single-use run token; response statuses match outcomes.
-- **HITL resolution and its ledger writes were not atomic. Fixed:** the decision and its ledger events commit in one transaction, and so do request creation and its ledger event.
-- **Not every failure was recorded to the ledger. Fixed in the database and the workflows:** an error workflow, a five-minute sweep and notification records. A failure that cannot attach to a run is kept in the append-only `workflow_failures` table. The workflows run end to end in the e2e layer against n8n 2.46.6, the version live runs; on live the cutover smoke exercised the approval and rejection paths, not a failure path. The Writer has no error workflow of its own; a failed Writer call fails the flagship, which is recorded.
-- **HITL timeout was not enforced. Fixed:** late decisions are refused; overdue requests expire and escalate once. HITL_EXPIRED is the expiry record of an expired request (its escalation can follow it), and the request is never recorded as a commit.
-- **Append-only was not administrator-proof. Narrowed:** UPDATE, DELETE, TRUNCATE and direct INSERT are refused for every application role, and ledger rows are appended only through database functions with database-set timestamps. The database owner remains outside the control (the owner can disable or drop a trigger). There is no independent or write-once evidence store; trusting the owner is a design choice for now, and independent evidence storage is planned.
-- **The committed Writer export dropped batch items. Fixed:** the Writer stores a batch all or none and names every bad item.
-- **Dual approval was named, not wired (ADR-0001). Fixed for CRITICAL review ([ADR-0004](docs/adr/0004-dual-approval-enforced.md)):** a request whose review sub-tier is CRITICAL needs two approvals (the registry count for the RED flagship) from different approvers, never the invoker, each through an approver grant made before the request was opened, not by the invoker and not by another approver of it; one rejection closes the request. STANDARD review keeps one approval. Live since 2026-11-09: the functional smoke run's CRITICAL request needed and got two approvals (Sarah, then Marcus) after the invoker's own approval was refused, and a second CRITICAL request was closed by one rejection.
+- **Sample balances, not real data.** Wallet balances (standing in for Fireblocks) and ledger balances (standing in for NetSuite) are fixed sample data inside the flagship workflow. No live connector exists, so live runs show the controls working, not real reserves. Live connectors are a v2 item.
+- **One agent is built.** Only the Reserve Reconciliation agent has a workflow. Close Orchestrator, Variance Analyzer and Treasury Monitor are registered with their governance metadata, but they are placeholders: the database refuses to start them and records the refusal.
+- **Not every control is complete.** Of the 24 controls in `SOX-MAPPING.md`, 11 are live, 7 are partial and 6 are planned. The planned ones are the AI-advisory controls and the rollback engine. A rejected request is recorded as rolled back, but nothing is staged or reversed.
+- **Reserves are checked asset by asset.** No total reserve ratio is computed across assets, and no single audit evidence package is assembled. The records of a run are retrieved by its correlation id.
+- **Dollar materiality changes no outcome today.** USD thresholds are stored for every asset. The other cryptocurrencies have no price feed, so only ratio thresholds apply to them. For stablecoins the floor is 1.00, so any shortfall is already escalated as critical before the dollar test is reached. Ratio checks catch under-reservation for every asset, and a run with missing or one-sided inputs is blocked.
+- **The workflow computes the decision.** The n8n workflow computes the pass or escalate decision for each asset. The database checks that every record is complete, well formed and chained, and it routes any escalated asset to review. It does not recompute the decision.
 
-### Remaining limits
+### Approvals and identity
 
-- The database owner, holders of the `postgres` password and holders of platform admin or secret keys are outside the control (they can change identities or disable triggers). At the cutover the `postgres` password was rotated (the new value is only in the owner's password manager), the legacy `anon` and `service_role` keys were disabled, the legacy JWT secret was revoked and the only secret API key was deleted, so the project has no secret key; the owner's own accounts remain outside the control.
-- In the public demo one person holds every demo identity; the controls bind actions to identities, they cannot prove those identities are different people.
-- Policy inputs and per-asset outcomes are produced by the n8n workflow; the database checks shape, completeness, fail-closed inputs and chain integrity, not the policy result.
-- Approver authority beyond role membership (rank, limits per amount, named roles) is not modelled (DL-1).
-- A request whose sign-in token fails verification is refused by the API layer and recorded only in platform logs; above the journal cap only one marker row per minute is written, while refusals continue.
-- One escalation level; no notification after a decision.
-- **TOTP second factor for approvals and admin changes.** Approvals and admin changes require the person's own signed-in session, but not yet a second factor. A TOTP second factor for approvers and admins is planned. Until it ships, a stored password is enough to approve for any user who holds the approver role, so run-start credentials kept on an agent host should belong to a user without that role. For this reason the live MCP host stores no invoker credential, and its invoke tool refuses with `NO_USER_CREDENTIAL`.
-- **Refusal journal for direct table writes (dblink).** Direct table writes are refused for every application role, but only refusals returned by the FinAgent database functions are recorded in the refusal journal. Recording refused direct writes is planned.
-- **Automated browser test of the approval page.** The approval page's logic is covered by unit tests and its sign-in and decision flow is checked by hand; there is no automated browser test yet.
-- **Python command-line tools (run start, admin).** There is no command-line tool yet for starting runs or for admin changes. Runs start through the MCP tool; admin changes go through the admin functions with the admin's own session, or through the documented SQL recipe with a change reason.
-- **Hosted rehearsal before cutover.** Behaviour that only a hosted project shows (pooler login, API key mode, Auth settings, page headers) was checked step by step during the live cutover, not first in a rehearsal on a hosted scratch project; the database steps (3, 4, 7 and 8) were rehearsed first on a local copy of live, and the MCP start on the local stack.
-- **Automated end-to-end run of the n8n workflows (on live).** The n8n workflows run end to end automatically on a local n8n 2.46.6 only: the e2e layer imports the exports, publishes them and runs scenarios S01 to S27 against local Supabase and a mock Slack in every `npm test`; the CI `e2e` job runs the same layer on GitHub (27 of 27 on 2026-11-09). Live runs the same n8n version, but on live the workflows have run end to end only in the cutover smoke (one approved and one rejected run), and no failure path is exercised on live.
-- **Named roles are not modelled (DL-1).** Dual approval counts distinct users who hold the approver role for the agent. Roles such as Controller and CFO are not modelled, so the two approvals can come from any two eligible approvers. The flagship's rationale text "Controller + CFO review required" describes the intended pairing; the system does not check it.
-- **STANDARD review keeps one approval (DL-2).** A request whose review sub-tier is STANDARD needs one approval, also for a RED agent whose registry count is two (owner decision DA-1). Its ledger row says "approvals enforced 1 of configured 2".
-- **Two identities, not proven two people (DL-8).** Two approvals need two signed-in identities, but there is still no second factor (TOTP second factor, above), and in the public demo one person holds every demo identity. Dual approval binds the approvals to two identities; it cannot prove they are two different people. DA-4 only stops a grant made by the invoker or by another approver of the same request, so an admin can still prepare a second approval before a request indirectly: make a second identity an admin, and have that identity grant the approver role to a third; the third identity's approval counts, because its granter did not approve. Every grant records who made it and when.
-- The aggregate reserve ratio is planned (scope, valuation basis and floor first). There is no evidence package yet. FAO-REC-003, FAO-REC-004 and FAO-REC-008 in [`SOX-MAPPING.md`](./SOX-MAPPING.md) carry their status.
-- Requests that PostgREST refuses before a database function runs (an empty body, invalid JSON, GET or form-encoded calls) are not journaled. None of them changes anything; this was measured on the local PostgREST only (pinned to 14.5, the live version).
-- A new n8n execution that reuses the execution id of a run still RUNNING inside its SLA window is refused at claim. If that execution then fails at any node before Respond 202 (the refused branch included), the error handler records it as pre-claim and never touches the older run; past the window, the claim fails the stale run first. A claim that committed and then errored inside Claim Run leaves its run RUNNING until the sweep fails it as stale. The stale-run rule relies on n8n stopping the flagship at its 600-second `executionTimeout` before the 900-second floor of `sla_max_execution_seconds`; that holds only where n8n's `EXECUTIONS_TIMEOUT_MAX` is at least 600 (live n8n: 3600, checked at the cutover). The database still cannot tell two executions with the same id apart.
-- **Stablecoin band (F-24, decided 2026-11-07).** The owner decided that stablecoin reserves are held near 105%, so the seeded USDC and USDT upper band is 1.05 (floor and lower band stay 1.0000); a ratio above 1.05 escalates as ABOVE_BAND_UPPER. The live table held 1.0050 until the cutover, when Marcus applied 1.0500 to USDC and USDT through `fao_admin_set_threshold` with a change reason (IC-38, 2026-11-08). The owner decided on 2026-11-08 that stablecoin USD materiality (rule 5) applies to a shortfall only: a surplus inside the band ALLOWs however large it is, and a shortfall escalates as IN_BAND_USD_MATERIAL only when ledger minus wallet exceeds `materiality_usd`. With the seeded floor equal to the band lower (1.0000), any stablecoin shortfall is caught first as BELOW_FLOOR CRITICAL, so rule 5 fires only under a threshold whose floor is below 1.00 (tested offline with a threshold override, not end to end). The owner decided on 2026-11-08 to keep the stablecoin floor at 1.00: any stablecoin under-reserve is CRITICAL, and FAO-REC-002 is inactive under the seeded thresholds.
-- A database error inside the notifier, or an unpublished notifier, fails the sweeper run visibly but does not count toward the notification retry limit. A notice target deactivated between an escalation and its first send gets no operator alert unless the notice is listed again. The wording of an expired escalation uses the n8n host clock.
-- Every member can read every request, ledger row and run across agents; only the decision view is limited to approvers, the invoker and admins.
-- A role grant created at the same moment as a decision or finalize is not waited for; this can only turn a refusal into an allow on a later decision, never the reverse.
-- The role helpers refuse a client's question about another user by reading the database call stack; any new `fao_*` function that passes a caller-chosen user id to them needs review.
-- Ids the database checks only by pattern (asset symbols, `agent_id`) can still spell words; the MCP marks free text as untrusted.
-- The sweeper's last check relies on n8n's documented branch order; `check-exports` holds the layout, and a reversed order would fail loudly, not silently.
-- The rollback script's privileges were compared with a local database only, never with the live v1 grants.
-- CI runs on the pinned Node 22 and Python 3.12 and has passed on GitHub since 2026-11-09; local runs use newer versions (Node 25, Python 3.14). The approval page has been checked in Chromium-based browsers and Firefox: in full against the local stack in the built-in Chromium browser of the Claude desktop app, driven by Claude Code (an AI agent) rather than by a person; on live at the cutover (page checks by Claude Code, the smoke decisions by the owner); and by the owner on live in Chrome, Brave and Firefox on 2026-11-09. It has not been checked in Safari (WebKit), and there is no automated browser test.
-- Supabase Free plan: no daily backups. The only database dumps are the owner's pre-cutover dumps from 2026-11-08 (v1 schema and data); there is no backup of the live state since the cutover.
-- n8n has no backup or droplet snapshot since 2026-11-09 (the owner removed them after the cutover). The workflow logic can be rebuilt from the exports in this repository; execution history and credentials cannot.
-- n8n's own database runs postgres:16, which n8n supports for compatibility only; the owner left it as is.
-- Some api and e2e tests briefly change shared demo users, roles or the test clock and restore them afterwards; run those layers with nothing else on the stack.
+- **No second factor.** Approvals and admin changes need the person's own sign-in, but no second factor yet, so a stolen approver password is enough to approve. For this reason the live agent host stores no user password, and its run-start tool refuses (`NO_USER_CREDENTIAL`). A TOTP second factor is planned.
+- **Two accounts, not two people.** In the public demo one person holds every demo login. The controls therefore show that two different accounts approved, not that two different people did. The demo users are Supabase Auth accounts with sign-ups closed. There is no company sign-in (SSO) yet.
+- **Any two approvers count.** CRITICAL review needs approvals from two eligible approvers. The system does not model named roles, ranks or amount limits. It does not check that one approver is the Controller and the other the CFO, even though the escalation text names that pairing.
+- **An administrator can set up a second approval in advance.** An admin can make another account an admin and have that account give the approver role to a third account. The third account's approval then counts. Every role grant records who made it and when, so this can be detected afterwards but is not prevented ([ADR-0004](docs/adr/0004-dual-approval-enforced.md)).
+- **Read access is not limited per agent.** Anyone with any FinAgent role can read every request, ledger record and run for every agent. Only the decision view is limited to approvers, the invoker and admins.
 
-### Owner decisions (2026-11-08)
+### Trust in the database owner
 
-These were open in earlier rounds and are now decided. The owner signed off the cutover on 2026-11-09, which accepts every interface change made during the build and ADRs 0002 to 0004.
+- Anyone who controls the database owner account or the Supabase project admin can get around these controls. They can change identities or disable the triggers that keep the audit ledger append-only. No application account can change the ledger. At go-live every old key was revoked and the `postgres` password was rotated, and the project now has no secret key, so this trust is limited to the owner's own accounts. No independent write-once copy of the evidence exists yet. Until one does, relying on the ledger also means relying on the controls over the owner's accounts.
 
-- **Notice window (R12), accepted as built.** A request with no sent notice after 5 minutes x (`notify_max_attempts` + 1), 20 minutes at the default, is escalated once as NOTIFICATION_FAILED, even with no recorded attempt, and is no longer retried.
-- **Invoker keys on STARTED (IC-11), refuse.** A STARTED item whose inputs carry `invoker_id`, `invoked_via`, `reason` or `n8n_execution_id` (at any depth, in any normalised spelling) is refused and nothing is written; the database sets those four values itself from the run record. The flagship sends none of them, and `check-exports` holds that (rule `started_db_keys`).
-- **Stablecoin USD materiality, shortfall only.** See the stablecoin band item above.
+### Operations and testing
 
-### Wired but not yet complete
+- **Backups are manual.** The live database is on the Supabase Free plan, which has no automatic daily backups. Backups are manual dumps taken by the owner. The latest, taken on 9 November 2026 after the cutover, passed a restore test. The n8n server has no backup or snapshot. The workflow logic can be rebuilt from this repository; run history and stored credentials cannot.
+- **Little run history on live.** CI runs all 27 workflow scenarios end to end against a local n8n on the same version as live. On live, the workflows have run end to end only in the go-live smoke test: one approved run and one rejected run. No failure path has run on live yet.
+- **No automated browser test.** The approval page's logic has unit tests. Its sign-in and decision flow was checked by hand, partly by an AI agent driving a browser, in Chromium-based browsers and Firefox. It has not been checked in Safari.
+- **One author.** One person designed, built and operates the system. Reviews were done with AI agents. No independent auditor has tested the controls.
 
-These features are scaffolded (registry rows, schema columns, control IDs) and ship in a later release to close the loop.
+### Decisions, not gaps
 
-- **The Weekly Rubric Audit (FAO-GOV-012) is referenced in [`SOX-MAPPING.md`](./SOX-MAPPING.md) but not yet implemented.** Cron-scheduled n8n job aggregating drift signals from `shadow_ledger`; ships in v1.1.
+These behaviours are deliberate. The reasons are in [`docs/known-limits.md`](docs/known-limits.md#decisions) and the linked ADRs.
 
-### Deliberately deferred until the threat model ships
+- STANDARD review needs one approval, even for a RED agent configured for two. Only CRITICAL review needs two ([ADR-0004](docs/adr/0004-dual-approval-enforced.md)).
+- Stablecoin reserves are expected to be held near 105%. USDC and USDT pass between a ratio of 1.00 and 1.05; above 1.05 escalates, and below 1.00 is critical.
+- A request whose notice cannot be delivered within 20 minutes is escalated once and not retried.
+- No AI call exists yet. The advisory layer waits for its own threat model. The MCP server runs locally over stdio, and remote access over HTTP with per-user sign-in is planned.
 
-These features are held back because the security model needs to ship first. Activating them without that work would be a posture downgrade.
-
-- **AI advisory layer is not built; `FAO_AI_ASSIST_ENABLED` will gate it.** No AI call exists in the code, and `agent_registry.ai_advisory_enabled` defaults to FALSE. The deterministic spine had to be defensibly complete before AI was allowed near it. The threat model shifts when LLMs touch the chain (prompt injection via fixture provenance, advisory drift); those defenses ship as their own ADR before the flag flips.
-- **MCP transport is stdio, not HTTP.** Stdio is the correct choice for the current audience: local Claude Desktop, Cursor, etc. HTTP + per-user OAuth for the MCP server is a v1.2 ADR; the auth boundary needs to be designed before the transport is opened.
-
-### Stubs and fixtures by design
-
-These are properties of the scope, not gaps. The registry-precedes-the-build pattern is FAO-GOV-002 working as designed. Fixtures isolate policy logic from connector plumbing. Demo identities exercise the auth shape without production exposure.
-
-- **Three stub agents are registered but not implemented.** Close Orchestrator, Variance Analyzer, Treasury Monitor exist in `agent_registry` with `status=STUB_DOCUMENTED`, named process owners, declared SOX control inheritance, and stated rollback posture. They have no workflow, so there is nothing to execute. Since the cutover registry status and the hourly rate limit are checked at run start, and the tier is copied from the registry: `fao_run_start` refuses a stub with `AGENT_NOT_ACTIVE` and records a RUN_REFUSED row. The registry row *precedes* the workflow build by design: FAO-GOV-002 enforcing *no agent without governance metadata first*.
-- **Fixtures, not live connectors.** Wallet data is a Fireblocks proxy; ledger data is a NetSuite proxy. Both are inline JSON in the flagship workflow. This isolates policy logic from data-source plumbing: the policy engine is testable end-to-end without live API dependencies. Live connectors are v2.
-- **Demo identities, not production auth.** Three Supabase Auth users (`@finagent-os.demo`) seed the process_owners table, and their application roles are seeded in `fao_user_roles`. Local setup also creates the MCP reader user and a test user with no role. The identity provider is demo. Production identity (OAuth 2.1, real org SSO) is v2.
-
-### USD materiality enforcement scope
-
-The `materiality_usd` column in `materiality_thresholds` is populated for all seven seeded assets, but the policy engine enforces the USD materiality test only for stablecoin assets (`asset_class = 'Stablecoin'`), where raw units equal USD value (1 USDC = $1), and for those it tests a shortfall only (ledger minus wallet above `materiality_usd`; owner decision 2026-11-08): a surplus inside the band is governed by the band upper alone. For non-stablecoin assets (BTC, ETH, SOL, XRP, ADA), USD materiality enforcement requires a price oracle to convert unit discrepancies to USD and is deferred to v1.1. Ratio-based escalation (FAO-REC-004) provides primary coverage. Under-reservation is caught for every asset in the shipped fixtures, and since phases 2 to 5 missing, one-sided or non-finite inputs are BLOCKED (see `fixtures/README.md`). What's deferred is the in-band-but-large-USD-discrepancy case for non-stablecoin assets.
-
-Most items above have a roadmap entry below or are named in [`SOX-MAPPING.md`](./SOX-MAPPING.md).
+Planned work for these items is in the [Roadmap](#%EF%B8%8F-roadmap).
 
 ---
 
 ## 🗺️ Roadmap
 
 - [ ] **v1.1: AI advisory wiring (`FAO_AI_ASSIST_ENABLED=true`).** Claude API integration in the flagship producing `ai_human_brief` for HITL approvers. Gated, read-only on the policy path, with input sanitization for fixture-provenance fields. Ships with its own ADR documenting the threat model.
-- [x] **Phases 2 to 5 cutover.** Done 2026-11-09 (UTC): migrations, workflows, approval page and MCP reader user deployed to the live stack at commit `c9c2fc0`, with the live-only checks done step by step and a functional and a security smoke run on live.
+- [x] **Go-live of the November 2026 release.** Done 2026-11-09 (UTC): migrations, workflows, approval page and MCP reader user deployed to the live stack at commit `c9c2fc0`, with the live-only checks done step by step and a functional and a security smoke run on live.
 - [x] **Later: Dual approval.** Live since 2026-11-09 ([ADR-0004](docs/adr/0004-dual-approval-enforced.md), closes ADR-0001): CRITICAL review needs the registry count of approvals (two for RED), each through a qualifying approver grant; it landed with the cutover, and the live smoke run's CRITICAL request was committed only after two approvals. Named approver roles are not modelled (DL-1).
-- [ ] **Later: TOTP second factor, journal for refused direct writes, automated browser test of the approval page, command-line tools.** Deferred from phases 2 to 5 (see Remaining limits).
+- [ ] **Later: TOTP second factor, journal for refused direct writes, automated browser test of the approval page, command-line tools.** Deferred to a later release (see [Known Limitations](#-known-limitations)).
 - [ ] **v1.1: Weekly Rubric Audit (FAO-GOV-012).** Cron-scheduled n8n job. Aggregates HITL count by asset, ratio variance, approval-time distribution. AI advisory narrative section gated by feature flag.
 - [ ] **v1.2: HTTP transport for MCP server.** Streamable HTTP per MCP spec, behind Caddy at `mcp.velocyt.ca`, with OAuth 2.1 per-user identity (not demo emails).
 - [ ] **v1.2: Comparator landscape.** Direct comparison against Microsoft Agent Governance Toolkit, SOXAgent.com, Zenity, ChatFin, OPA. Ships once the three stubs are real (v2 milestone).

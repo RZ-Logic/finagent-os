@@ -38,6 +38,20 @@ Retired credentials:
 - **Security smoke (2026-11-09 03:07).** The old `service_role` and `anon` keys are refused as `apikey` and as Bearer (401). The old `postgres` password is refused. A decision body with a `\u0000` escape returns 400 `INVALID_INPUT`, journaled, with nothing changed. `GET /rest/v1/rpc/fao_whoami` returns 404. `pg_graphql` is not enabled, so there is no GraphQL surface. Ledger and audit counts were unchanged by the probes.
 - **Re-export diff (2026-11-09 04:25).** The five live workflows, exported again from n8n, equal the repo exports: no logic difference, and the published version of each is the stored one.
 
+### Control gaps closed
+
+These v1 gaps were open before this release and are closed on live:
+
+- **Identity binding.** The invoker and the approver are taken from their own Supabase Auth sessions (`auth.uid()`), never from a payload.
+- **Decided requests locked; self-approval refused.** Decisions go only through `fao_hitl_decide`, decided requests cannot change, and the service-role key has no access to FinAgent objects.
+- **Approval endpoints.** The unauthenticated n8n approval pages are retired. Approvers decide on a static page with their own session. The run-start webhook needs a header key and a single-use run token.
+- **Atomic resolution.** A decision and its ledger events commit in one transaction, and so do request creation and its ledger event.
+- **Failure records.** An error workflow, a five-minute sweep and notification records. Failures that cannot attach to a run go to the append-only `workflow_failures` table.
+- **HITL timeout.** Late decisions are refused. Overdue requests expire (HITL_EXPIRED) and escalate once, and are never recorded as a commit.
+- **Append-only, narrowed.** UPDATE, DELETE, TRUNCATE and direct INSERT are refused for every application role. Ledger rows are appended only through database functions with database-set timestamps. The owner remains outside the control (see README).
+- **Writer batches.** The Writer stores a batch all or none and names every bad item.
+- **Dual approval.** CRITICAL review needs two qualifying approvals from different approvers, never the invoker, and one rejection closes the request ([ADR-0004](docs/adr/0004-dual-approval-enforced.md), closes ADR-0001).
+
 ### Known limits
 
 The cutover did not close these:

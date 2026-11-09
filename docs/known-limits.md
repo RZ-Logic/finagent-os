@@ -25,7 +25,12 @@ The refusal journal (`fao_refusal_journal`) records refusals returned by the Fin
 - The wording of an expired escalation uses the n8n host clock.
 - The sweeper's last check relies on n8n's documented branch order. `check-exports` holds the layout, and a reversed order would fail loudly, not silently.
 - There is only one escalation level, and nobody is notified after a request is decided.
+- **A notice may be delivered more than once.** If Slack accepts a message but the notifier's request times out, or the database write after a send fails, the attempt is recorded as failed (or not at all) and the sweep sends the notice again, up to `notify_max_attempts` + 1 sends (4 at the default of 3). Approvers can then see more than one notice for a request. Every notice links to the same page, and a decision cannot be made twice (`ALREADY_DECIDED`, `ALREADY_APPROVED`). A second SENT for the same request and notice level writes no row, so the ledger can under-count deliveries, and a resent notice adds ledger rows to the run. Repeated timeouts also count toward `notify_max_attempts` and can escalate a request whose notices did arrive.
 - The Writer has no error workflow of its own. A failed Writer call fails the flagship execution, and that failure is recorded.
+
+## Run asset list
+
+- The flagship builds a run's asset list (`inputs.asset_scope` on STARTED) from the union of the wallet and ledger feed keys, before it reads the thresholds. The database validates the list's shape, freezes it on the run, and measures missing, duplicate and unexpected assets against it. No step compares it with the threshold table, so an asset absent from both feeds produces no record and the run can commit. Today the feeds are fixtures inside the workflow, so only a workflow edit can drop an asset; with live connectors a partial read could.
 
 ## Roles and approvals
 

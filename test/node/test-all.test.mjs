@@ -107,7 +107,7 @@ test('R29: the hashed Python lock pins exactly the direct versions in mcp/requir
   const v = JSON.parse(read('test/env/versions.json'));
   const lock = read(v.python_lock);
   const pins = new Map();
-  for (const m of lock.matchAll(/^([A-Za-z0-9._-]+)==(\S+) \\\n((?:\s+--hash=sha256:[0-9a-f]{64}(?: \\)?\n)+)/gm)) {
+  for (const m of lock.matchAll(/^([A-Za-z0-9._-]+)==(\S+) \\\r?\n((?:\s+--hash=sha256:[0-9a-f]{64}(?: \\)?\r?\n)+)/gm)) {
     pins.set(m[1].toLowerCase().replace(/[._]/g, '-'), m[2]);
   }
   const entries = (lock.match(/^[A-Za-z0-9._-]+==/gm) || []).length;

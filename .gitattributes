@@ -1,0 +1,4 @@
+# The hashed Python lock and the pinned requirements keep LF on every
+# checkout, including Windows with core.autocrlf=true.
+test/env/*.lock.txt text eol=lf
+mcp/requirements*.txt text eol=lf

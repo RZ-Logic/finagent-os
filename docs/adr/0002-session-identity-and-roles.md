@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Accepted pending owner sign-off. Built on branch `phase2-5-core-2026-11-07`; deployed 2026-11-09. |
+| **Status** | Accepted (owner sign-off 2026-11-09, with the cutover). Built on branch `phase2-5-core-2026-11-07`; deployed 2026-11-09. |
 | **Date** | 2026-11-07 |
 | **Author** | Rizwan Ahmed, ACCA · Velocyt Consulting |
 | **Supersedes** | None. Extends ADR-0001's context: identity is now bound; dual approval was the remaining gap when this was written and is now built ([ADR-0004](0004-dual-approval-enforced.md)). |

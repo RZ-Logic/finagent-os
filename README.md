@@ -386,7 +386,7 @@ The gaps a reviewer would find are surfaced below. "Fixed" means built at commit
 
 ### Owner decisions (2026-11-08)
 
-These were open in earlier rounds and are now decided. Every interface change made during the build is still accepted pending the owner's sign-off.
+These were open in earlier rounds and are now decided. The owner signed off the cutover on 2026-11-09, which accepts every interface change made during the build and ADRs 0002 to 0004.
 
 - **Notice window (R12), accepted as built.** A request with no sent notice after 5 minutes x (`notify_max_attempts` + 1), 20 minutes at the default, is escalated once as NOTIFICATION_FAILED, even with no recorded attempt, and is no longer retried.
 - **Invoker keys on STARTED (IC-11), refuse.** A STARTED item whose inputs carry `invoker_id`, `invoked_via`, `reason` or `n8n_execution_id` (at any depth, in any normalised spelling) is refused and nothing is written; the database sets those four values itself from the run record. The flagship sends none of them, and `check-exports` holds that (rule `started_db_keys`).

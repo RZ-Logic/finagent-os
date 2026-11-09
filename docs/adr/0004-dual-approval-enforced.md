@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Accepted pending owner sign-off. Built and tested locally on branch `phase2-5-core-2026-11-07` (dual approval run 0, 2026-11-08; run again after fix rounds 1 and 2, fix round 2 at 2026-11-08T06:04:54Z with 2313 of 2313 passing, and again after the doc fixes at 2026-11-08T17:29:49Z, 2313 of 2313); not deployed. Live runs v1 until a landing path has run and its smoke passed. |
+| **Status** | Accepted pending owner sign-off. Built and tested locally on branch `phase2-5-core-2026-11-07` (dual approval run 0, 2026-11-08; run again after fix rounds 1 and 2, fix round 2 at 2026-11-08T06:04:54Z with 2313 of 2313 passing, and again after the doc fixes at 2026-11-08T17:29:49Z, 2313 of 2313); deployed 2026-11-09 inside the core cutover. |
 | **Date** | 2026-11-08 |
 | **Author** | Rizwan Ahmed, ACCA · Velocyt Consulting |
 | **Supersedes** | [ADR-0001](0001-dual-approval-not-yet-enforced.md) |
@@ -43,7 +43,7 @@ Design choices C1 to C18 (DUAL-APPROVAL.md 1.3), in short:
 
 ## Consequences
 
-- The flagship's CRITICAL review now needs two approvals from two signed-in identities, neither of them the invoker, each holding a grant made before the request by someone other than the invoker and other than the co-approver. Any one rejection closes it.
+- The flagship's CRITICAL review now needs two approvals from two signed-in identities, neither of them the invoker, each holding a grant made before the request by someone other than the invoker and other than the co-approver. Any one rejection closes it. The live smoke run on 2026-11-09 decided a CRITICAL request with two approvals (Sarah, Marcus) and refused the invoker's own approval (`SOD_SELF_APPROVAL`). The owner entered both approvals and the rejection, signed in as each demo identity in turn, so the smoke proves two distinct identities on live, not two people (DL-8).
 - An admin who approves can no longer supply the second approval by granting the approver role to another identity directly, before or during the request. An indirect chain still works: if, before the request, the admin makes a second identity an admin and that identity grants the approver role to a third, the third identity's approval counts, because its granter did not approve the request (DL-8). Every grant records who made it and when.
 - STANDARD review and requests created before dual approval landed keep one approval.
 - Each landing path (inside the core cutover, or after the core is live) is a runbook the owner approves step by step (BUILD-CORE 9.10). DA-4 applies at decision time, so on the later path a holder of a grant made after a pending request opened, or made by its invoker, can no longer decide that request; the pre-flight lists those grants.

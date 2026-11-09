@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Superseded by ADR-0004 (2026-11-08): dual approval is built and tested on branch `phase2-5-core-2026-11-07`, not yet deployed. Kept as the record. |
+| **Status** | Superseded by ADR-0004 (2026-11-08): dual approval was built and tested on branch `phase2-5-core-2026-11-07` and deployed 2026-11-09. Kept as the record. |
 | **Date** | 2026-04-25 (decision); 2026-11 (update) |
 | **Discovered by** | Claude Opus, via MCP self-audit ([transcript](https://claude.ai/share/5f0eb294-e658-42b5-a876-8164a0049960)) |
 | **Author** | Rizwan Ahmed, ACCA · Velocyt Consulting |
@@ -16,10 +16,10 @@
 
 ## Where things stand (2026-11)
 
-- **Live** still runs v1 until the cutover. Everything in v1's description below is what the live system does today.
-- **The phases 2 to 5 core** is built and tested on the branch `phase2-5-core-2026-11-07` (local Supabase and a local n8n only). It binds the invoker and the approver to their own Supabase Auth sessions. At the time of the core build (2026-11-07) it did not enforce dual approval.
+- **Live** ran v1 until the cutover finished on 2026-11-09. Everything in v1's description below is what the live system did until then.
+- **The phases 2 to 5 core** was built and tested on the branch `phase2-5-core-2026-11-07` (local Supabase and a local n8n) and deployed to live on 2026-11-09. It binds the invoker and the approver to their own Supabase Auth sessions. At the time of the core build (2026-11-07) it did not enforce dual approval.
 - **At the time of the core build, dual approval was excluded from the core.** It was the last planned edit. The core left the hooks for it (see "How dual approval plugs in later"); no part of it was built then.
-- **Dual approval is now built on the branch (2026-11-08, [ADR-0004](0004-dual-approval-enforced.md)).** CRITICAL review needs the configured count (two for the RED flagship) from different approvers, never the invoker, each through an approver grant made before the request, not by the invoker and not by another approver of it; one rejection closes the request. Tested locally only; live still runs v1.
+- **Dual approval was built on the branch (2026-11-08, [ADR-0004](0004-dual-approval-enforced.md)) and deployed with the core on 2026-11-09.** CRITICAL review needs the configured count (two for the RED flagship) from different approvers, never the invoker, each through an approver grant made before the request, not by the invoker and not by another approver of it; one rejection closes the request.
 
 The 2026-04-25 context and decision are kept below as the record. The v1.1 implementation sketch that used to follow them has been removed, because its design no longer fits the schema (see the addendum). The earlier text is in git history.
 
@@ -106,7 +106,7 @@ Dual approval is not a one-line fix. It needs a record of each approval, a count
 
 ## Consequences
 
-### For v1 (live until the cutover)
+### For v1 (live until the cutover on 2026-11-09)
 
 1. RED-tier executions at CRITICAL sub-tier are gated by **single-approver SoD only**. The first approver who is not the recorded invoker resolves the queue.
 2. Same-identity self-approval through `fao_hitl_resolve` raises a named `FAO-GOV-004` exception. Neither identity is authenticated in v1 (addendum items 3 and 4).
@@ -116,14 +116,14 @@ Dual approval is not a one-line fix. It needs a record of each approval, a count
 ### For the audit trail
 
 1. The existing `shadow_ledger` rows record what the system was told: the approver named in each approval request. No retroactive correction is made; the append-only constraint forbids it anyway (addendum item 2).
-2. RED-tier CRITICAL executions continue to resolve on a single approval until dual approval is built. This is documented behaviour, not a regression.
-3. At the cutover, migration 0013 closes any request still PENDING from v1 as EXPIRED; it is not decided under the new rules.
+2. RED-tier CRITICAL executions continued to resolve on a single approval until dual approval was deployed on 2026-11-09. This was documented behaviour, not a regression.
+3. At the cutover, migration 0013 closed the 4 requests still PENDING from v1 as EXPIRED; none was decided under the new rules.
 
 ---
 
 ## Identity and segregation of duties in the phases 2 to 5 core
 
-This is what the code on the branch does. It is tested locally (pgTAP, API, MCP, unit and n8n end-to-end layers); it is not deployed.
+This is what the core does. It was tested locally (pgTAP, API, MCP, unit and n8n end-to-end layers) and deployed on 2026-11-09 together with dual approval, which changes the approval counts below ([ADR-0004](0004-dual-approval-enforced.md)).
 
 ### Invoker
 
@@ -141,10 +141,10 @@ This is what the code on the branch does. It is tested locally (pgTAP, API, MCP,
 - An APPROVED decision is not committed when the agent is no longer ACTIVE (`AGENT_NOT_ACTIVE`) or the run's invoker is no longer an active owner holding the invoker grant (`INVOKER_NOT_ACTIVE`). The decision stands, COMMIT_BLOCKED is written and the run is FAILED. The same invoker check runs at finalize.
 - The v1 path is retired: `fao_hitl_resolve` now raises `FAO-GOV-004 fao_hitl_resolve is superseded by fao_hitl_decide`, and the v1 trigger `hitl_queue_sod_guard` is dropped in favour of the guards above.
 
-### Approval counts today
+### Approval counts at the core build (2026-11-07, before ADR-0004)
 
-- Each request freezes `configured_approvals` (the registry's `approval_threshold` at request time: 2 for the flagship) and `enforced_approvals` (always 1 today).
-- HITL_RESOLVED carries `approvers[]` (one element today) and both counts, and its rationale reads `approvals enforced 1 of configured 2` for the flagship. The gap is visible on every decided request.
+- Each request freezes `configured_approvals` (the registry's `approval_threshold` at request time: 2 for the flagship) and `enforced_approvals` (always 1 at the time).
+- HITL_RESOLVED carries `approvers[]` (one element at the time) and both counts, and its rationale reads `approvals enforced 1 of configured 2` for the flagship. The gap was visible on every request decided before ADR-0004.
 
 ### Still outside the control
 
@@ -158,7 +158,7 @@ This is what the code on the branch does. It is tested locally (pgTAP, API, MCP,
 
 ## How dual approval plugs in later
 
-Not built. The core leaves these hooks so dual approval adds code without reworking it:
+Not built in the core (2026-11-07); [ADR-0004](0004-dual-approval-enforced.md) records how it was built on these hooks. The core leaves these hooks so dual approval adds code without reworking it:
 
 - **Identity:** every decision is keyed by the approver's own session, so two approvals are two distinct user ids.
 - **Counts:** `configured_approvals` and `sub_tier` are already frozen on every request. The dual-approval migration sets `enforced_approvals` from its rule for new requests; requests still PENDING when it lands keep 1.
@@ -174,8 +174,8 @@ Not built. The core leaves these hooks so dual approval adds code without rework
 - [MCP self-audit transcript (Apr 25, 2026)](https://claude.ai/share/5f0eb294-e658-42b5-a876-8164a0049960): Claude Opus discovering the gap
 - [`docs/evidence/mcp/mcp_03_dual_approval_gap_surfaced.png`](../evidence/mcp/mcp_03_dual_approval_gap_surfaced.png): screenshot of the surfacing turn
 - [Migration 0003, `agent_registry`](../../supabase/migrations/20260420_0003_agent_registry.sql): declares `approval_threshold`
-- [Migration 0005b, `hitl_queue` SoD trigger](../../supabase/migrations/20260420_0005b_hitl_queue_sod_trigger.sql): v1 single-approver check (dropped by 0013 on the branch)
-- [Migration 0008, `fao_hitl_resolve` function](../../supabase/migrations/20260425_0008_fao_hitl_resolve_function.sql): v1 resolution logic (superseded by 0015 on the branch)
+- [Migration 0005b, `hitl_queue` SoD trigger](../../supabase/migrations/20260420_0005b_hitl_queue_sod_trigger.sql): v1 single-approver check (dropped by 0013, deployed 2026-11-09)
+- [Migration 0008, `fao_hitl_resolve` function](../../supabase/migrations/20260425_0008_fao_hitl_resolve_function.sql): v1 resolution logic (superseded by 0015, deployed 2026-11-09)
 - [Migration 0013, guards and policies](../../supabase/migrations/20261107_0013_guards_and_policies.sql): row guard, retired v1 trigger, closing of v1 PENDING requests
 - [Migration 0014, run RPCs](../../supabase/migrations/20261107_0014_run_rpcs.sql): `fao_run_start`, `fao_run_claim`, `fao_run_finalize`
 - [Migration 0015, HITL RPCs](../../supabase/migrations/20261107_0015_hitl_rpcs.sql): `fao_hitl_decide`, `fao_hitl_get`
@@ -186,11 +186,11 @@ Not built. The core leaves these hooks so dual approval adds code without rework
 
 ## Addendum (2026-11): review corrections
 
-Two external reviews of v1 (November 2026) found that several statements in this ADR describe a stronger control than the v1 code provides. The corrections below apply to v1, which stays live until the cutover. Line numbers in the review findings referred to the 2026-04-25 text; the items below name the statements instead.
+Two external reviews of v1 (November 2026) found that several statements in this ADR describe a stronger control than the v1 code provides. The corrections below apply to v1, which was live until the cutover on 2026-11-09. Line numbers in the review findings referred to the 2026-04-25 text; the items below name the statements instead.
 
 ### Statements that are not accurate as of v1
 
-The root cause is the same for each: in v1, approver identity comes from the approval request, and the invoker is a fixed demo identity set by the flagship workflow. Neither is bound to an authenticated session, so the v1 control compares recorded identities; it does not bind identities to people. The v1 approval endpoints are demo only: unauthenticated and not hardened for production. The phases 2 to 5 core binds both identities to sessions on the branch (section above); live keeps the v1 behaviour until the cutover.
+The root cause is the same for each: in v1, approver identity comes from the approval request, and the invoker is a fixed demo identity set by the flagship workflow. Neither is bound to an authenticated session, so the v1 control compares recorded identities; it does not bind identities to people. The v1 approval endpoints were demo only: unauthenticated and not hardened for production. The phases 2 to 5 core binds both identities to sessions (section above); live kept the v1 behaviour until the cutover on 2026-11-09, when the v1 approval handler was archived (its webhooks return 404).
 
 1. **Reviewed by**, the former text *"FAO-GOV-013 separation activates when a second authenticated identity is added to `process_owners`"*. The seed already contains three demo identities. Adding identities does not activate separation; what is missing in v1 is binding the approver and invoker to authenticated sessions, and change review by someone other than the author.
 2. **"The audit trail is honest"** (and *"accurately record what happened"*). The v1 ledger accurately records the approver identity named in the approval request. It does not show that the named person made the approval.
@@ -202,7 +202,7 @@ The root cause is the same for each: in v1, approver identity comes from the app
 
 The removed sketch proposed `required_approvals` and `approvals_received` columns, a `hitl_approvals` table, a replacement for `fao_hitl_resolve`, and a new `IN_PROGRESS` value. The reviews found two problems, which is why it was removed:
 
-- A `hitl_approvals` table with `UNIQUE (hitl_id, approver_id)` alone would not stop one person supplying two approvals while approver identity is not authenticated. Dual approval depends on identity binding landing first. The core now does that on the branch.
+- A `hitl_approvals` table with `UNIQUE (hitl_id, approver_id)` alone would not stop one person supplying two approvals while approver identity is not authenticated. Dual approval depends on identity binding landing first. The core does that (deployed 2026-11-09).
 - The `IN_PROGRESS` state does not fit the schema. The `hitl_queue` column is `decision`, of enum `hitl_decision`, not `hitl_status`; `hitl_status` is the Shadow Ledger enum. The coherence CHECK allows only defined pairs of decision, approver and decided time. The plan above keeps the request PENDING until the count is met, so no new value is needed.
 
 The core also does not add `required_approvals` or `approvals_received` columns; requests record `configured_approvals` and `enforced_approvals` instead.
@@ -213,4 +213,4 @@ The README section this ADR cites is titled **Known Limitations**: [README §Kno
 
 ### Migration comments
 
-Some v1 SQL migration comments describe stronger guarantees than the v1 code provides. Examples: Migration 0004 says the append-only trigger has *"no bypass"*; it rejects row-level UPDATE and DELETE but is not an administrator-proof boundary. The Migration 0005 table and column comments still say SoD is *"enforced at RLS layer"* after Migration 0005c moved enforcement to the trigger, and the 0005b comments describe the trigger as complementary to that RLS policy. The Migration 0008 header says the trigger fires correctly *"regardless of who claims to be approving"*, which holds only for the same-identity case in item 3. These migration files are applied history and are left unchanged. On the branch, migration 0013 replaces the `hitl_queue`, `approver_id` and `agent_invoker_id` comments with ones that describe the current controls; this addendum and [SOX-MAPPING.md](../../SOX-MAPPING.md) carry the corrected v1 statements.
+Some v1 SQL migration comments describe stronger guarantees than the v1 code provides. Examples: Migration 0004 says the append-only trigger has *"no bypass"*; it rejects row-level UPDATE and DELETE but is not an administrator-proof boundary. The Migration 0005 table and column comments still say SoD is *"enforced at RLS layer"* after Migration 0005c moved enforcement to the trigger, and the 0005b comments describe the trigger as complementary to that RLS policy. The Migration 0008 header says the trigger fires correctly *"regardless of who claims to be approving"*, which holds only for the same-identity case in item 3. These migration files are applied history and are left unchanged. Migration 0013 (deployed 2026-11-09) replaces the `hitl_queue`, `approver_id` and `agent_invoker_id` comments with ones that describe the current controls; this addendum and [SOX-MAPPING.md](../../SOX-MAPPING.md) carry the corrected v1 statements.

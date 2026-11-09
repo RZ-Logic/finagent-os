@@ -4,7 +4,7 @@ Python [FastMCP](https://gofastmcp.com) server exposing a deliberately asymmetri
 
 **Six read tools and one bounded invoke tool. No governance-mutation tools exist.** AI consumers can read the FinAgent OS audit trail and start a governed run as a named human; they cannot approve or reject HITL requests, edit materiality thresholds, register agents, or write to `shadow_ledger`. The database enforces the same limits independently: the server reads as a user that holds only the `reader` role, and it holds no service key.
 
-**Status:** this README describes the server on the branch `phase2-5-core-2026-11-07`, tested against a local Supabase stack only. Live still runs the v1 server (which holds a service key) until the cutover.
+**Status:** live since the cutover (2026-11-09 UTC), from commit `c9c2fc0` of the branch `phase2-5-core-2026-11-07`. The live `mcp/.env` holds the publishable key, the reader user and the invoke webhook URL and key; no service or secret key. The invoker is left unset on purpose, so `invoke_reserve_recon` refuses with `NO_USER_CREDENTIAL` and sends nothing (approvals have no second factor yet; see below). The live check of the server against the live project passed 21 of 21 on 2026-11-09 (on the rerun: the first run's INSERT probe named a missing column and failed with 400 before the privilege check, so the probe was corrected): reader gate, 7 tools with none that approves, the six read tools `ok`, the invoke refusal, and the reader's writes refused by the database. For the live functional smoke the same day, the invoke tool started two runs as Aisha (one approved by Sarah and Marcus, one started by mistake and rejected by Sarah), each with her password given only to the server process for that run, never stored. The v1 server, which held a service key, is retired; the project's legacy `anon` and `service_role` keys are disabled.
 
 For platform context, see the [root README](../README.md). For the SOX control mapping, see [`SOX-MAPPING.md`](../SOX-MAPPING.md).
 
@@ -60,7 +60,7 @@ The server also refuses to start when `SUPABASE_SERVICE_KEY` or `SUPABASE_SECRET
 
 The invoker is recorded by the database from the session (`auth.uid()`), never from a tool argument or a payload field. The webhook receives only `{run_token}`, a single-use token that n8n claims through `fao_run_claim`; the claim returns the invoker, agent and tier the database recorded. A stolen token is useless once claimed, and it expires.
 
-Until approvals require a second factor, a stored password is enough to approve for anyone who holds the approver role. Set `FAO_INVOKER_EMAIL` only to a user without the approver role, or leave it unset.
+Until approvals require a second factor, a stored password is enough to approve for anyone who holds the approver role. Set `FAO_INVOKER_EMAIL` only to a user without the approver role, or leave it unset. Live leaves it unset.
 
 ### Bounded inputs and filters
 
@@ -166,7 +166,7 @@ Use the virtual environment's own Python so the pinned packages are found, and d
 
 On Apr 25, 2026, after the v1 server shipped, Claude Opus was given access through the MCP read surface and asked to narrate the most recent execution, approve a pending HITL request, and red-team the system. Semantic searches for approve, resolve, decision, write, commit, override and bypass returned only tools that cannot mutate HITL state. That self-audit tested the tool surface only, not the approval layer, which in v1 was a demo endpoint without authentication. It also surfaced a real gap: the dual-approval wording in `policy_rationale` was not wired in code, documented as [ADR-0001](../docs/adr/0001-dual-approval-not-yet-enforced.md). Full transcript: [claude.ai/share/5f0eb294-e658-42b5-a876-8164a0049960](https://claude.ai/share/5f0eb294-e658-42b5-a876-8164a0049960). Evidence: [`docs/evidence/mcp/`](../docs/evidence/mcp/).
 
-On the branch, the approval layer is the signed-in approval page and `fao_hitl_decide`, and the server no longer holds a service key. Live keeps the v1 server and approval endpoints until the cutover.
+Since the cutover (2026-11-09), the approval layer is the signed-in approval page and `fao_hitl_decide`, and the server holds no service key. The v1 approval handler is archived and its webhooks return 404.
 
 ---
 

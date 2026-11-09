@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Accepted pending owner sign-off. Built on branch `phase2-5-core-2026-11-07`; not yet deployed (live runs v1 until the cutover). |
+| **Status** | Accepted pending owner sign-off. Built on branch `phase2-5-core-2026-11-07`; deployed 2026-11-09. |
 | **Date** | 2026-11-07 |
 | **Author** | Rizwan Ahmed, ACCA · Velocyt Consulting |
 | **Supersedes** | None |

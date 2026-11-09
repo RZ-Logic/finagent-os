@@ -101,9 +101,9 @@ surplus up to 1.05 ALLOWs whatever its USD size. With the seeded floor and
 band lower of 1.00, a stablecoin shortfall is BELOW_FLOOR (rule 3, CRITICAL)
 before rule 5 is tested, so rule 5 fires only for a stablecoin threshold
 whose floor is below 1.00; `policy_branches.json` covers it with a
-per-case `thresholds_override` (floor 0.98, band lower 0.99). The v1 seed held 1.0050; the live table keeps
-that value until the cutover runbook step applies 1.05 through
-`fao_admin_set_threshold`. `policy_branches.json` carries the 1.05 band and
+per-case `thresholds_override` (floor 0.98, band lower 0.99). The v1 seed held 1.0050; the live table was
+moved to 1.05 on 2026-11-08 (cutover step 7), by Marcus in his own session
+through `fao_admin_set_threshold`. `policy_branches.json` carries the 1.05 band and
 these stablecoin cases: `stablecoin_in_band_near_105` (ratio 1.04, ALLOW,
 which the old 1.005 band escalated), `stablecoin_above_band_upper` (ratio
 1.051), `stablecoin_surplus_in_band_above_materiality` (the flagship USDT,

@@ -4,7 +4,7 @@ This directory holds the exported n8n workflow JSON files. They are machine-gene
 
 For the SOX control mapping, see [`../SOX-MAPPING.md`](../SOX-MAPPING.md).
 
-**Status:** these exports are on the branch `phase2-5-core-2026-11-07`. They are checked offline and run end to end against a local n8n 2.46.6 and a local Supabase stack (`test/e2e`). They are not imported on live; live still runs the v1 workflows until the cutover.
+**Status:** live. The five production exports (commit `c9c2fc0` of the branch `phase2-5-core-2026-11-07`) were imported with their ids into the self-hosted n8n 2.46.6 on 2026-11-08 and published on 2026-11-09 (UTC) in the order under [How to import](#how-to-import), with only the credential references pointed at the three live credentials. A re-export of the five live workflows equals these files (no logic difference). They are also checked offline and run end to end against a local n8n 2.46.6 and a local Supabase stack (`test/e2e`). The v1 workflows are retired: `fao_hitl_approval_handler_v2` is archived and its webhooks return 404; the invoke webhook refuses a call without the key with 403.
 
 ---
 
@@ -24,7 +24,7 @@ n8n never supplies identity and never decides. A run starts when a signed-in hum
 | [`test_writer_harness_multi_item.json`](./test_writer_harness_multi_item.json) | `Test Writer Harness (Multi-Item)` (`OV7ukqcVKYfNXKHa`) | Writer positive and negative batch | Manual, test instances only |
 | [`test_hitl_gateway_harness.json`](./test_hitl_gateway_harness.json) | `Test HITL Gateway Harness` (`V87nEh6HALqINIDz`) | Starts a real run through the invoke webhook | Manual, test instances only |
 
-**Retired:** `fao_hitl_approval_handler_v2` is deleted from this directory. Its jobs moved: the decision and its ledger events to the database function `fao_hitl_decide`, the page to `approval-app/`, follow-up notifications to the sweeper. The live copy is archived at cutover and kept in the backup export.
+**Retired:** `fao_hitl_approval_handler_v2` is deleted from this directory. Its jobs moved: the decision and its ledger events to the database function `fao_hitl_decide`, the page to `approval-app/`, follow-up notifications to the sweeper. The live copy was archived in n8n at the cutover (2026-11-09); its webhooks return 404.
 
 ---
 
@@ -181,6 +181,8 @@ The exports reference three credentials by name, with fixed placeholder ids. Not
 | `FAO Invoke Header Auth` | `httpHeaderAuth` | `FaoInvokeHdr0001` | the flagship webhook; header name `X-FAO-Invoke-Key` |
 | `FAO Slack Bot` | `slackApi` | `FaoSlackBot00001` | Slack: Post Message |
 
+The Postgres credential connects through the Supabase session pooler with SSL Require and certificate verification on (Ignore SSL Issues off). Supabase pooler certificates chain to the Supabase Root 2021 CA, which Node does not trust by default, so the n8n host must trust that CA: download the root certificate from the Supabase dashboard, mount it read-only into the n8n container and set `NODE_EXTRA_CA_CERTS` to its path. Without it the connection test fails with "self-signed certificate in certificate chain". Live does this (cutover step 10, 2026-11-08).
+
 ## How to import
 
 These steps are for n8n 2.x; the exports and the e2e layer are checked against n8n 2.46.6 (`test/env/versions.json`). In n8n 2.x "Activate" became **Publish**, and every one of the five production workflows must be published, not only the two with a webhook or schedule trigger:
@@ -189,7 +191,7 @@ These steps are for n8n 2.x; the exports and the e2e layer are checked against n
 - An error workflow runs only when it is published. An unpublished `fao_error_handler_v1` is skipped with only a log line, `fao_run_fail` is never called, and a failed run waits for the sweep's stale-run timeout instead.
 - `n8n import:workflow` imports every workflow unpublished (`--activeState=fromJson` works only in queue mode), and the editor refuses to publish a workflow while a sub-workflow it calls is unpublished.
 
-1. Create the three credentials above in n8n with exactly these names (the Postgres one connects as `fao_workflow`; the header auth one uses header name `X-FAO-Invoke-Key` and a new random value; the Slack one holds the bot token).
+1. Create the three credentials above in n8n with exactly these names (the Postgres one connects as `fao_workflow`, with SSL verified against the Supabase Root 2021 CA as described under Credentials; the header auth one uses header name `X-FAO-Invoke-Key` and a new random value; the Slack one holds the bot token).
 2. Import every production export, keeping ids: `n8n import:workflow --separate --input=<directory with the five production files>` (or *Workflows, Import from File* for each). Import order when importing one at a time: `writer.json`, `fao_error_handler_v1.json`, `fao_hitl_gateway_v1.json`, `fao_hitl_sweeper_v1.json`, `fao_reserve_recon_v1.json`.
 3. Open each Postgres, webhook and Slack node and select the credential by name (the placeholder ids do not exist on a new instance).
 4. Check the settings of the flagship, `fao_hitl_gateway_v1` and `fao_hitl_sweeper_v1` each show `fao_error_handler_v1` as the error workflow and a timeout of 600, 120 and 300 seconds (10 min, 2 min, 5 min). Check the instance's `EXECUTIONS_TIMEOUT_MAX` is at least 600 (n8n's default is 3600).

@@ -152,7 +152,11 @@ function writeImport(users, secrets) {
       data: { accessToken: secrets.slack_token },
     },
   ];
-  writeFileSync(join(IMPORT_DIR, 'credentials.json'), JSON.stringify(credentials, null, 2), { mode: 0o600 });
+  // 0644, not 0600: the import container reads this file through a bind mount as the image's `node`
+  // user, which on Linux runners is a different uid from the file's owner (Docker Desktop on Windows
+  // ignores the mode, so 0600 only failed in CI). The values are throwaway test values for the local
+  // stack, and up() deletes the file as soon as the import container exits.
+  writeFileSync(join(IMPORT_DIR, 'credentials.json'), JSON.stringify(credentials, null, 2), { mode: 0o644 });
   const set = buildWorkflowSet(ROOT);
   for (const [file, wf] of Object.entries(set)) {
     writeFileSync(join(IMPORT_DIR, 'workflows', file), `${JSON.stringify(wf, null, 2)}\n`);
@@ -222,6 +226,7 @@ async function up() {
     '--mount', `type=bind,source=${IMPORT_DIR},target=/import,readonly`,
     '--entrypoint', 'sh', image, '-c', script,
   ], { allowFail: true, timeout: 600000 });
+  rmSync(join(IMPORT_DIR, 'credentials.json'), { force: true });
   writeFileSync(join(E2E_DIR, 'import.log'), imp.out);
   const importProblems = [];
   if (imp.status !== 0) importProblems.push(`import container exit ${imp.status}`);
